@@ -1,0 +1,9 @@
+# Never upload your bot token
+.env
+
+# Local roster/config data — not needed in the repo
+guild_config.json
+
+# Python cache
+__pycache__/
+*.pyc
