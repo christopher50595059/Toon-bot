@@ -5,7 +5,7 @@ Lets authorized staff assign/remove roles (staff positions, tiers, etc.)
 with a simple slash command, and logs every action to a chosen channel.
 
 Commands:
-  /addrole user:<member> role:<role>      - give a role to a member
+  /addrole user:<member> role:<role> reason:<text> - give a role to a member, with a required reason
   /removerole user:<member> role:<role>   - remove a role from a member
   /setlogchannel channel:<channel>        - (admin only) set where actions are logged
   /setmanagerrole role:<role>             - (admin only) set which role is allowed to use /addrole & /removerole
@@ -246,8 +246,8 @@ async def setranks(
 # ---------- role assignment commands ----------
 
 @bot.tree.command(name="addrole", description="Give a role to a member (e.g. promote to staff or a tier).")
-@app_commands.describe(user="The member to give the role to", role="The role to assign")
-async def addrole(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
+@app_commands.describe(user="The member to give the role to", role="The role to assign", reason="Why you're giving this role")
+async def addrole(interaction: discord.Interaction, user: discord.Member, role: discord.Role, reason: str):
     if not is_authorized(interaction):
         await interaction.response.send_message(
             "❌ You don't have permission to use this command.", ephemeral=True
@@ -270,13 +270,13 @@ async def addrole(interaction: discord.Interaction, user: discord.Member, role: 
         )
         return
 
-    await user.add_roles(role, reason=f"Added by {interaction.user} via /addrole")
+    await user.add_roles(role, reason=f"Added by {interaction.user} via /addrole: {reason}")
     await interaction.response.send_message(
-        f"✅ Gave {role.mention} to {user.mention}.", ephemeral=True
+        f"✅ Gave {role.mention} to {user.mention}. Reason: {reason}", ephemeral=True
     )
     await log_action(
         interaction.guild,
-        f"🟢 {interaction.user.mention} gave {role.mention} to {user.mention}.",
+        f"🟢 {interaction.user.mention} gave {role.mention} to {user.mention}. Reason: {reason}",
         discord.Color.green(),
     )
 
