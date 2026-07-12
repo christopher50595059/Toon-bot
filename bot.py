@@ -74,7 +74,15 @@ async def on_ready():
         print(f"Sync failed: {e}")
 
 
-async def log_action(guild: discord.Guild, message: str, color: discord.Color):
+async def log_action(
+    guild: discord.Guild,
+    title: str,
+    color: discord.Color,
+    member: discord.Member,
+    moderator: discord.Member,
+    fields: dict = None,
+):
+    """Post a structured, nicely formatted log embed to the configured log channel."""
     cfg = get_guild_cfg(guild.id)
     channel_id = cfg.get("log_channel_id")
     if not channel_id:
@@ -82,7 +90,18 @@ async def log_action(guild: discord.Guild, message: str, color: discord.Color):
     channel = guild.get_channel(channel_id)
     if channel is None:
         return
-    embed = discord.Embed(description=message, color=color)
+
+    embed = discord.Embed(title=title, color=color, timestamp=discord.utils.utcnow())
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="Member", value=member.mention, inline=True)
+    embed.add_field(name="Moderator", value=moderator.mention, inline=True)
+
+    if fields:
+        for name, value in fields.items():
+            embed.add_field(name=name, value=value, inline=False)
+
+    embed.set_footer(text=f"User ID: {member.id}")
+
     try:
         await channel.send(embed=embed)
     except discord.Forbidden:
@@ -276,8 +295,11 @@ async def addrole(interaction: discord.Interaction, user: discord.Member, role: 
     )
     await log_action(
         interaction.guild,
-        f"🟢 {interaction.user.mention} gave {role.mention} to {user.mention}. Reason: {reason}",
-        discord.Color.green(),
+        title="🟢 Role Added",
+        color=discord.Color.green(),
+        member=user,
+        moderator=interaction.user,
+        fields={"Role": role.mention, "Reason": reason},
     )
 
 
@@ -302,8 +324,11 @@ async def removerole(interaction: discord.Interaction, user: discord.Member, rol
     )
     await log_action(
         interaction.guild,
-        f"🔴 {interaction.user.mention} removed {role.mention} from {user.mention}.",
-        discord.Color.red(),
+        title="🔴 Role Removed",
+        color=discord.Color.red(),
+        member=user,
+        moderator=interaction.user,
+        fields={"Role": role.mention},
     )
 
 
@@ -378,8 +403,11 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
         )
         await log_action(
             interaction.guild,
-            f"📋 {interaction.user.mention} moved {user.mention} from {old_label} to {rank.mention}.",
-            discord.Color.blurple(),
+            title="📋 Roster Rank Changed",
+            color=discord.Color.blurple(),
+            member=user,
+            moderator=interaction.user,
+            fields={"Previous Rank": old_label, "New Rank": rank.mention},
         )
         await refresh_roster_message(interaction.guild)
         return
@@ -392,8 +420,11 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
     )
     await log_action(
         interaction.guild,
-        f"📋 {interaction.user.mention} added {user.mention} to the roster as {rank.mention}.",
-        discord.Color.blurple(),
+        title="📋 Added to Roster",
+        color=discord.Color.blurple(),
+        member=user,
+        moderator=interaction.user,
+        fields={"Rank": rank.mention},
     )
     await refresh_roster_message(interaction.guild)
 
@@ -425,8 +456,10 @@ async def rosterremove(interaction: discord.Interaction, user: discord.Member):
     )
     await log_action(
         interaction.guild,
-        f"📋 {interaction.user.mention} removed {user.mention} from the roster.",
-        discord.Color.orange(),
+        title="📋 Removed from Roster",
+        color=discord.Color.orange(),
+        member=user,
+        moderator=interaction.user,
     )
     await refresh_roster_message(interaction.guild)
 
