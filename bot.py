@@ -5,12 +5,14 @@ Lets authorized staff assign/remove roles (staff positions, tiers, etc.)
 with a simple slash command, and logs every action to a chosen channel.
 
 Commands:
-  /addrole user:<member> role:<role> reason:<text> - give a role to a member, with a required reason
-  /removerole user:<member> role:<role>   - remove a role from a member
+  /addrole user:<member> role:<role> reason:<text>   - give a role to a member
+  /removerole user:<member> role:<role> reason:<text> - remove a role from a member
   /setlogchannel channel:<channel>        - (admin only) set where actions are logged
-  /setmanagerrole role:<role>             - (admin only) set which role is allowed to use /addrole & /removerole
-  /rosteradd user:<member> rank:<role>    - add a member to the roster at a rank AND give them that role
-  /rosterremove user:<member>             - remove a member from the roster
+  /setmanagerrole role:<role>             - (admin only) set which role is allowed to use these commands
+  /rosteradd user:<member> rank:<role> reason:<text>   - add/move a member on the roster AND give them that role
+  /rosterremove user:<member> reason:<text>            - remove a member from the roster
+  /promote user:<member> reason:<text>    - move a member up one rank (per /setranks order)
+  /demote user:<member> reason:<text>     - move a member down one rank (per /setranks order)
   /roster                                 - show the current roster, grouped by rank
   /setrosterchannel channel:<channel>     - (admin only) post a live roster embed that auto-updates in this channel
   /setranks rank1:<role> [rank2]...[rank8]  - (admin only) set the ordered rank roles (highest first)
@@ -304,8 +306,8 @@ async def addrole(interaction: discord.Interaction, user: discord.Member, role: 
 
 
 @bot.tree.command(name="removerole", description="Remove a role from a member.")
-@app_commands.describe(user="The member to remove the role from", role="The role to remove")
-async def removerole(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
+@app_commands.describe(user="The member to remove the role from", role="The role to remove", reason="Why you're removing this role")
+async def removerole(interaction: discord.Interaction, user: discord.Member, role: discord.Role, reason: str):
     if not is_authorized(interaction):
         await interaction.response.send_message(
             "❌ You don't have permission to use this command.", ephemeral=True
@@ -318,9 +320,9 @@ async def removerole(interaction: discord.Interaction, user: discord.Member, rol
         )
         return
 
-    await user.remove_roles(role, reason=f"Removed by {interaction.user} via /removerole")
+    await user.remove_roles(role, reason=f"Removed by {interaction.user} via /removerole: {reason}")
     await interaction.response.send_message(
-        f"✅ Removed {role.mention} from {user.mention}.", ephemeral=True
+        f"✅ Removed {role.mention} from {user.mention}. Reason: {reason}", ephemeral=True
     )
     await log_action(
         interaction.guild,
@@ -328,15 +330,15 @@ async def removerole(interaction: discord.Interaction, user: discord.Member, rol
         color=discord.Color.red(),
         member=user,
         moderator=interaction.user,
-        fields={"Role": role.mention},
+        fields={"Role": role.mention, "Reason": reason},
     )
 
 
 # ---------- roster commands ----------
 
 @bot.tree.command(name="rosteradd", description="Add a member to the roster at a rank and give them that role.")
-@app_commands.describe(user="The member to add to the roster", rank="The rank role to place them at")
-async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank: discord.Role):
+@app_commands.describe(user="The member to add to the roster", rank="The rank role to place them at", reason="Why you're adding/moving them")
+async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank: discord.Role, reason: str):
     if not is_authorized(interaction):
         await interaction.response.send_message(
             "❌ You don't have permission to use this command.", ephemeral=True
@@ -377,13 +379,13 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
     role_change_notes = []
     try:
         if rank not in user.roles:
-            await user.add_roles(rank, reason=f"Added by {interaction.user} via /rosteradd")
+            await user.add_roles(rank, reason=f"Added by {interaction.user} via /rosteradd: {reason}")
             role_change_notes.append(f"gave them {rank.mention}")
 
         if existing:
             old_rank_role = interaction.guild.get_role(existing.get("rank_role_id"))
             if old_rank_role and old_rank_role.id != rank.id and old_rank_role in user.roles:
-                await user.remove_roles(old_rank_role, reason=f"Rank changed by {interaction.user} via /rosteradd")
+                await user.remove_roles(old_rank_role, reason=f"Rank changed by {interaction.user} via /rosteradd: {reason}")
                 role_change_notes.append(f"removed {old_rank_role.mention}")
     except discord.Forbidden:
         await interaction.response.send_message(
@@ -399,7 +401,7 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
         save_config(config)
         summary = f" ({', '.join(role_change_notes)})" if role_change_notes else ""
         await interaction.response.send_message(
-            f"✅ Moved {user.mention} from {old_label} to {rank.mention}{summary}.", ephemeral=True
+            f"✅ Moved {user.mention} from {old_label} to {rank.mention}{summary}. Reason: {reason}", ephemeral=True
         )
         await log_action(
             interaction.guild,
@@ -407,7 +409,7 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
             color=discord.Color.blurple(),
             member=user,
             moderator=interaction.user,
-            fields={"Previous Rank": old_label, "New Rank": rank.mention},
+            fields={"Previous Rank": old_label, "New Rank": rank.mention, "Reason": reason},
         )
         await refresh_roster_message(interaction.guild)
         return
@@ -416,7 +418,7 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
     save_config(config)
 
     await interaction.response.send_message(
-        f"✅ Added {user.mention} to the roster and gave them {rank.mention}.", ephemeral=True
+        f"✅ Added {user.mention} to the roster and gave them {rank.mention}. Reason: {reason}", ephemeral=True
     )
     await log_action(
         interaction.guild,
@@ -424,14 +426,14 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
         color=discord.Color.blurple(),
         member=user,
         moderator=interaction.user,
-        fields={"Rank": rank.mention},
+        fields={"Rank": rank.mention, "Reason": reason},
     )
     await refresh_roster_message(interaction.guild)
 
 
 @bot.tree.command(name="rosterremove", description="Remove a member from the roster.")
-@app_commands.describe(user="The member to remove from the roster")
-async def rosterremove(interaction: discord.Interaction, user: discord.Member):
+@app_commands.describe(user="The member to remove from the roster", reason="Why you're removing them")
+async def rosterremove(interaction: discord.Interaction, user: discord.Member, reason: str):
     if not is_authorized(interaction):
         await interaction.response.send_message(
             "❌ You don't have permission to use this command.", ephemeral=True
@@ -452,7 +454,7 @@ async def rosterremove(interaction: discord.Interaction, user: discord.Member):
     save_config(config)
 
     await interaction.response.send_message(
-        f"✅ Removed {user.mention} from the roster.", ephemeral=True
+        f"✅ Removed {user.mention} from the roster. Reason: {reason}", ephemeral=True
     )
     await log_action(
         interaction.guild,
@@ -460,8 +462,109 @@ async def rosterremove(interaction: discord.Interaction, user: discord.Member):
         color=discord.Color.orange(),
         member=user,
         moderator=interaction.user,
+        fields={"Reason": reason},
     )
     await refresh_roster_message(interaction.guild)
+
+
+async def _change_rank(interaction: discord.Interaction, user: discord.Member, reason: str, step: int, verb: str):
+    """Shared logic for /promote (step=-1) and /demote (step=+1)."""
+    if not is_authorized(interaction):
+        await interaction.response.send_message(
+            "❌ You don't have permission to use this command.", ephemeral=True
+        )
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    rank_ids = cfg.get("ranks", [])
+
+    if not rank_ids:
+        await interaction.response.send_message(
+            "❌ No ranks have been set up yet. An admin needs to run /setranks first.", ephemeral=True
+        )
+        return
+
+    roster = cfg.setdefault("roster", [])
+    existing = next((entry for entry in roster if entry["user_id"] == user.id), None)
+
+    if not existing or existing.get("rank_role_id") not in rank_ids:
+        await interaction.response.send_message(
+            f"❌ {user.mention} isn't on the roster at a known rank yet. Use /rosteradd first.", ephemeral=True
+        )
+        return
+
+    current_index = rank_ids.index(existing["rank_role_id"])
+    new_index = current_index + step
+
+    if new_index < 0:
+        await interaction.response.send_message(
+            f"ℹ️ {user.mention} is already at the highest rank.", ephemeral=True
+        )
+        return
+    if new_index >= len(rank_ids):
+        await interaction.response.send_message(
+            f"ℹ️ {user.mention} is already at the lowest rank.", ephemeral=True
+        )
+        return
+
+    old_role = interaction.guild.get_role(rank_ids[current_index])
+    new_role = interaction.guild.get_role(rank_ids[new_index])
+
+    if new_role is None:
+        await interaction.response.send_message(
+            "❌ That rank's role no longer exists on this server. Ask an admin to run /setranks again.", ephemeral=True
+        )
+        return
+
+    bot_member = interaction.guild.me
+    if new_role >= bot_member.top_role:
+        await interaction.response.send_message(
+            f"❌ I can't assign {new_role.mention} — it's higher than or equal to my own top role. "
+            "Move my bot role above it in Server Settings > Roles.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        if new_role not in user.roles:
+            await user.add_roles(new_role, reason=f"{verb}d by {interaction.user} via /{verb}: {reason}")
+        if old_role and old_role in user.roles:
+            await user.remove_roles(old_role, reason=f"{verb}d by {interaction.user} via /{verb}: {reason}")
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ I don't have permission to manage those roles. Check my role position and permissions.",
+            ephemeral=True,
+        )
+        return
+
+    existing["rank_role_id"] = new_role.id
+    save_config(config)
+
+    old_label = old_role.mention if old_role else "an unknown rank"
+    await interaction.response.send_message(
+        f"✅ {verb}d {user.mention} from {old_label} to {new_role.mention}. Reason: {reason}", ephemeral=True
+    )
+    await log_action(
+        interaction.guild,
+        title=f"⬆️ {verb}d" if step < 0 else f"⬇️ {verb}d",
+        color=discord.Color.gold() if step < 0 else discord.Color.dark_orange(),
+        member=user,
+        moderator=interaction.user,
+        fields={"Previous Rank": old_label, "New Rank": new_role.mention, "Reason": reason},
+    )
+    await refresh_roster_message(interaction.guild)
+
+
+@bot.tree.command(name="promote", description="Move a member up one rank (toward the top of your /setranks list).")
+@app_commands.describe(user="The member to promote", reason="Why you're promoting them")
+async def promote(interaction: discord.Interaction, user: discord.Member, reason: str):
+    await _change_rank(interaction, user, reason, step=-1, verb="Promote")
+
+
+@bot.tree.command(name="demote", description="Move a member down one rank (toward the bottom of your /setranks list).")
+@app_commands.describe(user="The member to demote", reason="Why you're demoting them")
+async def demote(interaction: discord.Interaction, user: discord.Member, reason: str):
+    await _change_rank(interaction, user, reason, step=1, verb="Demote")
 
 
 @bot.tree.command(name="roster", description="Show the current roster.")
