@@ -25,6 +25,15 @@ Commands:
   /inactive                               - show roster members who haven't sent a message in a while
   /serverstats                            - show a one-off snapshot of server stats
   /setstatschannel channel:<channel>      - (admin only) post a live server-stats embed that auto-updates in this channel
+  /tournament create name:<text>          - open sign-ups for a single-elimination bracket
+  /tournament start name:<text>           - (manager only) lock sign-ups and generate the bracket
+  /tournament report name:<text> match:<#> winner:<member>  - (manager only) record a match result
+  /tournament bracket name:<text>         - show the current bracket
+  /gamenight create game:<text> date:<YYYY-MM-DD> time:<HH:MM>  - (manager only) schedule a game night with RSVPs
+  /gamenight list                         - show upcoming game nights
+  /gamenight cancel id:<#>                - (manager only) cancel a scheduled game night
+  /mvp start title:<text> user1..user5    - (manager only) open MVP voting among up to 5 candidates
+  /mvp end                                - (manager only) close voting and announce the winner
 
 Only server admins can run the "set" commands. Only members with the
 configured "manager role" (or Administrator permission) can run
@@ -33,12 +42,13 @@ configured "manager role" (or Administrator permission) can run
 
 import json
 import os
+import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from keep_alive import keep_alive
@@ -84,6 +94,8 @@ async def on_ready():
         print(f"Logged in as {bot.user}. Synced {len(synced)} slash command(s).")
     except Exception as e:
         print(f"Sync failed: {e}")
+    if not gamenight_reminder_loop.is_running():
+        gamenight_reminder_loop.start()
 
 
 @bot.event
@@ -1120,6 +1132,478 @@ async def history(interaction: discord.Interaction, user: discord.Member = None)
         embed.set_footer(text=f"Showing 10 most recent of {len(user_history)} total entries")
 
     await interaction.response.send_message(embed=embed)
+
+
+# ---------- tournaments ----------
+
+def build_tournament_signup_embed(name: str, data: dict) -> discord.Embed:
+    embed = discord.Embed(title=f"🏆 Tournament: {name}", color=discord.Color.gold())
+    if data["status"] == "signup":
+        embed.description = "Sign-ups are open! Click **Join** below to enter."
+        if data["players"]:
+            embed.add_field(
+                name=f"Players ({len(data['players'])})",
+                value="\n".join(f"• <@{pid}>" for pid in data["players"]),
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Players (0)", value="Nobody has joined yet.", inline=False)
+    else:
+        embed.description = "Sign-ups are closed — the tournament has started."
+    return embed
+
+
+class TournamentJoinView(discord.ui.View):
+    def __init__(self, guild_id: int, name: str):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.name = name
+
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.success)
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = get_guild_cfg(self.guild_id)
+        data = cfg.get("tournaments", {}).get(self.name)
+        if not data or data["status"] != "signup":
+            await interaction.response.send_message("❌ Sign-ups are closed for this tournament.", ephemeral=True)
+            return
+        if interaction.user.id not in data["players"]:
+            data["players"].append(interaction.user.id)
+            save_config(config)
+        await interaction.response.edit_message(embed=build_tournament_signup_embed(self.name, data))
+
+    @discord.ui.button(label="Leave", style=discord.ButtonStyle.secondary)
+    async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = get_guild_cfg(self.guild_id)
+        data = cfg.get("tournaments", {}).get(self.name)
+        if not data or data["status"] != "signup":
+            await interaction.response.send_message("❌ Sign-ups are closed for this tournament.", ephemeral=True)
+            return
+        if interaction.user.id in data["players"]:
+            data["players"].remove(interaction.user.id)
+            save_config(config)
+        await interaction.response.edit_message(embed=build_tournament_signup_embed(self.name, data))
+
+
+def make_tournament_pairings(player_ids: list, shuffle: bool = False) -> list:
+    ids = list(player_ids)
+    if shuffle:
+        random.shuffle(ids)
+    matches = []
+    i = 0
+    while i < len(ids):
+        if i + 1 < len(ids):
+            matches.append({"p1": ids[i], "p2": ids[i + 1], "winner": None})
+            i += 2
+        else:
+            # Odd one out gets a bye and auto-advances.
+            matches.append({"p1": ids[i], "p2": None, "winner": ids[i]})
+            i += 1
+    return matches
+
+
+def build_tournament_bracket_embed(name: str, data: dict) -> discord.Embed:
+    if data["status"] == "complete":
+        embed = discord.Embed(
+            title=f"🏆 {name} — Champion: <@{data['champion']}>! 🎉",
+            color=discord.Color.gold(),
+        )
+    else:
+        embed = discord.Embed(title=f"🏆 Tournament: {name}", color=discord.Color.blurple())
+
+    for round_idx, round_matches in enumerate(data["rounds"], start=1):
+        lines = []
+        for match_idx, m in enumerate(round_matches, start=1):
+            p1 = f"<@{m['p1']}>" if m["p1"] else "BYE"
+            p2 = f"<@{m['p2']}>" if m["p2"] else "BYE"
+            if m["winner"]:
+                lines.append(f"Match {match_idx}: {p1} vs {p2} → 🏆 <@{m['winner']}>")
+            else:
+                lines.append(f"Match {match_idx}: {p1} vs {p2} → TBD")
+        embed.add_field(name=f"Round {round_idx}", value="\n".join(lines), inline=False)
+
+    return embed
+
+
+@bot.tree.command(name="tournament_create", description="Open sign-ups for a single-elimination tournament.")
+@app_commands.describe(name="A short name for this tournament")
+async def tournament_create(interaction: discord.Interaction, name: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    tournaments = cfg.setdefault("tournaments", {})
+    existing = tournaments.get(name)
+    if existing and existing["status"] != "complete":
+        await interaction.response.send_message(
+            f"❌ A tournament named **{name}** is already in progress.", ephemeral=True
+        )
+        return
+
+    data = {"status": "signup", "players": [], "rounds": [], "channel_id": interaction.channel_id}
+    tournaments[name] = data
+    save_config(config)
+
+    view = TournamentJoinView(interaction.guild_id, name)
+    await interaction.response.send_message(embed=build_tournament_signup_embed(name, data), view=view)
+    sent = await interaction.original_response()
+    data["message_id"] = sent.id
+    save_config(config)
+
+
+@bot.tree.command(name="tournament_start", description="Lock sign-ups and generate the bracket.")
+@app_commands.describe(name="The tournament's name")
+async def tournament_start(interaction: discord.Interaction, name: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    data = cfg.get("tournaments", {}).get(name)
+    if not data or data["status"] != "signup":
+        await interaction.response.send_message(f"❌ No open sign-ups found for **{name}**.", ephemeral=True)
+        return
+    if len(data["players"]) < 2:
+        await interaction.response.send_message("❌ Need at least 2 players to start.", ephemeral=True)
+        return
+
+    data["rounds"] = [make_tournament_pairings(data["players"], shuffle=True)]
+    data["status"] = "in_progress"
+    save_config(config)
+
+    await interaction.response.send_message(embed=build_tournament_bracket_embed(name, data))
+
+
+@bot.tree.command(name="tournament_report", description="Record the winner of a match.")
+@app_commands.describe(name="The tournament's name", match="Match number in the current round", winner="Who won")
+async def tournament_report(interaction: discord.Interaction, name: str, match: int, winner: discord.Member):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    data = cfg.get("tournaments", {}).get(name)
+    if not data or data["status"] != "in_progress":
+        await interaction.response.send_message(f"❌ No in-progress tournament found named **{name}**.", ephemeral=True)
+        return
+
+    current_round = data["rounds"][-1]
+    if match < 1 or match > len(current_round):
+        await interaction.response.send_message(f"❌ Match number must be between 1 and {len(current_round)}.", ephemeral=True)
+        return
+
+    m = current_round[match - 1]
+    if winner.id not in (m["p1"], m["p2"]):
+        await interaction.response.send_message("❌ That person isn't in this match.", ephemeral=True)
+        return
+
+    m["winner"] = winner.id
+
+    if all(mm["winner"] is not None for mm in current_round):
+        winners = [mm["winner"] for mm in current_round]
+        if len(winners) == 1:
+            data["status"] = "complete"
+            data["champion"] = winners[0]
+        else:
+            data["rounds"].append(make_tournament_pairings(winners, shuffle=False))
+
+    save_config(config)
+    await interaction.response.send_message(embed=build_tournament_bracket_embed(name, data))
+
+
+@bot.tree.command(name="tournament_bracket", description="Show the current bracket for a tournament.")
+@app_commands.describe(name="The tournament's name")
+async def tournament_bracket(interaction: discord.Interaction, name: str):
+    cfg = get_guild_cfg(interaction.guild_id)
+    data = cfg.get("tournaments", {}).get(name)
+    if not data or not data["rounds"]:
+        await interaction.response.send_message(f"❌ No bracket found for **{name}** yet.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=build_tournament_bracket_embed(name, data))
+
+
+# ---------- game nights ----------
+
+def build_gamenight_embed(data: dict) -> discord.Embed:
+    when = int(datetime.fromisoformat(data["when"]).timestamp())
+    embed = discord.Embed(title=f"🎮 Game Night: {data['game']}", color=discord.Color.green())
+    embed.add_field(name="When", value=f"<t:{when}:F> (<t:{when}:R>)", inline=False)
+    embed.add_field(name=f"✅ Going ({len(data['going'])})", value="\n".join(f"<@{u}>" for u in data["going"]) or "—", inline=True)
+    embed.add_field(name=f"❓ Maybe ({len(data['maybe'])})", value="\n".join(f"<@{u}>" for u in data["maybe"]) or "—", inline=True)
+    embed.add_field(name=f"❌ Can't Go ({len(data['cant'])})", value="\n".join(f"<@{u}>" for u in data["cant"]) or "—", inline=True)
+    return embed
+
+
+class GameNightRSVPView(discord.ui.View):
+    def __init__(self, guild_id: int, gamenight_id: str):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.gamenight_id = gamenight_id
+
+    def _get_data(self):
+        cfg = get_guild_cfg(self.guild_id)
+        return cfg.get("gamenights", {}).get(self.gamenight_id)
+
+    async def _rsvp(self, interaction: discord.Interaction, list_name: str):
+        data = self._get_data()
+        if not data:
+            await interaction.response.send_message("❌ This game night no longer exists.", ephemeral=True)
+            return
+        uid = interaction.user.id
+        for key in ("going", "maybe", "cant"):
+            if uid in data[key]:
+                data[key].remove(uid)
+        data[list_name].append(uid)
+        save_config(config)
+        await interaction.response.edit_message(embed=build_gamenight_embed(data))
+
+    @discord.ui.button(label="Going", style=discord.ButtonStyle.success, emoji="✅")
+    async def going(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._rsvp(interaction, "going")
+
+    @discord.ui.button(label="Maybe", style=discord.ButtonStyle.secondary, emoji="❓")
+    async def maybe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._rsvp(interaction, "maybe")
+
+    @discord.ui.button(label="Can't Go", style=discord.ButtonStyle.danger, emoji="❌")
+    async def cant(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._rsvp(interaction, "cant")
+
+
+@bot.tree.command(name="gamenight_create", description="Schedule a game night with RSVPs (time is UTC).")
+@app_commands.describe(game="What you're playing", date="Date as YYYY-MM-DD", time="Time as HH:MM, 24-hour, UTC")
+async def gamenight_create(interaction: discord.Interaction, game: str, date: str, time: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    try:
+        when = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ Couldn't parse that date/time. Use YYYY-MM-DD for the date and HH:MM (24-hour, UTC) for the time.",
+            ephemeral=True,
+        )
+        return
+
+    if when <= datetime.now(timezone.utc):
+        await interaction.response.send_message("❌ That time is in the past.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    next_id = cfg.get("gamenight_next_id", 1)
+    cfg["gamenight_next_id"] = next_id + 1
+
+    data = {
+        "id": next_id, "game": game, "when": when.isoformat(),
+        "channel_id": interaction.channel_id, "going": [], "maybe": [], "cant": [], "reminded": False,
+    }
+    cfg.setdefault("gamenights", {})[str(next_id)] = data
+    save_config(config)
+
+    view = GameNightRSVPView(interaction.guild_id, str(next_id))
+    await interaction.response.send_message(embed=build_gamenight_embed(data), view=view)
+    sent = await interaction.original_response()
+    data["message_id"] = sent.id
+    save_config(config)
+
+
+@bot.tree.command(name="gamenight_list", description="Show upcoming game nights.")
+async def gamenight_list(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    gamenights = cfg.get("gamenights", {})
+    now = datetime.now(timezone.utc)
+    upcoming = sorted(
+        (d for d in gamenights.values() if datetime.fromisoformat(d["when"]) > now),
+        key=lambda d: d["when"],
+    )
+
+    embed = discord.Embed(title="🎮 Upcoming Game Nights", color=discord.Color.green())
+    if not upcoming:
+        embed.description = "Nothing scheduled right now."
+    else:
+        for d in upcoming:
+            when = int(datetime.fromisoformat(d["when"]).timestamp())
+            embed.add_field(
+                name=f"#{d['id']} — {d['game']}",
+                value=f"<t:{when}:F> (<t:{when}:R>) • {len(d['going'])} going",
+                inline=False,
+            )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="gamenight_cancel", description="Cancel a scheduled game night.")
+@app_commands.describe(id="The game night's ID number, shown in /gamenight_list")
+async def gamenight_cancel(interaction: discord.Interaction, id: int):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    gamenights = cfg.get("gamenights", {})
+    data = gamenights.pop(str(id), None)
+    if not data:
+        await interaction.response.send_message(f"❌ No game night found with ID {id}.", ephemeral=True)
+        return
+    save_config(config)
+
+    channel = interaction.guild.get_channel(data["channel_id"])
+    if channel and data.get("message_id"):
+        try:
+            msg = await channel.fetch_message(data["message_id"])
+            await msg.edit(content="🚫 This game night was cancelled.", embed=None, view=None)
+        except (discord.NotFound, discord.Forbidden):
+            pass
+
+    await interaction.response.send_message(f"✅ Cancelled game night #{id} ({data['game']}).", ephemeral=True)
+
+
+@tasks.loop(minutes=1)
+async def gamenight_reminder_loop():
+    now = datetime.now(timezone.utc)
+    for guild in bot.guilds:
+        cfg = get_guild_cfg(guild.id)
+        gamenights = cfg.get("gamenights", {})
+        changed = False
+        for data in gamenights.values():
+            if data.get("reminded"):
+                continue
+            when = datetime.fromisoformat(data["when"])
+            if timedelta(0) <= (when - now) <= timedelta(minutes=15):
+                channel = guild.get_channel(data["channel_id"])
+                if channel:
+                    pings = " ".join(f"<@{u}>" for u in data["going"]) or "No one has RSVP'd going yet!"
+                    try:
+                        await channel.send(f"⏰ **{data['game']}** starts soon! {pings}")
+                    except discord.Forbidden:
+                        pass
+                data["reminded"] = True
+                changed = True
+        if changed:
+            save_config(config)
+
+
+# ---------- MVP voting ----------
+
+def build_mvp_embed(guild: discord.Guild, poll: dict) -> discord.Embed:
+    embed = discord.Embed(title=f"⭐ MVP Vote: {poll['title']}", color=discord.Color.gold())
+    tally = {}
+    for cid in poll["votes"].values():
+        tally[cid] = tally.get(cid, 0) + 1
+
+    lines = []
+    for cid in poll["candidates"]:
+        member = guild.get_member(cid)
+        name = member.mention if member else f"<@{cid}>"
+        lines.append(f"{name} — **{tally.get(cid, 0)}** vote(s)")
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=f"{len(poll['votes'])} total vote(s) cast")
+    return embed
+
+
+class MVPVoteView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, poll: dict):
+        super().__init__(timeout=None)
+        self.guild_id = guild.id
+        for cid in poll["candidates"]:
+            member = guild.get_member(cid)
+            label = member.display_name if member else str(cid)
+            button = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
+            button.callback = self._make_callback(cid)
+            self.add_item(button)
+
+    def _make_callback(self, candidate_id: int):
+        async def callback(interaction: discord.Interaction):
+            cfg = get_guild_cfg(self.guild_id)
+            poll = cfg.get("mvp_poll")
+            if not poll:
+                await interaction.response.send_message("❌ This vote has closed.", ephemeral=True)
+                return
+            poll["votes"][str(interaction.user.id)] = candidate_id
+            save_config(config)
+            await interaction.response.edit_message(embed=build_mvp_embed(interaction.guild, poll))
+        return callback
+
+
+@bot.tree.command(name="mvp_start", description="Open MVP voting among up to 5 candidates.")
+@app_commands.describe(
+    title="What this vote is for, e.g. 'Scrim vs Team X'",
+    user1="Candidate 1", user2="Candidate 2", user3="Candidate 3", user4="Candidate 4", user5="Candidate 5",
+)
+async def mvp_start(
+    interaction: discord.Interaction,
+    title: str,
+    user1: discord.Member,
+    user2: discord.Member = None,
+    user3: discord.Member = None,
+    user4: discord.Member = None,
+    user5: discord.Member = None,
+):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    if cfg.get("mvp_poll"):
+        await interaction.response.send_message(
+            "❌ There's already an active MVP vote. Run /mvp_end to close it first.", ephemeral=True
+        )
+        return
+
+    candidates = [u.id for u in [user1, user2, user3, user4, user5] if u is not None]
+    poll = {"title": title, "candidates": candidates, "votes": {}, "channel_id": interaction.channel_id}
+    cfg["mvp_poll"] = poll
+    save_config(config)
+
+    view = MVPVoteView(interaction.guild, poll)
+    await interaction.response.send_message(embed=build_mvp_embed(interaction.guild, poll), view=view)
+    sent = await interaction.original_response()
+    poll["message_id"] = sent.id
+    save_config(config)
+
+
+@bot.tree.command(name="mvp_end", description="Close MVP voting and announce the winner.")
+async def mvp_end(interaction: discord.Interaction):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    poll = cfg.get("mvp_poll")
+    if not poll:
+        await interaction.response.send_message("❌ There's no active MVP vote.", ephemeral=True)
+        return
+
+    tally = {}
+    for cid in poll["votes"].values():
+        tally[cid] = tally.get(cid, 0) + 1
+
+    if not tally:
+        await interaction.response.send_message("ℹ️ No votes were cast — nobody to announce.", ephemeral=True)
+        cfg["mvp_poll"] = None
+        save_config(config)
+        return
+
+    top_votes = max(tally.values())
+    winners = [cid for cid, v in tally.items() if v == top_votes]
+
+    if len(winners) == 1:
+        result = f"🏆 **{poll['title']}** MVP: <@{winners[0]}> with {top_votes} vote(s)!"
+    else:
+        names = ", ".join(f"<@{w}>" for w in winners)
+        result = f"🏆 **{poll['title']}** ended in a tie between {names} with {top_votes} vote(s) each!"
+
+    channel = interaction.guild.get_channel(poll["channel_id"])
+    if channel and poll.get("message_id"):
+        try:
+            msg = await channel.fetch_message(poll["message_id"])
+            await msg.edit(embed=build_mvp_embed(interaction.guild, poll), view=None)
+        except (discord.NotFound, discord.Forbidden):
+            pass
+
+    cfg["mvp_poll"] = None
+    save_config(config)
+    await interaction.response.send_message(result)
 
 
 # ---------- error handling ----------
