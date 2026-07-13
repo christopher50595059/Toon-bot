@@ -37,12 +37,25 @@ Commands:
   /crosspost_add destination_channel_id:<id> - (admin only) mirror this channel to a channel in another server
   /crosspost_remove                       - (admin only) stop mirroring this channel
   /crosspost_list                         - (admin only) show all mirrors set up in this server
+  /kick user:<member> reason:<text>       - kick a member — asks for confirmation
+  /ban user:<member> reason:<text> [delete_days] - ban a member — asks for confirmation
+  /timeout user:<member> minutes:<int> reason:<text> - temporarily mute a member
+  /warn user:<member> reason:<text>       - log a warning against a member
+  /warnings [user]                        - show a member's warning history (defaults to you)
+  /purge amount:<1-100>                   - bulk-delete recent messages in this channel
+  /lock [reason]                          - stop everyone from sending messages in this channel
+  /unlock                                 - allow sending messages in this channel again
+  /slowmode seconds:<0-21600>             - set this channel's slowmode delay
+  /audit                                  - show the last 20 rank/roster actions across everyone
+  /backup                                 - (admin only) export this server's bot config as a file
+  /announce channel:<channel> title:<text> message:<text> - post a formatted announcement
 
 Only server admins can run the "set" commands. Only members with the
 configured "manager role" (or Administrator permission) can run
 /addrole and /removerole.
 """
 
+import io
 import json
 import os
 import random
@@ -1919,6 +1932,364 @@ async def crosspost_list(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# ---------- moderation ----------
+
+@bot.tree.command(name="kick", description="Kick a member from the server.")
+@app_commands.describe(user="The member to kick", reason="Why you're kicking them")
+async def kick(interaction: discord.Interaction, user: discord.Member, reason: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not interaction.guild.me.guild_permissions.kick_members:
+        await interaction.response.send_message("❌ I don't have permission to kick members.", ephemeral=True)
+        return
+    if user.top_role >= interaction.guild.me.top_role:
+        await interaction.response.send_message(
+            "❌ I can't kick that member — their role is higher than or equal to mine.", ephemeral=True
+        )
+        return
+
+    view = ConfirmView(interaction.user.id)
+    await interaction.response.send_message(
+        f"⚠️ Kick {user.mention} from the server? Reason: {reason}", view=view, ephemeral=True
+    )
+    await view.wait()
+    if view.confirmed is None:
+        await interaction.edit_original_response(content="⏱️ Timed out — no changes made.", view=None)
+        return
+    if not view.confirmed:
+        await interaction.edit_original_response(content="❌ Cancelled — no changes made.", view=None)
+        return
+
+    dm_sent = await dm_notify(
+        interaction.guild, user,
+        title="👢 You were kicked",
+        color=discord.Color.dark_red(),
+        fields={"Reason": reason},
+    )
+    try:
+        await user.kick(reason=f"By {interaction.user} via /kick: {reason}")
+    except discord.Forbidden:
+        await interaction.edit_original_response(content="❌ I don't have permission to kick that member.", view=None)
+        return
+
+    note = "\n\n*(couldn't DM them before kicking)*" if not dm_sent else ""
+    await interaction.edit_original_response(content=f"✅ Kicked {user.mention}. Reason: {reason}{note}", view=None)
+    await log_movement(interaction.guild, member=user, target="kicked", reason=reason, moderator=interaction.user)
+
+
+@bot.tree.command(name="ban", description="Ban a member from the server.")
+@app_commands.describe(user="The member to ban", reason="Why you're banning them", delete_days="Days of their message history to delete (0-7)")
+async def ban(interaction: discord.Interaction, user: discord.Member, reason: str, delete_days: int = 0):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not interaction.guild.me.guild_permissions.ban_members:
+        await interaction.response.send_message("❌ I don't have permission to ban members.", ephemeral=True)
+        return
+    if user.top_role >= interaction.guild.me.top_role:
+        await interaction.response.send_message(
+            "❌ I can't ban that member — their role is higher than or equal to mine.", ephemeral=True
+        )
+        return
+    delete_days = max(0, min(7, delete_days))
+
+    view = ConfirmView(interaction.user.id)
+    await interaction.response.send_message(
+        f"⚠️ **Ban** {user.mention} from the server? Reason: {reason}", view=view, ephemeral=True
+    )
+    await view.wait()
+    if view.confirmed is None:
+        await interaction.edit_original_response(content="⏱️ Timed out — no changes made.", view=None)
+        return
+    if not view.confirmed:
+        await interaction.edit_original_response(content="❌ Cancelled — no changes made.", view=None)
+        return
+
+    dm_sent = await dm_notify(
+        interaction.guild, user,
+        title="🔨 You were banned",
+        color=discord.Color.dark_red(),
+        fields={"Reason": reason},
+    )
+    try:
+        await user.ban(reason=f"By {interaction.user} via /ban: {reason}", delete_message_days=delete_days)
+    except discord.Forbidden:
+        await interaction.edit_original_response(content="❌ I don't have permission to ban that member.", view=None)
+        return
+
+    note = "\n\n*(couldn't DM them before banning)*" if not dm_sent else ""
+    await interaction.edit_original_response(content=f"✅ Banned {user.mention}. Reason: {reason}{note}", view=None)
+    await log_movement(interaction.guild, member=user, target="banned", reason=reason, moderator=interaction.user)
+
+
+@bot.tree.command(name="timeout", description="Temporarily mute a member.")
+@app_commands.describe(user="The member to time out", minutes="How long, in minutes", reason="Why you're timing them out")
+async def timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not interaction.guild.me.guild_permissions.moderate_members:
+        await interaction.response.send_message("❌ I don't have permission to time out members.", ephemeral=True)
+        return
+    if minutes <= 0 or minutes > 40320:  # Discord's cap is 28 days
+        await interaction.response.send_message("❌ Minutes must be between 1 and 40320 (28 days).", ephemeral=True)
+        return
+    if user.top_role >= interaction.guild.me.top_role:
+        await interaction.response.send_message(
+            "❌ I can't time out that member — their role is higher than or equal to mine.", ephemeral=True
+        )
+        return
+
+    try:
+        await user.timeout(timedelta(minutes=minutes), reason=f"By {interaction.user} via /timeout: {reason}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to time out that member.", ephemeral=True)
+        return
+
+    dm_sent = await dm_notify(
+        interaction.guild, user,
+        title="🔇 You were timed out",
+        color=discord.Color.dark_orange(),
+        fields={"Duration": f"{minutes} minute(s)", "Reason": reason},
+    )
+    note = "\n\n*(couldn't DM them)*" if not dm_sent else ""
+    await interaction.response.send_message(
+        f"✅ Timed out {user.mention} for {minutes} minute(s). Reason: {reason}{note}", ephemeral=True
+    )
+    await log_movement(
+        interaction.guild, member=user, target=f"timed out ({minutes}m)", reason=reason, moderator=interaction.user
+    )
+
+
+@bot.tree.command(name="warn", description="Log a warning against a member.")
+@app_commands.describe(user="The member to warn", reason="Why you're warning them")
+async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    warnings = cfg.setdefault("warnings", {})
+    user_warnings = warnings.setdefault(str(user.id), [])
+    user_warnings.append({
+        "reason": reason,
+        "moderator_id": interaction.user.id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    save_config(config)
+
+    dm_sent = await dm_notify(
+        interaction.guild, user,
+        title="⚠️ You were warned",
+        color=discord.Color.gold(),
+        fields={"Reason": reason, "Total Warnings": str(len(user_warnings))},
+    )
+    note = "\n\n*(couldn't DM them)*" if not dm_sent else ""
+    await interaction.response.send_message(
+        f"✅ Warned {user.mention} (warning #{len(user_warnings)}). Reason: {reason}{note}", ephemeral=True
+    )
+    await log_movement(
+        interaction.guild, member=user, target=f"warned (#{len(user_warnings)})", reason=reason, moderator=interaction.user
+    )
+
+
+@bot.tree.command(name="warnings", description="Show a member's warning history.")
+@app_commands.describe(user="The member to look up (defaults to you)")
+async def warnings_cmd(interaction: discord.Interaction, user: discord.Member = None):
+    user = user or interaction.user
+    cfg = get_guild_cfg(interaction.guild_id)
+    user_warnings = cfg.get("warnings", {}).get(str(user.id), [])
+
+    embed = discord.Embed(title=f"⚠️ Warnings for {user.display_name}", color=discord.Color.gold())
+    embed.set_thumbnail(url=user.display_avatar.url)
+
+    if not user_warnings:
+        embed.description = "No warnings on record."
+    else:
+        for i, w in enumerate(reversed(user_warnings[-10:]), start=1):
+            moderator = interaction.guild.get_member(w["moderator_id"])
+            mod_label = moderator.mention if moderator else f"<@{w['moderator_id']}>"
+            ts = datetime.fromisoformat(w["timestamp"])
+            embed.add_field(
+                name=f"Warning #{len(user_warnings) - i + 1}",
+                value=f"{w['reason']}\nBy {mod_label} • <t:{int(ts.timestamp())}:R>",
+                inline=False,
+            )
+        embed.set_footer(text=f"{len(user_warnings)} total warning(s)")
+
+    await interaction.response.send_message(embed=embed)
+
+
+# ---------- channel control ----------
+
+@bot.tree.command(name="purge", description="Bulk-delete recent messages in this channel.")
+@app_commands.describe(amount="How many messages to delete (1-100)")
+async def purge(interaction: discord.Interaction, amount: int):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not interaction.channel.permissions_for(interaction.guild.me).manage_messages:
+        await interaction.response.send_message("❌ I don't have permission to delete messages here.", ephemeral=True)
+        return
+    if amount < 1 or amount > 100:
+        await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=amount)
+    await interaction.followup.send(f"✅ Deleted {len(deleted)} message(s).", ephemeral=True)
+    await log_movement(
+        interaction.guild, member=interaction.user, target=f"purged {len(deleted)} messages in {interaction.channel.mention}",
+        reason="—", moderator=interaction.user,
+    )
+
+
+@bot.tree.command(name="lock", description="Prevent everyone from sending messages in this channel.")
+@app_commands.describe(reason="Why you're locking this channel")
+async def lock(interaction: discord.Interaction, reason: str = "No reason given"):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not interaction.channel.permissions_for(interaction.guild.me).manage_channels:
+        await interaction.response.send_message("❌ I don't have permission to manage this channel.", ephemeral=True)
+        return
+
+    everyone = interaction.guild.default_role
+    overwrite = interaction.channel.overwrites_for(everyone)
+    overwrite.send_messages = False
+    try:
+        await interaction.channel.set_permissions(everyone, overwrite=overwrite, reason=f"Locked by {interaction.user}: {reason}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to edit this channel's permissions.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"🔒 Channel locked. Reason: {reason}")
+    await log_movement(
+        interaction.guild, member=interaction.user, target=f"locked {interaction.channel.mention}",
+        reason=reason, moderator=interaction.user,
+    )
+
+
+@bot.tree.command(name="unlock", description="Allow everyone to send messages in this channel again.")
+async def unlock(interaction: discord.Interaction):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not interaction.channel.permissions_for(interaction.guild.me).manage_channels:
+        await interaction.response.send_message("❌ I don't have permission to manage this channel.", ephemeral=True)
+        return
+
+    everyone = interaction.guild.default_role
+    overwrite = interaction.channel.overwrites_for(everyone)
+    overwrite.send_messages = None  # reset to default rather than explicitly True
+    try:
+        await interaction.channel.set_permissions(everyone, overwrite=overwrite, reason=f"Unlocked by {interaction.user}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to edit this channel's permissions.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("🔓 Channel unlocked.")
+    await log_movement(
+        interaction.guild, member=interaction.user, target=f"unlocked {interaction.channel.mention}",
+        reason="—", moderator=interaction.user,
+    )
+
+
+@bot.tree.command(name="slowmode", description="Set slowmode delay for this channel.")
+@app_commands.describe(seconds="Seconds between messages per person (0 to disable, max 21600)")
+async def slowmode(interaction: discord.Interaction, seconds: int):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not interaction.channel.permissions_for(interaction.guild.me).manage_channels:
+        await interaction.response.send_message("❌ I don't have permission to manage this channel.", ephemeral=True)
+        return
+    if seconds < 0 or seconds > 21600:
+        await interaction.response.send_message("❌ Seconds must be between 0 and 21600 (6 hours).", ephemeral=True)
+        return
+
+    await interaction.channel.edit(slowmode_delay=seconds, reason=f"Set by {interaction.user}")
+    if seconds == 0:
+        await interaction.response.send_message("✅ Slowmode disabled.")
+    else:
+        await interaction.response.send_message(f"✅ Slowmode set to {seconds} second(s).")
+
+
+# ---------- admin utility ----------
+
+@bot.tree.command(name="audit", description="Show the last 20 rank/roster actions across everyone in this server.")
+async def audit(interaction: discord.Interaction):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    history = cfg.get("history", {})
+
+    all_entries = []
+    for user_id_str, entries in history.items():
+        for entry in entries:
+            all_entries.append((int(user_id_str), entry))
+
+    all_entries.sort(key=lambda pair: pair[1]["timestamp"], reverse=True)
+    recent = all_entries[:20]
+
+    embed = discord.Embed(title="🗂️ Server Audit Log", color=discord.Color.dark_grey())
+    if not recent:
+        embed.description = "No recorded actions yet."
+    else:
+        lines = []
+        for user_id, entry in recent:
+            moderator = interaction.guild.get_member(entry["moderator_id"])
+            mod_label = moderator.mention if moderator else f"<@{entry['moderator_id']}>"
+            ts = datetime.fromisoformat(entry["timestamp"])
+            detail = f" — {entry['detail']}" if entry.get("detail") else ""
+            lines.append(f"<@{user_id}> **{entry['action']}**{detail} • by {mod_label} • <t:{int(ts.timestamp())}:R>")
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"Showing {len(recent)} most recent of {len(all_entries)} total entries")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="backup", description="Export this server's bot configuration as a downloadable file.")
+@app_commands.checks.has_permissions(administrator=True)
+async def backup(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    data = json.dumps(cfg, indent=2)
+    file_bytes = io.BytesIO(data.encode("utf-8"))
+    file = discord.File(file_bytes, filename=f"backup-{interaction.guild_id}.json")
+    await interaction.response.send_message(
+        "✅ Here's a backup of this server's bot configuration (ranks, channels, roster, settings, history).",
+        file=file,
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="announce", description="Post a formatted announcement to a channel.")
+@app_commands.describe(channel="Where to post it", title="Announcement title", message="The announcement text")
+async def announce(interaction: discord.Interaction, channel: discord.TextChannel, title: str, message: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not channel.permissions_for(interaction.guild.me).send_messages:
+        await interaction.response.send_message(f"❌ I don't have permission to send messages in {channel.mention}.", ephemeral=True)
+        return
+
+    embed = discord.Embed(title=f"📢 {title}", description=message, color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+    if interaction.guild.icon:
+        embed.set_thumbnail(url=interaction.guild.icon.url)
+    embed.set_footer(text=f"Posted by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+
+    try:
+        await channel.send(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message(f"❌ I don't have permission to send messages in {channel.mention}.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"✅ Announcement posted in {channel.mention}.", ephemeral=True)
+
+
 # ---------- error handling ----------
 
 @setlogchannel.error
@@ -1931,6 +2302,7 @@ async def crosspost_list(interaction: discord.Interaction):
 @crosspost_add.error
 @crosspost_remove.error
 @crosspost_list.error
+@backup.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
