@@ -295,7 +295,9 @@ async def dm_notify(
     try:
         await member.send(embed=embed)
         return True
-    except (discord.Forbidden, discord.HTTPException):
+    except Exception:
+        # Any failure to DM (closed DMs, blocked, can't DM the bot itself, etc.)
+        # should never crash the command — just report it as "couldn't DM them".
         return False
 
 
