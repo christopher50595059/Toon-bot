@@ -282,11 +282,13 @@ async def dm_notify(
     fields: dict = None,
 ) -> bool:
     """DM a member about an action taken on them. Returns False if the DM couldn't be sent
-    (e.g. they have DMs closed) so the caller can let the moderator know."""
+    (e.g. they have DMs closed) so the caller can let the moderator know.
+    NOTE: role/rank values in `fields` should be plain names, not mentions —
+    Discord can't resolve role mentions inside a DM (shows as '@unknown-role')."""
     embed = discord.Embed(title=title, color=color, timestamp=discord.utils.utcnow())
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
-    embed.description = f"This happened in **{guild.name}**."
+    embed.description = f"Your roles were changed in **{guild.name}**."
 
     if fields:
         for name, value in fields.items():
@@ -690,7 +692,7 @@ async def addrole(interaction: discord.Interaction, user: discord.Member, role: 
         interaction.guild, user,
         title="🟢 You were given a role",
         color=discord.Color.green(),
-        fields={"Role": role.mention, "Reason": reason},
+        fields={"Role": role.name, "Reason": reason},
     )
     note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
     embed = action_embed(
@@ -730,7 +732,7 @@ async def removerole(interaction: discord.Interaction, user: discord.Member, rol
         interaction.guild, user,
         title="🔴 A role was removed from you",
         color=discord.Color.red(),
-        fields={"Role": role.mention, "Reason": reason},
+        fields={"Role": role.name, "Reason": reason},
     )
     note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
     embed = action_embed(
@@ -813,6 +815,7 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
     if existing:
         old_rank_role = interaction.guild.get_role(existing.get("rank_role_id"))
         old_label = old_rank_role.mention if old_rank_role else "an unknown rank"
+        old_label_name = old_rank_role.name if old_rank_role else "an unknown rank"
         existing["rank_role_id"] = rank.id
         save_config(config)
         summary = f" ({', '.join(role_change_notes)})" if role_change_notes else ""
@@ -820,7 +823,7 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
             interaction.guild, user,
             title="📋 Your roster rank changed",
             color=discord.Color.teal(),
-            fields={"Previous Rank": old_label, "New Rank": rank.mention, "Reason": reason},
+            fields={"Previous Rank": old_label_name, "New Rank": rank.name, "Reason": reason},
         )
         note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
         embed = action_embed(
@@ -853,7 +856,7 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
         interaction.guild, user,
         title="📋 You were added to the roster",
         color=discord.Color.teal(),
-        fields={"Rank": rank.mention, "Reason": reason},
+        fields={"Rank": rank.name, "Reason": reason},
     )
     note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
     embed = action_embed(
@@ -1020,6 +1023,7 @@ async def _change_rank(interaction: discord.Interaction, user: discord.Member, r
 
     is_demote = step > 0
     old_label = old_role.mention if old_role else "an unknown rank"
+    old_label_name = old_role.name if old_role else "an unknown rank"
 
     if is_demote:
         view = ConfirmView(interaction.user.id)
@@ -1058,7 +1062,7 @@ async def _change_rank(interaction: discord.Interaction, user: discord.Member, r
         interaction.guild, user,
         title=dm_title,
         color=dm_color,
-        fields={"Previous Rank": old_label, "New Rank": new_role.mention, "Reason": reason},
+        fields={"Previous Rank": old_label_name, "New Rank": new_role.name, "Reason": reason},
     )
     note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
     result_embed = action_embed(
@@ -1130,14 +1134,14 @@ async def rosterimport(interaction: discord.Interaction, rank: discord.Role):
         return
 
     roster = cfg.setdefault("roster", [])
-    added, moved, skipped = 0, 0, 0
+    added_members, moved_members, skipped = [], [], 0
 
     for member in matching_members:
         existing = next((entry for entry in roster if entry["user_id"] == member.id), None)
         if existing is None:
             roster.append({"user_id": member.id, "rank_role_id": rank.id})
             record_history(interaction.guild_id, member.id, "Added to Roster", rank.mention, interaction.user.id, "Bulk import")
-            added += 1
+            added_members.append(member)
         elif existing.get("rank_role_id") != rank.id:
             old_role = interaction.guild.get_role(existing.get("rank_role_id"))
             old_label = old_role.mention if old_role else "an unknown rank"
@@ -1146,26 +1150,37 @@ async def rosterimport(interaction: discord.Interaction, rank: discord.Role):
                 interaction.guild_id, member.id, "Rank Changed", f"{old_label} → {rank.mention}",
                 interaction.user.id, "Bulk import",
             )
-            moved += 1
+            moved_members.append(member)
         else:
             skipped += 1
 
     save_config(config)
 
+    added, moved = len(added_members), len(moved_members)
     embed = discord.Embed(title="📋 Roster Import Complete", color=discord.Color.teal())
     embed.description = f"Imported everyone with {rank.mention} onto the roster."
     embed.add_field(name="Added", value=str(added), inline=True)
     embed.add_field(name="Moved", value=str(moved), inline=True)
     embed.add_field(name="Already Correct", value=str(skipped), inline=True)
     await interaction.followup.send(embed=embed, ephemeral=True)
-    await log_bulk_action(
-        interaction.guild,
-        title="📋 Roster Bulk Import",
-        color=discord.Color.teal(),
-        moderator=interaction.user,
-        description=f"Imported everyone with {rank.mention} onto the roster.",
-        fields={"Added": str(added), "Moved": str(moved), "Already Correct": str(skipped)},
-    )
+
+    cfg_log = get_guild_cfg(interaction.guild_id)
+    log_channel_id = cfg_log.get("log_channel_id")
+    if log_channel_id:
+        log_channel = interaction.guild.get_channel(log_channel_id)
+        if log_channel:
+            added_text = ", ".join(m.mention for m in added_members) if added_members else "none"
+            moved_text = ", ".join(m.mention for m in moved_members) if moved_members else "none"
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            line = (
+                f"📋 Bulk import → {rank.mention} | Added: {added_text} | Moved: {moved_text} | "
+                f"{interaction.user.mention} | <t:{now_ts}:f>"
+            )
+            try:
+                await log_channel.send(line)
+            except discord.Forbidden:
+                pass
+
     await refresh_roster_message(interaction.guild)
     await refresh_server_stats_message(interaction.guild)
 
