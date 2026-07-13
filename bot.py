@@ -34,6 +34,9 @@ Commands:
   /gamenight cancel id:<#>                - (manager only) cancel a scheduled game night
   /mvp start title:<text> user1..user5    - (manager only) open MVP voting among up to 5 candidates
   /mvp end                                - (manager only) close voting and announce the winner
+  /crosspost_add destination_channel_id:<id> - (admin only) mirror this channel to a channel in another server
+  /crosspost_remove                       - (admin only) stop mirroring this channel
+  /crosspost_list                         - (admin only) show all mirrors set up in this server
 
 Only server admins can run the "set" commands. Only members with the
 configured "manager role" (or Administrator permission) can run
@@ -82,7 +85,8 @@ def get_guild_cfg(guild_id: int) -> dict:
 # ---------- bot setup ----------
 
 intents = discord.Intents.default()
-intents.members = True  # required to look up / modify member roles
+intents.members = True          # required to look up / modify member roles
+intents.message_content = True  # required to read message content for cross-posting
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -102,7 +106,36 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
+
     cfg = get_guild_cfg(message.guild.id)
+
+    # ---- cross-posting ----
+    crossposts = cfg.get("crossposts", {})
+    dest_id = crossposts.get(str(message.channel.id))
+    if dest_id:
+        dest_channel = bot.get_channel(dest_id)
+        if dest_channel:
+            embed = discord.Embed(
+                description=message.content or None,
+                color=discord.Color.blurple(),
+                timestamp=message.created_at,
+            )
+            embed.set_author(
+                name=f"{message.author.display_name} — #{message.channel.name} ({message.guild.name})",
+                icon_url=message.author.display_avatar.url,
+            )
+            if message.attachments:
+                first = message.attachments[0]
+                if first.content_type and first.content_type.startswith("image"):
+                    embed.set_image(url=first.url)
+                else:
+                    embed.add_field(name="Attachment", value=first.url, inline=False)
+            try:
+                await dest_channel.send(embed=embed)
+            except discord.Forbidden:
+                pass
+
+    # ---- activity tracking (for /inactive) ----
     last_active = cfg.setdefault("last_active", {})
     now = datetime.now(timezone.utc)
 
@@ -204,19 +237,26 @@ async def dm_notify(
         return False
 
 
+RANK_TIER_ICONS = ["🥇", "🥈", "🥉", "🔹", "🔸", "▪️", "▪️", "▪️"]
+
+
 def build_roster_embed(guild: discord.Guild) -> discord.Embed:
     cfg = get_guild_cfg(guild.id)
     roster = cfg.get("roster", [])  # list of {"user_id": int, "rank_role_id": int}
     rank_role_ids = cfg.get("ranks", [])  # ordered list of role IDs, highest first
 
-    embed = discord.Embed(title="📋 Roster", color=discord.Color.blurple())
+    embed = discord.Embed(title="📋 Server Roster", color=discord.Color.blurple())
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
     if not roster:
         embed.description = "The roster is currently empty."
         return embed
 
-    def member_line(entry):
+    def member_line(index, entry):
         member = guild.get_member(entry["user_id"])
-        return member.mention if member else f"<@{entry['user_id']}> (left server)"
+        name = member.mention if member else f"<@{entry['user_id']}> (left server)"
+        return f"`{index:>2}.` {name}"
 
     # Group entries by rank role, preserving the configured rank order.
     grouped = {rid: [] for rid in rank_role_ids}
@@ -228,20 +268,22 @@ def build_roster_embed(guild: discord.Guild) -> discord.Embed:
         else:
             unranked.append(entry)
 
-    for rid in rank_role_ids:
+    for position, rid in enumerate(rank_role_ids):
         members = grouped[rid]
         if not members:
             continue
         role = guild.get_role(rid)
         label = role.mention if role else "(deleted role)"
-        value = "\n".join(f"• {member_line(e)}" for e in members)
-        embed.add_field(name=f"{label} ({len(members)})", value=value, inline=False)
+        icon = RANK_TIER_ICONS[position] if position < len(RANK_TIER_ICONS) else "▪️"
+        value = "\n".join(member_line(i, e) for i, e in enumerate(members, start=1))
+        embed.add_field(name=f"{icon} {label} — {len(members)}", value=value, inline=False)
 
     if unranked:
-        value = "\n".join(f"• {member_line(e)}" for e in unranked)
-        embed.add_field(name=f"Unranked ({len(unranked)})", value=value, inline=False)
+        value = "\n".join(member_line(i, e) for i, e in enumerate(unranked, start=1))
+        embed.add_field(name=f"❔ Unranked — {len(unranked)}", value=value, inline=False)
 
-    embed.set_footer(text=f"{len(roster)} member(s) total")
+    embed.set_footer(text=f"{len(roster)} member(s) on the roster • Last updated")
+    embed.timestamp = discord.utils.utcnow()
     return embed
 
 
@@ -324,6 +366,15 @@ async def refresh_server_stats_message(guild: discord.Guild):
         save_config(config)
     except discord.Forbidden:
         pass
+
+
+def action_embed(title: str, description: str, color: discord.Color, member: discord.Member = None) -> discord.Embed:
+    """A small, consistently-styled embed for command confirmation responses
+    (as opposed to the log channel embeds, which are more detailed)."""
+    embed = discord.Embed(title=title, description=description, color=color)
+    if member is not None:
+        embed.set_thumbnail(url=member.display_avatar.url)
+    return embed
 
 
 def is_authorized(interaction: discord.Interaction) -> bool:
@@ -528,10 +579,14 @@ async def addrole(interaction: discord.Interaction, user: discord.Member, role: 
         color=discord.Color.green(),
         fields={"Role": role.mention, "Reason": reason},
     )
-    note = "" if dm_sent else " (couldn't DM them — their DMs may be closed)"
-    await interaction.response.send_message(
-        f"✅ Gave {role.mention} to {user.mention}. Reason: {reason}{note}", ephemeral=True
+    note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
+    embed = action_embed(
+        "🟢 Role Given",
+        f"Gave {role.mention} to {user.mention}.\n**Reason:** {reason}{note}",
+        discord.Color.green(),
+        member=user,
     )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
     await log_action(
         interaction.guild,
         title="🟢 Role Added",
@@ -564,10 +619,14 @@ async def removerole(interaction: discord.Interaction, user: discord.Member, rol
         color=discord.Color.red(),
         fields={"Role": role.mention, "Reason": reason},
     )
-    note = "" if dm_sent else " (couldn't DM them — their DMs may be closed)"
-    await interaction.response.send_message(
-        f"✅ Removed {role.mention} from {user.mention}. Reason: {reason}{note}", ephemeral=True
+    note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
+    embed = action_embed(
+        "🔴 Role Removed",
+        f"Removed {role.mention} from {user.mention}.\n**Reason:** {reason}{note}",
+        discord.Color.red(),
+        member=user,
     )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
     await log_action(
         interaction.guild,
         title="🔴 Role Removed",
@@ -650,10 +709,14 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
             color=discord.Color.blurple(),
             fields={"Previous Rank": old_label, "New Rank": rank.mention, "Reason": reason},
         )
-        note = "" if dm_sent else " (couldn't DM them — their DMs may be closed)"
-        await interaction.response.send_message(
-            f"✅ Moved {user.mention} from {old_label} to {rank.mention}{summary}. Reason: {reason}{note}", ephemeral=True
+        note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
+        embed = action_embed(
+            "📋 Rank Changed",
+            f"Moved {user.mention} from {old_label} to {rank.mention}.\n**Reason:** {reason}{note}",
+            discord.Color.blurple(),
+            member=user,
         )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         await log_action(
             interaction.guild,
             title="📋 Roster Rank Changed",
@@ -679,10 +742,14 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
         color=discord.Color.blurple(),
         fields={"Rank": rank.mention, "Reason": reason},
     )
-    note = "" if dm_sent else " (couldn't DM them — their DMs may be closed)"
-    await interaction.response.send_message(
-        f"✅ Added {user.mention} to the roster and gave them {rank.mention}. Reason: {reason}{note}", ephemeral=True
+    note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
+    embed = action_embed(
+        "📋 Added to Roster",
+        f"Added {user.mention} to the roster and gave them {rank.mention}.\n**Reason:** {reason}{note}",
+        discord.Color.blurple(),
+        member=user,
     )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
     await log_action(
         interaction.guild,
         title="📋 Added to Roster",
@@ -743,10 +810,14 @@ async def rosterremove(interaction: discord.Interaction, user: discord.Member, r
         color=discord.Color.orange(),
         fields={"Reason": reason},
     )
-    note = "" if dm_sent else " (couldn't DM them — their DMs may be closed)"
-    await interaction.edit_original_response(
-        content=f"✅ Removed {user.mention} from the roster. Reason: {reason}{note}", view=None
+    note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
+    embed = action_embed(
+        "📋 Removed from Roster",
+        f"Removed {user.mention} from the roster.\n**Reason:** {reason}{note}",
+        discord.Color.orange(),
+        member=user,
     )
+    await interaction.edit_original_response(content=None, embed=embed, view=None)
     await log_action(
         interaction.guild,
         title="📋 Removed from Roster",
@@ -876,12 +947,17 @@ async def _change_rank(interaction: discord.Interaction, user: discord.Member, r
         color=dm_color,
         fields={"Previous Rank": old_label, "New Rank": new_role.mention, "Reason": reason},
     )
-    note = "" if dm_sent else " (couldn't DM them — their DMs may be closed)"
-    result_message = f"✅ {verb}d {user.mention} from {old_label} to {new_role.mention}. Reason: {reason}{note}"
+    note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
+    result_embed = action_embed(
+        f"{dm_title.split(' ', 1)[0]} {verb}d",
+        f"{verb}d {user.mention} from {old_label} to {new_role.mention}.\n**Reason:** {reason}{note}",
+        dm_color,
+        member=user,
+    )
     if is_demote:
-        await interaction.edit_original_response(content=result_message, view=None)
+        await interaction.edit_original_response(content=None, embed=result_embed, view=None)
     else:
-        await interaction.response.send_message(result_message, ephemeral=True)
+        await interaction.response.send_message(embed=result_embed, ephemeral=True)
     await log_action(
         interaction.guild,
         title=f"⬆️ {verb}d" if step < 0 else f"⬇️ {verb}d",
@@ -963,8 +1039,12 @@ async def rosterimport(interaction: discord.Interaction, rank: discord.Role):
 
     save_config(config)
 
-    summary = f"✅ Import complete for {rank.mention}: **{added}** added, **{moved}** moved, **{skipped}** already correct."
-    await interaction.followup.send(summary, ephemeral=True)
+    embed = discord.Embed(title="📋 Roster Import Complete", color=discord.Color.blurple())
+    embed.description = f"Imported everyone with {rank.mention} onto the roster."
+    embed.add_field(name="Added", value=str(added), inline=True)
+    embed.add_field(name="Moved", value=str(moved), inline=True)
+    embed.add_field(name="Already Correct", value=str(skipped), inline=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
     await log_action(
         interaction.guild,
         title="📋 Roster Bulk Import",
@@ -990,6 +1070,8 @@ async def stats(interaction: discord.Interaction):
     rank_role_ids = cfg.get("ranks", [])
 
     embed = discord.Embed(title="📊 Roster Stats", color=discord.Color.blurple())
+    if interaction.guild.icon:
+        embed.set_thumbnail(url=interaction.guild.icon.url)
 
     if not rank_role_ids:
         embed.description = "No ranks have been set up yet. Run /setranks first."
@@ -1005,15 +1087,17 @@ async def stats(interaction: discord.Interaction):
         else:
             unranked += 1
 
-    for rid in rank_role_ids:
+    for position, rid in enumerate(rank_role_ids):
         role = interaction.guild.get_role(rid)
         label = role.mention if role else "(deleted role)"
-        embed.add_field(name=label, value=str(counts[rid]), inline=True)
+        icon = RANK_TIER_ICONS[position] if position < len(RANK_TIER_ICONS) else "▪️"
+        embed.add_field(name=f"{icon} {label}", value=str(counts[rid]), inline=True)
 
     if unranked:
-        embed.add_field(name="Unranked", value=str(unranked), inline=True)
+        embed.add_field(name="❔ Unranked", value=str(unranked), inline=True)
 
     embed.set_footer(text=f"{len(roster)} member(s) total on the roster")
+    embed.timestamp = discord.utils.utcnow()
     await interaction.response.send_message(embed=embed)
 
 
@@ -1606,6 +1690,84 @@ async def mvp_end(interaction: discord.Interaction):
     await interaction.response.send_message(result)
 
 
+# ---------- cross-posting ----------
+
+@bot.tree.command(name="crosspost_add", description="Mirror messages from THIS channel to a channel in another server the bot is also in.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(destination_channel_id="The channel ID to mirror into (right-click the channel in the other server → Copy Channel ID)")
+async def crosspost_add(interaction: discord.Interaction, destination_channel_id: str):
+    try:
+        dest_id = int(destination_channel_id)
+    except ValueError:
+        await interaction.response.send_message("❌ That doesn't look like a valid channel ID.", ephemeral=True)
+        return
+
+    dest_channel = bot.get_channel(dest_id)
+    if dest_channel is None:
+        await interaction.response.send_message(
+            "❌ I can't see that channel. Make sure the bot is invited to that server and has access to that "
+            "channel, then try again.",
+            ephemeral=True,
+        )
+        return
+    if not isinstance(dest_channel, discord.TextChannel):
+        await interaction.response.send_message("❌ That has to be a text channel.", ephemeral=True)
+        return
+    if not dest_channel.permissions_for(dest_channel.guild.me).send_messages:
+        await interaction.response.send_message(
+            f"❌ I don't have permission to send messages in {dest_channel.mention} over in **{dest_channel.guild.name}**.",
+            ephemeral=True,
+        )
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    crossposts = cfg.setdefault("crossposts", {})
+    crossposts[str(interaction.channel_id)] = dest_id
+    save_config(config)
+
+    await interaction.response.send_message(
+        f"✅ Messages sent in {interaction.channel.mention} will now be mirrored to "
+        f"**#{dest_channel.name}** in **{dest_channel.guild.name}**.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="crosspost_remove", description="Stop mirroring THIS channel to another server.")
+@app_commands.checks.has_permissions(administrator=True)
+async def crosspost_remove(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    crossposts = cfg.setdefault("crossposts", {})
+    if str(interaction.channel_id) not in crossposts:
+        await interaction.response.send_message("ℹ️ This channel isn't currently being mirrored anywhere.", ephemeral=True)
+        return
+
+    crossposts.pop(str(interaction.channel_id))
+    save_config(config)
+    await interaction.response.send_message("✅ This channel will no longer be mirrored.", ephemeral=True)
+
+
+@bot.tree.command(name="crosspost_list", description="Show all cross-posting mirrors set up in this server.")
+@app_commands.checks.has_permissions(administrator=True)
+async def crosspost_list(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    crossposts = cfg.get("crossposts", {})
+
+    embed = discord.Embed(title="🔀 Cross-Posting Mirrors", color=discord.Color.blurple())
+    if not crossposts:
+        embed.description = "No mirrors set up in this server."
+    else:
+        lines = []
+        for source_id, dest_id in crossposts.items():
+            source_channel = interaction.guild.get_channel(int(source_id))
+            dest_channel = bot.get_channel(dest_id)
+            source_label = source_channel.mention if source_channel else f"(deleted channel {source_id})"
+            dest_label = f"#{dest_channel.name} in {dest_channel.guild.name}" if dest_channel else f"(unreachable channel {dest_id})"
+            lines.append(f"{source_label} → {dest_label}")
+        embed.description = "\n".join(lines)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # ---------- error handling ----------
 
 @setlogchannel.error
@@ -1615,6 +1777,9 @@ async def mvp_end(interaction: discord.Interaction):
 @setcooldown.error
 @setinactivitydays.error
 @setstatschannel.error
+@crosspost_add.error
+@crosspost_remove.error
+@crosspost_list.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
