@@ -117,7 +117,7 @@ async def on_message(message: discord.Message):
         if dest_channel:
             embed = discord.Embed(
                 description=message.content or None,
-                color=discord.Color.blurple(),
+                color=discord.Color.dark_teal(),
                 timestamp=message.created_at,
             )
             embed.set_author(
@@ -163,6 +163,24 @@ async def on_member_remove(member: discord.Member):
     await refresh_server_stats_message(member.guild)
 
 
+async def send_to_log_channel(guild: discord.Guild, embed: discord.Embed):
+    """Send a pre-built embed to the configured log channel, if one is set."""
+    cfg = get_guild_cfg(guild.id)
+    channel_id = cfg.get("log_channel_id")
+    if not channel_id:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+    try:
+        await channel.send(embed=embed)
+    except discord.Forbidden:
+        pass
+
+
+SPACER = "\u200b"  # invisible character used as a blank-line spacer in embeds
+
+
 async def log_action(
     guild: discord.Guild,
     title: str,
@@ -171,7 +189,35 @@ async def log_action(
     moderator: discord.Member,
     fields: dict = None,
 ):
-    """Post a structured, nicely formatted log embed to the configured log channel."""
+    """Post a structured log embed for an action taken on ONE member."""
+    embed = discord.Embed(title=title, description=SPACER, color=color, timestamp=discord.utils.utcnow())
+    embed.set_author(name=str(member), icon_url=member.display_avatar.url)
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    if fields:
+        items = list(fields.items())
+        for i, (name, value) in enumerate(items):
+            embed.add_field(name=name, value=value, inline=len(str(value)) <= 30)
+            # Full-width spacer row between fields so groups don't feel cramped together.
+            if i < len(items) - 1:
+                embed.add_field(name=SPACER, value=SPACER, inline=False)
+
+    embed.set_footer(
+        text=f"Action by {moderator.display_name} • Member ID: {member.id}",
+        icon_url=moderator.display_avatar.url,
+    )
+    await send_to_log_channel(guild, embed)
+
+
+async def log_movement(
+    guild: discord.Guild,
+    member: discord.Member,
+    target: str,
+    reason: str,
+    moderator: discord.Member,
+):
+    """Post a compact one-line log entry for a role/roster 'movement':
+    Member → Target | Reason | Moderator | Timestamp"""
     cfg = get_guild_cfg(guild.id)
     channel_id = cfg.get("log_channel_id")
     if not channel_id:
@@ -180,21 +226,37 @@ async def log_action(
     if channel is None:
         return
 
-    embed = discord.Embed(title=title, color=color, timestamp=discord.utils.utcnow())
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Member", value=member.mention, inline=True)
-    embed.add_field(name="Moderator", value=moderator.mention, inline=True)
-
-    if fields:
-        for name, value in fields.items():
-            embed.add_field(name=name, value=value, inline=False)
-
-    embed.set_footer(text=f"User ID: {member.id}")
-
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    line = f"{member.mention} → {target} | {reason} | {moderator.mention} | <t:{now_ts}:f>"
     try:
-        await channel.send(embed=embed)
+        await channel.send(line)
     except discord.Forbidden:
         pass
+
+
+async def log_bulk_action(
+    guild: discord.Guild,
+    title: str,
+    color: discord.Color,
+    moderator: discord.Member,
+    description: str,
+    fields: dict = None,
+):
+    """Post a log embed for an action that isn't about a single member (e.g. bulk import)."""
+    embed = discord.Embed(title=title, description=f"{description}\n{SPACER}", color=color, timestamp=discord.utils.utcnow())
+
+    if fields:
+        items = list(fields.items())
+        for i, (name, value) in enumerate(items):
+            embed.add_field(name=name, value=value, inline=len(str(value)) <= 30)
+            if i < len(items) - 1:
+                embed.add_field(name=SPACER, value=SPACER, inline=False)
+
+    embed.set_footer(
+        text=f"Run by {moderator.display_name} • Moderator ID: {moderator.id}",
+        icon_url=moderator.display_avatar.url,
+    )
+    await send_to_log_channel(guild, embed)
 
 
 def record_history(guild_id: int, user_id: int, action: str, detail: str, moderator_id: int, reason: str = None):
@@ -245,7 +307,7 @@ def build_roster_embed(guild: discord.Guild) -> discord.Embed:
     roster = cfg.get("roster", [])  # list of {"user_id": int, "rank_role_id": int}
     rank_role_ids = cfg.get("ranks", [])  # ordered list of role IDs, highest first
 
-    embed = discord.Embed(title="📋 Server Roster", color=discord.Color.blurple())
+    embed = discord.Embed(title="📋 Server Roster", color=discord.Color.teal())
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
 
@@ -268,6 +330,23 @@ def build_roster_embed(guild: discord.Guild) -> discord.Embed:
         else:
             unranked.append(entry)
 
+    # Overview: a quick bar-chart breakdown of the whole roster before the per-rank lists.
+    overview_lines = [f"**{len(roster)}** total member(s)", ""]
+    for position, rid in enumerate(rank_role_ids):
+        members = grouped[rid]
+        if not members:
+            continue
+        role = guild.get_role(rid)
+        label = role.name if role else "deleted role"
+        icon = RANK_TIER_ICONS[position] if position < len(RANK_TIER_ICONS) else "▪️"
+        overview_lines.append(f"{icon} `{bar(len(members), len(roster))}` {label} — **{len(members)}**")
+        overview_lines.append("")  # blank line between each rank's bar for breathing room
+    if unranked:
+        overview_lines.append(f"❔ `{bar(len(unranked), len(roster))}` Unranked — **{len(unranked)}**")
+    embed.description = "\n".join(overview_lines).rstrip() + f"\n{SPACER}"
+
+    embed.add_field(name=SPACER, value=SPACER, inline=False)
+
     for position, rid in enumerate(rank_role_ids):
         members = grouped[rid]
         if not members:
@@ -277,6 +356,7 @@ def build_roster_embed(guild: discord.Guild) -> discord.Embed:
         icon = RANK_TIER_ICONS[position] if position < len(RANK_TIER_ICONS) else "▪️"
         value = "\n".join(member_line(i, e) for i, e in enumerate(members, start=1))
         embed.add_field(name=f"{icon} {label} — {len(members)}", value=value, inline=False)
+        embed.add_field(name=SPACER, value=SPACER, inline=False)
 
     if unranked:
         value = "\n".join(member_line(i, e) for i, e in enumerate(unranked, start=1))
@@ -323,16 +403,28 @@ def build_server_stats_embed(guild: discord.Guild) -> discord.Embed:
     humans = sum(1 for m in guild.members if not m.bot)
     bots = sum(1 for m in guild.members if m.bot)
 
-    embed = discord.Embed(title=f"📈 {guild.name} Stats", color=discord.Color.blurple())
+    embed = discord.Embed(title=f"📈 {guild.name} — Server Stats", color=discord.Color.dark_blue())
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
+    if guild.banner:
+        embed.set_image(url=guild.banner.url)
 
-    embed.add_field(name="Total Members", value=str(guild.member_count), inline=True)
-    embed.add_field(name="Humans", value=str(humans), inline=True)
-    embed.add_field(name="Bots", value=str(bots), inline=True)
-    embed.add_field(name="Roster Size", value=str(len(roster)), inline=True)
-    embed.add_field(name="Server Boosts", value=str(guild.premium_subscription_count or 0), inline=True)
-    embed.add_field(name="Created", value=f"<t:{int(guild.created_at.timestamp())}:D>", inline=True)
+    embed.description = (
+        f"👥 **{guild.member_count}** total members "
+        f"(`{bar(humans, guild.member_count, 8)}` {humans} human, "
+        f"`{bar(bots, guild.member_count, 8)}` {bots} bot)\n"
+        f"{SPACER}"
+    )
+
+    embed.add_field(name="🧑‍🤝‍🧑 Humans", value=str(humans), inline=True)
+    embed.add_field(name="🤖 Bots", value=str(bots), inline=True)
+    embed.add_field(name=SPACER, value=SPACER, inline=True)
+    embed.add_field(name="📋 Roster Size", value=str(len(roster)), inline=True)
+    embed.add_field(name="🚀 Server Boosts", value=str(guild.premium_subscription_count or 0), inline=True)
+    embed.add_field(name=SPACER, value=SPACER, inline=True)
+    embed.add_field(name="🎂 Created", value=f"<t:{int(guild.created_at.timestamp())}:D>", inline=True)
+    embed.add_field(name=SPACER, value=SPACER, inline=True)
+    embed.add_field(name=SPACER, value=SPACER, inline=True)
 
     embed.set_footer(text="Last updated")
     embed.timestamp = discord.utils.utcnow()
@@ -368,12 +460,31 @@ async def refresh_server_stats_message(guild: discord.Guild):
         pass
 
 
-def action_embed(title: str, description: str, color: discord.Color, member: discord.Member = None) -> discord.Embed:
-    """A small, consistently-styled embed for command confirmation responses
-    (as opposed to the log channel embeds, which are more detailed)."""
-    embed = discord.Embed(title=title, description=description, color=color)
+def bar(value: int, total: int, length: int = 12) -> str:
+    """A little unicode progress bar, e.g. '███████░░░░░' — used to visualize proportions."""
+    if total <= 0:
+        return "░" * length
+    filled = round(length * value / total)
+    filled = max(0, min(length, filled))
+    return "█" * filled + "░" * (length - filled)
+
+
+def action_embed(
+    title: str,
+    description: str,
+    color: discord.Color,
+    member: discord.Member = None,
+    moderator: discord.Member = None,
+) -> discord.Embed:
+    """A spaced-out embed for command confirmation responses (as opposed to
+    the log channel embeds, which include a footer credit to the moderator)."""
+    embed = discord.Embed(title=title, description=f"{SPACER}\n{description}\n{SPACER}", color=color)
     if member is not None:
+        embed.set_author(name=str(member), icon_url=member.display_avatar.url)
         embed.set_thumbnail(url=member.display_avatar.url)
+    if moderator is not None:
+        embed.set_footer(text=f"Action by {moderator.display_name}", icon_url=moderator.display_avatar.url)
+    embed.timestamp = discord.utils.utcnow()
     return embed
 
 
@@ -585,15 +696,15 @@ async def addrole(interaction: discord.Interaction, user: discord.Member, role: 
         f"Gave {role.mention} to {user.mention}.\n**Reason:** {reason}{note}",
         discord.Color.green(),
         member=user,
+        moderator=interaction.user,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    await log_action(
+    await log_movement(
         interaction.guild,
-        title="🟢 Role Added",
-        color=discord.Color.green(),
         member=user,
+        target=role.mention,
+        reason=reason,
         moderator=interaction.user,
-        fields={"Role": role.mention, "Reason": reason},
     )
 
 
@@ -625,15 +736,15 @@ async def removerole(interaction: discord.Interaction, user: discord.Member, rol
         f"Removed {role.mention} from {user.mention}.\n**Reason:** {reason}{note}",
         discord.Color.red(),
         member=user,
+        moderator=interaction.user,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    await log_action(
+    await log_movement(
         interaction.guild,
-        title="🔴 Role Removed",
-        color=discord.Color.red(),
         member=user,
+        target=f"~~{role.mention}~~ removed",
+        reason=reason,
         moderator=interaction.user,
-        fields={"Role": role.mention, "Reason": reason},
     )
 
 
@@ -706,24 +817,24 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
         dm_sent = await dm_notify(
             interaction.guild, user,
             title="📋 Your roster rank changed",
-            color=discord.Color.blurple(),
+            color=discord.Color.teal(),
             fields={"Previous Rank": old_label, "New Rank": rank.mention, "Reason": reason},
         )
         note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
         embed = action_embed(
             "📋 Rank Changed",
             f"Moved {user.mention} from {old_label} to {rank.mention}.\n**Reason:** {reason}{note}",
-            discord.Color.blurple(),
-            member=user,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        await log_action(
-            interaction.guild,
-            title="📋 Roster Rank Changed",
-            color=discord.Color.blurple(),
+            discord.Color.teal(),
             member=user,
             moderator=interaction.user,
-            fields={"Previous Rank": old_label, "New Rank": rank.mention, "Reason": reason},
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await log_movement(
+            interaction.guild,
+            member=user,
+            target=rank.mention,
+            reason=reason,
+            moderator=interaction.user,
         )
         record_history(
             interaction.guild_id, user.id, "Rank Changed", f"{old_label} → {rank.mention}",
@@ -739,24 +850,24 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
     dm_sent = await dm_notify(
         interaction.guild, user,
         title="📋 You were added to the roster",
-        color=discord.Color.blurple(),
+        color=discord.Color.teal(),
         fields={"Rank": rank.mention, "Reason": reason},
     )
     note = "\n\n*(couldn't DM them — their DMs may be closed)*" if not dm_sent else ""
     embed = action_embed(
         "📋 Added to Roster",
         f"Added {user.mention} to the roster and gave them {rank.mention}.\n**Reason:** {reason}{note}",
-        discord.Color.blurple(),
-        member=user,
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-    await log_action(
-        interaction.guild,
-        title="📋 Added to Roster",
-        color=discord.Color.blurple(),
+        discord.Color.teal(),
         member=user,
         moderator=interaction.user,
-        fields={"Rank": rank.mention, "Reason": reason},
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await log_movement(
+        interaction.guild,
+        member=user,
+        target=f"{rank.mention} (added to roster)",
+        reason=reason,
+        moderator=interaction.user,
     )
     record_history(interaction.guild_id, user.id, "Added to Roster", rank.mention, interaction.user.id, reason)
     await refresh_roster_message(interaction.guild)
@@ -816,15 +927,15 @@ async def rosterremove(interaction: discord.Interaction, user: discord.Member, r
         f"Removed {user.mention} from the roster.\n**Reason:** {reason}{note}",
         discord.Color.orange(),
         member=user,
+        moderator=interaction.user,
     )
     await interaction.edit_original_response(content=None, embed=embed, view=None)
-    await log_action(
+    await log_movement(
         interaction.guild,
-        title="📋 Removed from Roster",
-        color=discord.Color.orange(),
         member=user,
+        target="removed from roster",
+        reason=reason,
         moderator=interaction.user,
-        fields={"Reason": reason},
     )
     record_history(interaction.guild_id, user.id, "Removed from Roster", "", interaction.user.id, reason)
     await refresh_roster_message(interaction.guild)
@@ -953,18 +1064,18 @@ async def _change_rank(interaction: discord.Interaction, user: discord.Member, r
         f"{verb}d {user.mention} from {old_label} to {new_role.mention}.\n**Reason:** {reason}{note}",
         dm_color,
         member=user,
+        moderator=interaction.user,
     )
     if is_demote:
         await interaction.edit_original_response(content=None, embed=result_embed, view=None)
     else:
         await interaction.response.send_message(embed=result_embed, ephemeral=True)
-    await log_action(
+    await log_movement(
         interaction.guild,
-        title=f"⬆️ {verb}d" if step < 0 else f"⬇️ {verb}d",
-        color=discord.Color.gold() if step < 0 else discord.Color.dark_orange(),
         member=user,
+        target=new_role.mention,
+        reason=reason,
         moderator=interaction.user,
-        fields={"Previous Rank": old_label, "New Rank": new_role.mention, "Reason": reason},
     )
     record_history(
         interaction.guild_id, user.id, f"{verb}d", f"{old_label} → {new_role.mention}",
@@ -1039,19 +1150,19 @@ async def rosterimport(interaction: discord.Interaction, rank: discord.Role):
 
     save_config(config)
 
-    embed = discord.Embed(title="📋 Roster Import Complete", color=discord.Color.blurple())
+    embed = discord.Embed(title="📋 Roster Import Complete", color=discord.Color.teal())
     embed.description = f"Imported everyone with {rank.mention} onto the roster."
     embed.add_field(name="Added", value=str(added), inline=True)
     embed.add_field(name="Moved", value=str(moved), inline=True)
     embed.add_field(name="Already Correct", value=str(skipped), inline=True)
     await interaction.followup.send(embed=embed, ephemeral=True)
-    await log_action(
+    await log_bulk_action(
         interaction.guild,
         title="📋 Roster Bulk Import",
-        color=discord.Color.blurple(),
-        member=interaction.user,
+        color=discord.Color.teal(),
         moderator=interaction.user,
-        fields={"Rank": rank.mention, "Added": str(added), "Moved": str(moved), "Already Correct": str(skipped)},
+        description=f"Imported everyone with {rank.mention} onto the roster.",
+        fields={"Added": str(added), "Moved": str(moved), "Already Correct": str(skipped)},
     )
     await refresh_roster_message(interaction.guild)
     await refresh_server_stats_message(interaction.guild)
@@ -1069,7 +1180,7 @@ async def stats(interaction: discord.Interaction):
     roster = cfg.get("roster", [])
     rank_role_ids = cfg.get("ranks", [])
 
-    embed = discord.Embed(title="📊 Roster Stats", color=discord.Color.blurple())
+    embed = discord.Embed(title="📊 Roster Stats", color=discord.Color.dark_blue())
     if interaction.guild.icon:
         embed.set_thumbnail(url=interaction.guild.icon.url)
 
@@ -1087,14 +1198,25 @@ async def stats(interaction: discord.Interaction):
         else:
             unranked += 1
 
+    embed.description = SPACER
+
     for position, rid in enumerate(rank_role_ids):
         role = interaction.guild.get_role(rid)
         label = role.mention if role else "(deleted role)"
         icon = RANK_TIER_ICONS[position] if position < len(RANK_TIER_ICONS) else "▪️"
-        embed.add_field(name=f"{icon} {label}", value=str(counts[rid]), inline=True)
+        embed.add_field(
+            name=f"{icon} {label} — {counts[rid]}",
+            value=f"`{bar(counts[rid], len(roster))}`",
+            inline=False,
+        )
+        embed.add_field(name=SPACER, value=SPACER, inline=False)
 
     if unranked:
-        embed.add_field(name="❔ Unranked", value=str(unranked), inline=True)
+        embed.add_field(
+            name=f"❔ Unranked — {unranked}",
+            value=f"`{bar(unranked, len(roster))}`",
+            inline=False,
+        )
 
     embed.set_footer(text=f"{len(roster)} member(s) total on the roster")
     embed.timestamp = discord.utils.utcnow()
@@ -1164,10 +1286,11 @@ async def rank(interaction: discord.Interaction, user: discord.Member = None):
     user = user or interaction.user
     cfg = get_guild_cfg(interaction.guild_id)
     roster = cfg.get("roster", [])
+    rank_role_ids = cfg.get("ranks", [])
 
     entry = next((e for e in roster if e["user_id"] == user.id), None)
 
-    embed = discord.Embed(color=discord.Color.blurple())
+    embed = discord.Embed(color=discord.Color.purple())
     embed.set_thumbnail(url=user.display_avatar.url)
     embed.set_author(name=str(user), icon_url=user.display_avatar.url)
 
@@ -1177,7 +1300,18 @@ async def rank(interaction: discord.Interaction, user: discord.Member = None):
         return
 
     role = interaction.guild.get_role(entry.get("rank_role_id"))
-    embed.add_field(name="Current Rank", value=role.mention if role else "(deleted role)", inline=True)
+    rank_label = role.mention if role else "(deleted role)"
+
+    if role and role.id in rank_role_ids:
+        position = rank_role_ids.index(role.id)
+        icon = RANK_TIER_ICONS[position] if position < len(RANK_TIER_ICONS) else "▪️"
+        tier_line = f"{icon} Tier {position + 1} of {len(rank_role_ids)}"
+    else:
+        tier_line = ""
+
+    embed.add_field(name="Current Rank", value=f"{rank_label}\n{tier_line}", inline=True)
+    if user.joined_at:
+        embed.add_field(name="Joined Server", value=f"<t:{int(user.joined_at.timestamp())}:D>", inline=True)
     await interaction.response.send_message(embed=embed)
 
 
@@ -1188,7 +1322,7 @@ async def history(interaction: discord.Interaction, user: discord.Member = None)
     cfg = get_guild_cfg(interaction.guild_id)
     user_history = cfg.get("history", {}).get(str(user.id), [])
 
-    embed = discord.Embed(title=f"🕓 History for {user.display_name}", color=discord.Color.blurple())
+    embed = discord.Embed(title=f"🕓 History for {user.display_name}", color=discord.Color.dark_purple())
     embed.set_thumbnail(url=user.display_avatar.url)
 
     if not user_history:
@@ -1292,7 +1426,7 @@ def build_tournament_bracket_embed(name: str, data: dict) -> discord.Embed:
             color=discord.Color.gold(),
         )
     else:
-        embed = discord.Embed(title=f"🏆 Tournament: {name}", color=discord.Color.blurple())
+        embed = discord.Embed(title=f"🏆 Tournament: {name}", color=discord.Color.dark_gold())
 
     for round_idx, round_matches in enumerate(data["rounds"], start=1):
         lines = []
@@ -1410,7 +1544,7 @@ async def tournament_bracket(interaction: discord.Interaction, name: str):
 
 def build_gamenight_embed(data: dict) -> discord.Embed:
     when = int(datetime.fromisoformat(data["when"]).timestamp())
-    embed = discord.Embed(title=f"🎮 Game Night: {data['game']}", color=discord.Color.green())
+    embed = discord.Embed(title=f"🎮 Game Night: {data['game']}", color=discord.Color.blue())
     embed.add_field(name="When", value=f"<t:{when}:F> (<t:{when}:R>)", inline=False)
     embed.add_field(name=f"✅ Going ({len(data['going'])})", value="\n".join(f"<@{u}>" for u in data["going"]) or "—", inline=True)
     embed.add_field(name=f"❓ Maybe ({len(data['maybe'])})", value="\n".join(f"<@{u}>" for u in data["maybe"]) or "—", inline=True)
@@ -1502,7 +1636,7 @@ async def gamenight_list(interaction: discord.Interaction):
         key=lambda d: d["when"],
     )
 
-    embed = discord.Embed(title="🎮 Upcoming Game Nights", color=discord.Color.green())
+    embed = discord.Embed(title="🎮 Upcoming Game Nights", color=discord.Color.blue())
     if not upcoming:
         embed.description = "Nothing scheduled right now."
     else:
@@ -1570,7 +1704,7 @@ async def gamenight_reminder_loop():
 # ---------- MVP voting ----------
 
 def build_mvp_embed(guild: discord.Guild, poll: dict) -> discord.Embed:
-    embed = discord.Embed(title=f"⭐ MVP Vote: {poll['title']}", color=discord.Color.gold())
+    embed = discord.Embed(title=f"⭐ MVP Vote: {poll['title']}", color=discord.Color.fuchsia())
     tally = {}
     for cid in poll["votes"].values():
         tally[cid] = tally.get(cid, 0) + 1
@@ -1752,7 +1886,7 @@ async def crosspost_list(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
     crossposts = cfg.get("crossposts", {})
 
-    embed = discord.Embed(title="🔀 Cross-Posting Mirrors", color=discord.Color.blurple())
+    embed = discord.Embed(title="🔀 Cross-Posting Mirrors", color=discord.Color.dark_teal())
     if not crossposts:
         embed.description = "No mirrors set up in this server."
     else:
