@@ -20,7 +20,7 @@ Commands:
   /history [user]                         - show a member's rank/roster history (defaults to you)
   /setrosterchannel channel:<channel>     - (admin only) post a live roster embed that auto-updates in this channel
   /setranks rank1:<role> [rank2]...[rank8]  - (admin only) set the ordered rank roles (highest first)
-  /setcooldown hours:<int>                - (admin only) require a wait between promote/demote for the same person
+  /setcooldown hours:<int> [user]         - (admin only) require a wait between promote/demote — server-wide, or just for one person
   /setinactivitydays days:<int>           - (admin only) set the silence threshold used by /inactive
   /inactive                               - show roster members who haven't sent a message in a while
   /serverstats                            - show a one-off snapshot of server stats
@@ -56,6 +56,7 @@ Commands:
   /afk [reason]                           - mark yourself AFK; clears automatically when you send a message again
   /setvcgreeting user:<member> message:<text> - say something out loud whenever this person joins a voice channel
   /removevcgreeting user:<member>         - stop greeting this person when they join a VC
+  /evaluate [user]                        - show message activity for the current week (leaderboard or one person); auto-resets weekly
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -124,6 +125,8 @@ async def on_ready():
         print(f"Sync failed: {e}")
     if not gamenight_reminder_loop.is_running():
         gamenight_reminder_loop.start()
+    if not weekly_evaluation_loop.is_running():
+        weekly_evaluation_loop.start()
 
 
 @bot.event
@@ -187,12 +190,19 @@ async def on_message(message: discord.Message):
             except discord.Forbidden:
                 pass
 
+    # ---- weekly message count (for /evaluate) ----
+    message_counts = cfg.setdefault("message_counts", {})
+    author_key = str(message.author.id)
+    message_counts[author_key] = message_counts.get(author_key, 0) + 1
+    cfg.setdefault("message_count_since", datetime.now(timezone.utc).isoformat())
+
     # ---- activity tracking (for /inactive) ----
     last_active = cfg.setdefault("last_active", {})
     now = datetime.now(timezone.utc)
 
     # Only write to disk if it's been a while since we last recorded this
     # person — avoids a disk write on every single message in a busy server.
+    # (message_counts above is already incremented in memory either way.)
     previous = last_active.get(str(message.author.id))
     if previous:
         try:
@@ -744,21 +754,45 @@ async def setranks(
 
 @bot.tree.command(name="setcooldown", description="Set a cooldown period before someone can be promoted/demoted again.")
 @app_commands.checks.has_permissions(administrator=True)
-@app_commands.describe(hours="Hours between rank changes for the same person (0 to disable)")
-async def setcooldown(interaction: discord.Interaction, hours: int):
+@app_commands.describe(
+    hours="Hours between rank changes (0 to disable)",
+    user="Only apply this to one specific person (omit to set the server-wide default)",
+)
+async def setcooldown(interaction: discord.Interaction, hours: int, user: discord.Member = None):
     if hours < 0:
         await interaction.response.send_message("❌ Hours can't be negative.", ephemeral=True)
         return
 
     cfg = get_guild_cfg(interaction.guild_id)
+
+    if user is not None:
+        user_cooldowns = cfg.setdefault("user_cooldowns", {})
+        if hours == 0:
+            user_cooldowns.pop(str(user.id), None)
+            save_config(config)
+            await interaction.response.send_message(
+                f"✅ Removed {user.mention}'s personal cooldown — they'll use the server default now.", ephemeral=True
+            )
+        else:
+            user_cooldowns[str(user.id)] = hours
+            save_config(config)
+            await interaction.response.send_message(
+                f"✅ {user.mention} must now wait **{hours} hour(s)** between promotions/demotions "
+                "(this overrides the server default for them specifically).",
+                ephemeral=True,
+            )
+        return
+
     cfg["cooldown_hours"] = hours
     save_config(config)
 
     if hours == 0:
-        await interaction.response.send_message("✅ Promote/demote cooldown disabled.", ephemeral=True)
+        await interaction.response.send_message("✅ Promote/demote cooldown disabled server-wide.", ephemeral=True)
     else:
         await interaction.response.send_message(
-            f"✅ Members must now wait **{hours} hour(s)** between promotions/demotions.", ephemeral=True
+            f"✅ Members must now wait **{hours} hour(s)** between promotions/demotions by default "
+            "(anyone with a personal override from `/setcooldown user:...` keeps their own value).",
+            ephemeral=True,
         )
 
 
@@ -1109,7 +1143,8 @@ async def _change_rank(interaction: discord.Interaction, user: discord.Member, r
         )
         return
 
-    cooldown_hours = cfg.get("cooldown_hours", 0)
+    user_cooldowns = cfg.get("user_cooldowns", {})
+    cooldown_hours = user_cooldowns.get(str(user.id), cfg.get("cooldown_hours", 0))
     last_change_str = existing.get("last_rank_change")
     if cooldown_hours and last_change_str:
         last_change = datetime.fromisoformat(last_change_str)
@@ -1849,6 +1884,58 @@ async def gamenight_reminder_loop():
                 changed = True
         if changed:
             save_config(config)
+
+
+def build_evaluation_embed(guild: discord.Guild, cfg: dict, top_n: int = 10) -> discord.Embed:
+    counts = cfg.get("message_counts", {})
+    since_str = cfg.get("message_count_since")
+    since = datetime.fromisoformat(since_str) if since_str else datetime.now(timezone.utc)
+
+    embed = discord.Embed(title="📈 Message Activity", color=discord.Color.dark_teal())
+    embed.description = f"Counting messages since <t:{int(since.timestamp())}:D> (<t:{int(since.timestamp())}:R>)"
+
+    if not counts:
+        embed.description += "\n\nNo messages recorded yet this period."
+        return embed
+
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+    lines = []
+    for i, (user_id, count) in enumerate(ranked, start=1):
+        member = guild.get_member(int(user_id))
+        name = member.mention if member else f"<@{user_id}> (left)"
+        medal = RANK_TIER_ICONS[i - 1] if i - 1 < len(RANK_TIER_ICONS) else "▪️"
+        lines.append(f"{medal} {name} — **{count}** message(s)")
+    embed.add_field(name=f"Top {len(ranked)}", value="\n".join(lines), inline=False)
+    embed.set_footer(text=f"{len(counts)} member(s) with recorded activity this period")
+    return embed
+
+
+@tasks.loop(hours=24)
+async def weekly_evaluation_loop():
+    now = datetime.now(timezone.utc)
+    for guild in bot.guilds:
+        cfg = get_guild_cfg(guild.id)
+        since_str = cfg.get("message_count_since")
+        if not since_str:
+            continue
+        since = datetime.fromisoformat(since_str)
+        if now - since < timedelta(days=7):
+            continue
+
+        log_channel_id = cfg.get("log_channel_id")
+        if log_channel_id:
+            channel = guild.get_channel(log_channel_id)
+            if channel:
+                embed = build_evaluation_embed(guild, cfg)
+                embed.title = "📈 Weekly Message Activity Report"
+                try:
+                    await channel.send(embed=embed)
+                except discord.Forbidden:
+                    pass
+
+        cfg["message_counts"] = {}
+        cfg["message_count_since"] = now.isoformat()
+        save_config(config)
 
 
 # ---------- MVP voting ----------
@@ -2792,6 +2879,7 @@ HELP_CATEGORIES = {
         ("/serverstats", "One-off server stats snapshot"),
         ("/inactive", "Roster members who've gone quiet"),
         ("/audit", "Last 20 rank/roster actions, server-wide"),
+        ("/evaluate", "Message activity leaderboard for the current week"),
     ],
     "🏆 Events & Competition": [
         ("/tournament_create / _start / _report / _bracket", "Run a bracket tournament"),
@@ -2875,6 +2963,29 @@ async def removevcgreeting(interaction: discord.Interaction, user: discord.Membe
     greetings.pop(str(user.id))
     save_config(config)
     await interaction.response.send_message(f"✅ Removed {user.mention}'s VC greeting.", ephemeral=True)
+
+
+# ---------- message activity ----------
+
+@bot.tree.command(name="evaluate", description="Show message activity for the current weekly period.")
+@app_commands.describe(user="Show just this member's count instead of the leaderboard")
+async def evaluate(interaction: discord.Interaction, user: discord.Member = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+
+    if user is not None:
+        counts = cfg.get("message_counts", {})
+        count = counts.get(str(user.id), 0)
+        since_str = cfg.get("message_count_since")
+        since = datetime.fromisoformat(since_str) if since_str else datetime.now(timezone.utc)
+
+        embed = discord.Embed(title=f"📈 Activity — {user.display_name}", color=discord.Color.dark_teal())
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.description = f"**{count}** message(s) since <t:{int(since.timestamp())}:D> (<t:{int(since.timestamp())}:R>)"
+        await interaction.response.send_message(embed=embed)
+        return
+
+    embed = build_evaluation_embed(interaction.guild, cfg)
+    await interaction.response.send_message(embed=embed)
 
 
 # ---------- error handling ----------

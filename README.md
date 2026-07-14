@@ -18,7 +18,7 @@ A slash-command bot that lets your staff instantly assign or remove roles
 | `/promote @user reason:...` | Admins + the manager role | Moves a member up one rank (toward the top of your `/setranks` list) and swaps their role accordingly |
 | `/demote @user reason:...` | Admins + the manager role | Moves a member down one rank (toward the bottom) and swaps their role accordingly — **asks you to confirm first** |
 | `/rosterimport rank:@Staff` | Admins + the manager role | Bulk-adds everyone who already has the `@Staff` role onto the roster at that rank in one go |
-| `/setcooldown hours:24` | Server admins | Requires a wait between promotions/demotions for the same person (0 disables it) |
+| `/setcooldown hours:24 [@user]` | Server admins | Requires a wait between promotions/demotions — server-wide by default, or just for one person if you specify `user` (0 disables) |
 | `/setinactivitydays days:14` | Server admins | Sets how many days of silence counts as "inactive" for `/inactive` (0 disables it) |
 | `/inactive` | Anyone | Lists roster members who haven't sent a message in longer than the configured threshold |
 | `/serverstats` | Anyone | Shows a one-off snapshot of server stats (members, roster size, boosts, etc.) |
@@ -49,6 +49,7 @@ A slash-command bot that lets your staff instantly assign or remove roles
 | `/unlock` | Admins + the manager role | Re-allows sending messages in the current channel |
 | `/slowmode seconds:10` | Admins + the manager role | Sets the current channel's slowmode delay |
 | `/audit` | Admins + the manager role | Shows the last 20 rank/roster actions across everyone in the server |
+| `/evaluate [@user]` | Anyone | Shows the message-activity leaderboard for the current week, or one person's count |
 | `/backup` | Server admins | Exports this server's bot config (ranks, settings, roster, history) as a downloadable file |
 | `/announce #channel title:... message:... [ping_everyone]` | Admins + the manager role | Posts a formatted announcement embed to a channel, pinging @everyone by default |
 | `/massannounce message:... [title] [ping_everyone]` | Admins + the manager role | Posts to every channel with "announcement" in its name AND speaks it aloud in every active voice channel — pings @everyone by default |
@@ -136,8 +137,12 @@ Each run scans your whole server for members who currently hold that role and ad
 ### Cooldown on promotions/demotions
 ```
 /setcooldown hours:24
+/setcooldown hours:72 user:@SomeUser
+/setcooldown hours:0 user:@SomeUser
 ```
-Once set, `/promote` and `/demote` will refuse to change someone's rank again until the cooldown has passed, showing how much time is left. This guards against accidental double-promotions or rapid back-and-forth changes. `/rosteradd` (manual rank picks) isn't affected by the cooldown. Set to `0` to disable it.
+Once set, `/promote` and `/demote` will refuse to change someone's rank again until the cooldown has passed, showing how much time is left. This guards against accidental double-promotions or rapid back-and-forth changes.
+
+Run it **without** `user` to set the default that applies to everyone. Run it **with** `user` to override that default for just one specific person (useful if, say, one person tends to get promoted/demoted more carefully and needs a longer wait, or someone needs an exception with a shorter one). A `0` in the per-user version removes their override and puts them back on the server default; a `0` without a user disables the cooldown entirely for everyone without an override. `/rosteradd` (manual rank picks) isn't affected by the cooldown either way.
 
 ### Inactivity tracking
 ```
@@ -288,6 +293,13 @@ Marks you AFK — anyone who @mentions you afterward gets an automatic heads-up 
 /removevcgreeting user:@Jerry
 ```
 Once set, the bot automatically joins whatever voice channel that person joins and speaks the message out loud, then leaves — no command needs to be run each time, it just happens. If two greeted people join voice channels close together, the greetings play one after another rather than overlapping. Needs the bot's `Connect` and `Speak` permissions in that channel (already covered if you gave the bot Administrator).
+
+### Message activity (weekly)
+```
+/evaluate
+/evaluate user:@SomeUser
+```
+The bot quietly counts how many messages each person sends (no content is read or stored, just a running count per person). `/evaluate` with no user shows a top-10 leaderboard for the current tracking period; with a user, it shows just their count. The period automatically resets every 7 days — if you have a log channel set with `/setlogchannel`, the bot also auto-posts the full leaderboard there right before each weekly reset, so you get a standing record even if nobody checks manually.
 
 ## Notes
 - Role changes are stored in `guild_config.json`, created automatically next to `bot.py`.
