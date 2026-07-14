@@ -50,8 +50,8 @@ A slash-command bot that lets your staff instantly assign or remove roles
 | `/slowmode seconds:10` | Admins + the manager role | Sets the current channel's slowmode delay |
 | `/audit` | Admins + the manager role | Shows the last 20 rank/roster actions across everyone in the server |
 | `/backup` | Server admins | Exports this server's bot config (ranks, settings, roster, history) as a downloadable file |
-| `/announce #channel title:... message:...` | Admins + the manager role | Posts a formatted announcement embed to a channel |
-| `/massannounce message:... [title]` | Admins + the manager role | Posts to every channel with "announcement" in its name AND speaks the message aloud in every voice channel that currently has people in it |
+| `/announce #channel title:... message:... [ping_everyone]` | Admins + the manager role | Posts a formatted announcement embed to a channel, pinging @everyone by default |
+| `/massannounce message:... [title] [ping_everyone]` | Admins + the manager role | Posts to every channel with "announcement" in its name AND speaks it aloud in every active voice channel — pings @everyone by default |
 | `/massrename [prefix] [suffix] [role]` | Admins + the manager role | Adds a prefix/suffix to multiple members' nicknames at once — asks you to confirm first |
 | `/massaddrole role:@... [filter_role]` | Admins + the manager role | Gives a role to multiple members at once — asks you to confirm first |
 | `/massremoverole role:@... [filter_role]` | Admins + the manager role | Removes a role from multiple members at once — asks you to confirm first |
@@ -240,14 +240,15 @@ Sends you a downloadable JSON file containing this server's full bot configurati
 ### Announcements
 ```
 /announce channel:#news title:Server Update message:We just added a new tournament system!
+/announce channel:#news title:Update message:Small fix, nothing urgent ping_everyone:False
 ```
-Posts a clean announcement embed to whatever channel you choose, with your name credited in the footer — nicer than typing a raw message by hand.
+Posts a clean announcement embed to whatever channel you choose, with your name credited in the footer. **Pings @everyone by default** — set `ping_everyone:False` for quieter, non-urgent updates. Note: the bot needs the **Mention @everyone, @here, and All Roles** permission in that channel for the ping to actually notify people (it comes bundled with Administrator, so if you gave the bot that, you're already covered) — if it's missing, the announcement still posts, you'll just get a heads-up that nobody was pinged.
 
 ### Mass announce (text + voice)
 ```
 /massannounce message:Servers restarting in 10 minutes, save your progress! title:Heads Up
 ```
-Goes further than `/announce` — it posts the embed to **every text channel whose name contains "announcement"** (no setup needed, just name your channels normally, e.g. `#announcements`, `#server-announcements`) and **speaks the message out loud** in every voice channel that currently has at least one person in it, one channel at a time. Runs in the background so the command responds instantly instead of making you wait for every voice channel to finish. Needs the bot's `Connect` and `Speak` permissions to reach voice channels (see Setup above) — if it can't join a particular VC, it just skips that one and keeps going.
+Goes further than `/announce` — it posts the embed to **every text channel whose name contains "announcement"** (no setup needed, just name your channels normally, e.g. `#announcements`, `#server-announcements`), **pings @everyone** in each of them by default (same `ping_everyone:False` option available here too), and **speaks the message out loud** in every voice channel that currently has at least one person in it, one channel at a time. Runs in the background so the command responds instantly instead of making you wait for every voice channel to finish. Needs the bot's `Connect` and `Speak` permissions to reach voice channels (see Setup above) — if it can't join a particular VC, it just skips that one and keeps going.
 
 ### Mass rename
 ```

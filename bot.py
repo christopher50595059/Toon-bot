@@ -2349,8 +2349,17 @@ async def backup(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="announce", description="Post a formatted announcement to a channel.")
-@app_commands.describe(channel="Where to post it", title="Announcement title", message="The announcement text")
-async def announce(interaction: discord.Interaction, channel: discord.TextChannel, title: str, message: str):
+@app_commands.describe(
+    channel="Where to post it", title="Announcement title", message="The announcement text",
+    ping_everyone="Ping @everyone in that channel? (default: yes)",
+)
+async def announce(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    title: str,
+    message: str,
+    ping_everyone: bool = True,
+):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
@@ -2358,18 +2367,31 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
         await interaction.response.send_message(f"❌ I don't have permission to send messages in {channel.mention}.", ephemeral=True)
         return
 
-    embed = discord.Embed(title=f"📢 {title}", description=message, color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+    warn_no_ping_perm = ping_everyone and not channel.permissions_for(interaction.guild.me).mention_everyone
+
+    embed = discord.Embed(color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+    embed.title = f"📣 {title}"
+    embed.description = f"{SPACER}\n{message}\n{SPACER}"
     if interaction.guild.icon:
         embed.set_thumbnail(url=interaction.guild.icon.url)
     embed.set_footer(text=f"Posted by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
 
+    content = "@everyone" if ping_everyone else None
+    allowed = discord.AllowedMentions(everyone=ping_everyone)
+
     try:
-        await channel.send(embed=embed)
+        await channel.send(content=content, embed=embed, allowed_mentions=allowed)
     except discord.Forbidden:
         await interaction.response.send_message(f"❌ I don't have permission to send messages in {channel.mention}.", ephemeral=True)
         return
 
     await interaction.response.send_message(f"✅ Announcement posted in {channel.mention}.", ephemeral=True)
+    if warn_no_ping_perm:
+        await interaction.followup.send(
+            "⚠️ Note: I don't have the **Mention @everyone** permission in that channel, so the ping "
+            "didn't actually notify anyone — the announcement posted, just silently.",
+            ephemeral=True,
+        )
 
 
 async def run_broadcast(
@@ -2379,19 +2401,25 @@ async def run_broadcast(
     message: str,
     text_channels: list,
     voice_channels: list,
+    ping_everyone: bool = True,
 ):
-    """Background worker for /broadcast — posts the embed, then speaks the
+    """Background worker for /massannounce — posts the embed, then speaks the
     announcement in each active voice channel one at a time (a bot can only
     be connected to one voice channel per server at once)."""
-    embed = discord.Embed(title=f"📢 {title}", description=message, color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+    embed = discord.Embed(color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+    embed.title = f"📣 {title}"
+    embed.description = f"{SPACER}\n{message}\n{SPACER}"
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
     embed.set_footer(text=f"Posted by {moderator.display_name}", icon_url=moderator.display_avatar.url)
 
+    content = "@everyone" if ping_everyone else None
+    allowed = discord.AllowedMentions(everyone=ping_everyone)
+
     posted = 0
     for channel in text_channels:
         try:
-            await channel.send(embed=embed)
+            await channel.send(content=content, embed=embed, allowed_mentions=allowed)
             posted += 1
         except (discord.Forbidden, discord.HTTPException):
             pass
@@ -2425,8 +2453,11 @@ async def run_broadcast(
 
 
 @bot.tree.command(name="massannounce", description="Send an announcement to all announcement channels and speak it in every active voice channel.")
-@app_commands.describe(message="The announcement text", title="Optional title (defaults to 'Announcement')")
-async def massannounce(interaction: discord.Interaction, message: str, title: str = "Announcement"):
+@app_commands.describe(
+    message="The announcement text", title="Optional title (defaults to 'Announcement')",
+    ping_everyone="Ping @everyone in each channel? (default: yes)",
+)
+async def massannounce(interaction: discord.Interaction, message: str, title: str = "Announcement", ping_everyone: bool = True):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
@@ -2445,7 +2476,9 @@ async def massannounce(interaction: discord.Interaction, message: str, title: st
         f"📢 Broadcasting to {len(text_channels)} announcement channel(s) and speaking in {len(active_vcs)} active voice channel(s)...",
         ephemeral=True,
     )
-    asyncio.create_task(run_broadcast(interaction.guild, interaction.user, title, message, text_channels, active_vcs))
+    asyncio.create_task(
+        run_broadcast(interaction.guild, interaction.user, title, message, text_channels, active_vcs, ping_everyone)
+    )
 
 
 # ---------- mass rename ----------
