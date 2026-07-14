@@ -2442,15 +2442,6 @@ async def run_broadcast(
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-    await log_bulk_action(
-        guild,
-        title="📢 Broadcast Sent",
-        color=discord.Color.blurple(),
-        moderator=moderator,
-        description=f"**{title}**\n{message}",
-        fields={"Text Channels": str(posted), "Voice Channels Announced": str(announced)},
-    )
-
 
 @bot.tree.command(name="massannounce", description="Send an announcement to all announcement channels and speak it in every active voice channel.")
 @app_commands.describe(
