@@ -49,16 +49,23 @@ Commands:
   /audit                                  - show the last 20 rank/roster actions across everyone
   /backup                                 - (admin only) export this server's bot config as a file
   /announce channel:<channel> title:<text> message:<text> - post a formatted announcement
+  /massrename [prefix] [suffix] [role]    - add a prefix/suffix to multiple members' nicknames — asks for confirmation
+  /massaddrole role:<role> [filter_role]  - give a role to multiple members at once — asks for confirmation
+  /massremoverole role:<role> [filter_role] - remove a role from multiple members at once — asks for confirmation
+  /afk [reason]                           - mark yourself AFK; clears automatically when you send a message again
+  /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
 configured "manager role" (or Administrator permission) can run
 /addrole and /removerole.
 """
 
+import asyncio
 import io
 import json
 import os
 import random
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -66,6 +73,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from gtts import gTTS
 
 from keep_alive import keep_alive
 
@@ -145,6 +153,34 @@ async def on_message(message: discord.Message):
                     embed.add_field(name="Attachment", value=first.url, inline=False)
             try:
                 await dest_channel.send(embed=embed)
+            except discord.Forbidden:
+                pass
+
+    # ---- AFK ----
+    afk_users = cfg.setdefault("afk", {})
+
+    # If the sender was AFK, clear it now that they're active again.
+    if str(message.author.id) in afk_users:
+        afk_users.pop(str(message.author.id))
+        save_config(config)
+        try:
+            await message.channel.send(f"👋 Welcome back, {message.author.mention}! I removed your AFK status.")
+        except discord.Forbidden:
+            pass
+
+    # If this message mentions anyone currently AFK, let the sender know.
+    if message.mentions:
+        notices = []
+        for mentioned in message.mentions:
+            if mentioned.id == message.author.id:
+                continue
+            afk_entry = afk_users.get(str(mentioned.id))
+            if afk_entry:
+                since = datetime.fromisoformat(afk_entry["since"])
+                notices.append(f"💤 {mentioned.mention} is AFK: {afk_entry['reason']} (since <t:{int(since.timestamp())}:R>)")
+        if notices:
+            try:
+                await message.channel.send("\n".join(notices))
             except discord.Forbidden:
                 pass
 
@@ -314,6 +350,55 @@ async def dm_notify(
         # Any failure to DM (closed DMs, blocked, can't DM the bot itself, etc.)
         # should never crash the command — just report it as "couldn't DM them".
         return False
+
+
+async def announce_timeout_in_vc(member: discord.Member, minutes: int, reason: str):
+    """If the member is currently in a voice channel, join it, speak their name,
+    the timeout duration, and the reason via TTS, then leave. Never raises —
+    any failure here (permissions, no voice library, etc.) is swallowed so it
+    can't break the /timeout command itself."""
+    try:
+        if member.voice is None or member.voice.channel is None:
+            return
+
+        voice_channel = member.voice.channel
+        guild = member.guild
+        text = f"{member.display_name} has been timed out for {minutes} minutes. Reason: {reason}"
+
+        # gTTS's generation call is blocking (network request) — run it off the event loop.
+        loop = asyncio.get_event_loop()
+        tmp_path = None
+
+        def make_tts_file():
+            nonlocal tmp_path
+            tts = gTTS(text=text)
+            fd, path = tempfile.mkstemp(suffix=".mp3")
+            os.close(fd)
+            tts.save(path)
+            tmp_path = path
+
+        await loop.run_in_executor(None, make_tts_file)
+
+        voice_client = guild.voice_client
+        if voice_client is None:
+            voice_client = await voice_channel.connect()
+        elif voice_client.channel != voice_channel:
+            await voice_client.move_to(voice_channel)
+
+        done = asyncio.Event()
+
+        def after_playback(error):
+            loop.call_soon_threadsafe(done.set)
+
+        source = discord.FFmpegPCMAudio(tmp_path)
+        voice_client.play(source, after=after_playback)
+        await done.wait()
+        await voice_client.disconnect()
+
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    except Exception:
+        pass
 
 
 RANK_TIER_ICONS = ["🥇", "🥈", "🥉", "🔹", "🔸", "▪️", "▪️", "▪️"]
@@ -2047,6 +2132,11 @@ async def timeout(interaction: discord.Interaction, user: discord.Member, minute
         await interaction.response.send_message("❌ I don't have permission to time out that member.", ephemeral=True)
         return
 
+    # Runs in the background so it doesn't delay the command's response —
+    # if they're not in a voice channel, or anything about voice fails, this
+    # silently does nothing (see announce_timeout_in_vc).
+    asyncio.create_task(announce_timeout_in_vc(user, minutes, reason))
+
     dm_sent = await dm_notify(
         interaction.guild, user,
         title="🔇 You were timed out",
@@ -2288,6 +2378,329 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
         return
 
     await interaction.response.send_message(f"✅ Announcement posted in {channel.mention}.", ephemeral=True)
+
+
+# ---------- mass rename ----------
+
+@bot.tree.command(name="massrename", description="Add a prefix/suffix to multiple members' nicknames at once.")
+@app_commands.describe(
+    prefix="Text to add before each name (optional)",
+    suffix="Text to add after each name (optional)",
+    role="Only rename members with this role (omit to target everyone eligible)",
+    reason="Why you're doing this",
+)
+async def massrename(
+    interaction: discord.Interaction,
+    prefix: str = None,
+    suffix: str = None,
+    role: discord.Role = None,
+    reason: str = "Mass rename",
+):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not prefix and not suffix:
+        await interaction.response.send_message("❌ Provide at least a prefix or a suffix.", ephemeral=True)
+        return
+    if not interaction.guild.me.guild_permissions.manage_nicknames:
+        await interaction.response.send_message("❌ I don't have permission to manage nicknames.", ephemeral=True)
+        return
+
+    bot_top_role = interaction.guild.me.top_role
+    targets = [
+        m for m in interaction.guild.members
+        if not m.bot
+        and m.id != interaction.guild.owner_id
+        and m.top_role < bot_top_role
+        and (role is None or role in m.roles)
+    ]
+
+    if not targets:
+        await interaction.response.send_message("ℹ️ No eligible members matched — nothing to rename.", ephemeral=True)
+        return
+
+    preview = f"{prefix or ''}<name>{suffix or ''}"
+    view = ConfirmView(interaction.user.id)
+    scope = f"members with {role.mention}" if role else "all eligible members"
+    await interaction.response.send_message(
+        f"⚠️ Rename **{len(targets)}** {scope} to the pattern `{preview}`? This can't be easily undone in bulk.",
+        view=view, ephemeral=True,
+    )
+    await view.wait()
+    if view.confirmed is None:
+        await interaction.edit_original_response(content="⏱️ Timed out — no changes made.", view=None)
+        return
+    if not view.confirmed:
+        await interaction.edit_original_response(content="❌ Cancelled — no changes made.", view=None)
+        return
+
+    await interaction.edit_original_response(content=f"⏳ Renaming {len(targets)} member(s)...", view=None)
+
+    renamed, failed = 0, 0
+    for member in targets:
+        base_name = member.nick or member.name
+        new_nick = f"{prefix or ''}{base_name}{suffix or ''}"[:32]  # Discord's nickname length limit
+        try:
+            await member.edit(nick=new_nick, reason=f"Mass rename by {interaction.user}: {reason}")
+            renamed += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    summary = f"✅ Renamed {renamed} member(s)."
+    if failed:
+        summary += f" ⚠️ {failed} failed (likely a permissions issue)."
+    await interaction.followup.send(summary, ephemeral=True)
+
+    await log_bulk_action(
+        interaction.guild,
+        title="✏️ Mass Rename",
+        color=discord.Color.dark_teal(),
+        moderator=interaction.user,
+        description=f"Applied pattern `{preview}` to {scope}.",
+        fields={"Renamed": str(renamed), "Failed": str(failed), "Reason": reason},
+    )
+
+
+# ---------- mass role add/remove ----------
+
+@bot.tree.command(name="massaddrole", description="Give a role to multiple members at once.")
+@app_commands.describe(
+    role="The role to give",
+    filter_role="Only target members who already have this role (omit to target everyone eligible)",
+    reason="Why you're doing this",
+)
+async def massaddrole(
+    interaction: discord.Interaction,
+    role: discord.Role,
+    filter_role: discord.Role = None,
+    reason: str = "Mass role add",
+):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    bot_top_role = interaction.guild.me.top_role
+    if role >= bot_top_role:
+        await interaction.response.send_message(
+            f"❌ I can't assign {role.mention} — it's higher than or equal to my own top role. "
+            "Move my bot role above it in Server Settings > Roles.",
+            ephemeral=True,
+        )
+        return
+
+    targets = [
+        m for m in interaction.guild.members
+        if role not in m.roles
+        and (filter_role is None or filter_role in m.roles)
+    ]
+
+    if not targets:
+        await interaction.response.send_message("ℹ️ No eligible members matched — nothing to do.", ephemeral=True)
+        return
+
+    scope = f"members with {filter_role.mention}" if filter_role else "all eligible members"
+    view = ConfirmView(interaction.user.id)
+    await interaction.response.send_message(
+        f"⚠️ Give {role.mention} to **{len(targets)}** {scope}?", view=view, ephemeral=True
+    )
+    await view.wait()
+    if view.confirmed is None:
+        await interaction.edit_original_response(content="⏱️ Timed out — no changes made.", view=None)
+        return
+    if not view.confirmed:
+        await interaction.edit_original_response(content="❌ Cancelled — no changes made.", view=None)
+        return
+
+    await interaction.edit_original_response(content=f"⏳ Adding {role.mention} to {len(targets)} member(s)...", view=None)
+
+    added, failed = 0, 0
+    for member in targets:
+        try:
+            await member.add_roles(role, reason=f"Mass add by {interaction.user}: {reason}")
+            added += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    summary = f"✅ Gave {role.mention} to {added} member(s)."
+    if failed:
+        summary += f" ⚠️ {failed} failed (likely a permissions issue)."
+    await interaction.followup.send(summary, ephemeral=True)
+
+    await log_bulk_action(
+        interaction.guild,
+        title="🟢 Mass Role Add",
+        color=discord.Color.green(),
+        moderator=interaction.user,
+        description=f"Gave {role.mention} to {scope}.",
+        fields={"Added": str(added), "Failed": str(failed), "Reason": reason},
+    )
+
+
+@bot.tree.command(name="massremoverole", description="Remove a role from multiple members at once.")
+@app_commands.describe(
+    role="The role to remove",
+    filter_role="Only target members who also have this role (omit to target everyone with the role)",
+    reason="Why you're doing this",
+)
+async def massremoverole(
+    interaction: discord.Interaction,
+    role: discord.Role,
+    filter_role: discord.Role = None,
+    reason: str = "Mass role remove",
+):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    bot_top_role = interaction.guild.me.top_role
+    if role >= bot_top_role:
+        await interaction.response.send_message(
+            f"❌ I can't manage {role.mention} — it's higher than or equal to my own top role. "
+            "Move my bot role above it in Server Settings > Roles.",
+            ephemeral=True,
+        )
+        return
+
+    targets = [
+        m for m in interaction.guild.members
+        if role in m.roles
+        and (filter_role is None or filter_role in m.roles)
+    ]
+
+    if not targets:
+        await interaction.response.send_message("ℹ️ No eligible members matched — nothing to do.", ephemeral=True)
+        return
+
+    scope = f"members who also have {filter_role.mention}" if filter_role else "all members who have it"
+    view = ConfirmView(interaction.user.id)
+    await interaction.response.send_message(
+        f"⚠️ Remove {role.mention} from **{len(targets)}** {scope}?", view=view, ephemeral=True
+    )
+    await view.wait()
+    if view.confirmed is None:
+        await interaction.edit_original_response(content="⏱️ Timed out — no changes made.", view=None)
+        return
+    if not view.confirmed:
+        await interaction.edit_original_response(content="❌ Cancelled — no changes made.", view=None)
+        return
+
+    await interaction.edit_original_response(content=f"⏳ Removing {role.mention} from {len(targets)} member(s)...", view=None)
+
+    removed, failed = 0, 0
+    for member in targets:
+        try:
+            await member.remove_roles(role, reason=f"Mass remove by {interaction.user}: {reason}")
+            removed += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    summary = f"✅ Removed {role.mention} from {removed} member(s)."
+    if failed:
+        summary += f" ⚠️ {failed} failed (likely a permissions issue)."
+    await interaction.followup.send(summary, ephemeral=True)
+
+    await log_bulk_action(
+        interaction.guild,
+        title="🔴 Mass Role Remove",
+        color=discord.Color.red(),
+        moderator=interaction.user,
+        description=f"Removed {role.mention} from {scope}.",
+        fields={"Removed": str(removed), "Failed": str(failed), "Reason": reason},
+    )
+
+
+# ---------- AFK ----------
+
+@bot.tree.command(name="afk", description="Mark yourself as AFK. Clears automatically next time you send a message.")
+@app_commands.describe(reason="Why you're AFK (optional)")
+async def afk(interaction: discord.Interaction, reason: str = "AFK"):
+    cfg = get_guild_cfg(interaction.guild_id)
+    afk_users = cfg.setdefault("afk", {})
+    afk_users[str(interaction.user.id)] = {
+        "reason": reason,
+        "since": datetime.now(timezone.utc).isoformat(),
+    }
+    save_config(config)
+    await interaction.response.send_message(f"💤 {interaction.user.mention} is now AFK: {reason}")
+
+
+# ---------- help ----------
+
+HELP_CATEGORIES = {
+    "🎭 Roles": [
+        ("/addrole", "Give a role to a member"),
+        ("/removerole", "Remove a role from a member"),
+    ],
+    "📋 Roster & Ranks": [
+        ("/rosteradd", "Add/move a member on the roster + give them the role"),
+        ("/rosterremove", "Remove a member from the roster"),
+        ("/promote", "Move a member up one rank"),
+        ("/demote", "Move a member down one rank"),
+        ("/rosterimport", "Bulk-import everyone with a rank role onto the roster"),
+        ("/roster", "Show the current roster"),
+        ("/stats", "Show roster counts per rank"),
+        ("/rank", "Show a member's current rank"),
+        ("/history", "Show a member's rank/roster history"),
+    ],
+    "⚙️ Setup (admin)": [
+        ("/setlogchannel", "Set where actions are logged"),
+        ("/setmanagerrole", "Set who can use the role/roster commands"),
+        ("/setranks", "Set the ordered rank roles"),
+        ("/setrosterchannel", "Live auto-updating roster embed"),
+        ("/setstatschannel", "Live auto-updating server stats embed"),
+        ("/setcooldown", "Cooldown between promotions/demotions"),
+        ("/setinactivitydays", "Silence threshold for /inactive"),
+        ("/crosspost_add / _remove / _list", "Mirror a channel to another server"),
+        ("/backup", "Export the server's bot config as a file"),
+    ],
+    "📊 Server Info": [
+        ("/serverstats", "One-off server stats snapshot"),
+        ("/inactive", "Roster members who've gone quiet"),
+        ("/audit", "Last 20 rank/roster actions, server-wide"),
+    ],
+    "🏆 Events & Competition": [
+        ("/tournament_create / _start / _report / _bracket", "Run a bracket tournament"),
+        ("/gamenight_create / _list / _cancel", "Schedule game nights with RSVPs"),
+        ("/mvp_start / _end", "Vote for MVP among candidates"),
+    ],
+    "🛡️ Moderation": [
+        ("/kick", "Kick a member (confirmation required)"),
+        ("/ban", "Ban a member (confirmation required)"),
+        ("/timeout", "Temporarily mute a member"),
+        ("/warn", "Log a warning against a member"),
+        ("/warnings", "Show a member's warning history"),
+        ("/purge", "Bulk-delete recent messages"),
+        ("/lock / /unlock", "Stop/allow messages in this channel"),
+        ("/slowmode", "Set this channel's slowmode delay"),
+    ],
+    "🧰 Mass Actions": [
+        ("/massrename", "Prefix/suffix multiple nicknames at once"),
+        ("/massaddrole", "Give a role to multiple members at once"),
+        ("/massremoverole", "Remove a role from multiple members at once"),
+    ],
+    "🔧 Utility": [
+        ("/afk", "Mark yourself AFK"),
+        ("/announce", "Post a formatted announcement"),
+    ],
+}
+
+
+@bot.tree.command(name="help", description="Show every command this bot has, grouped by category.")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📖 Bot Commands",
+        description="Everything this bot can do, grouped by category.",
+        color=discord.Color.blurple(),
+    )
+    if bot.user:
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+
+    for category, commands_list in HELP_CATEGORIES.items():
+        value = "\n".join(f"**{name}** — {desc}" for name, desc in commands_list)
+        embed.add_field(name=category, value=value, inline=False)
+
+    embed.set_footer(text="Most commands require the manager role or Administrator permission")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ---------- error handling ----------
