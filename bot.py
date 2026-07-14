@@ -401,7 +401,7 @@ async def announce_timeout_in_vc(member: discord.Member, minutes: int, reason: s
         if member.voice is None or member.voice.channel is None:
             return
 
-        text = f"{member.display_name} has been timed out for {minutes} minutes. Reason: {reason}"
+        text = f"{member.display_name} has been timed out for {minutes} minutes, reason: {reason}"
         tmp_path = await generate_tts_file(text)
         try:
             await play_tts_in_voice_channel(member.voice.channel, tmp_path)
@@ -2398,7 +2398,7 @@ async def run_broadcast(
 
     announced = 0
     if voice_channels:
-        spoken_text = f"Announcement. {message}"
+        spoken_text = f"Announcement, {message}"
         try:
             tmp_path = await generate_tts_file(spoken_text)
         except Exception:
