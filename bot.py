@@ -428,10 +428,14 @@ def build_roster_embed(guild: discord.Guild) -> discord.Embed:
         embed.description = "The roster is currently empty."
         return embed
 
-    def member_line(index, entry):
-        member = guild.get_member(entry["user_id"])
-        name = member.mention if member else f"<@{entry['user_id']}> (left server)"
-        return f"`{index:>2}.` {name}"
+    embed.description = f"**{len(roster)}** total member(s)"
+
+    def member_mentions(entries):
+        names = []
+        for entry in entries:
+            member = guild.get_member(entry["user_id"])
+            names.append(member.mention if member else f"<@{entry['user_id']}> (left)")
+        return ", ".join(names)
 
     # Group entries by rank role, preserving the configured rank order.
     grouped = {rid: [] for rid in rank_role_ids}
@@ -443,37 +447,17 @@ def build_roster_embed(guild: discord.Guild) -> discord.Embed:
         else:
             unranked.append(entry)
 
-    # Overview: a quick bar-chart breakdown of the whole roster before the per-rank lists.
-    overview_lines = [f"**{len(roster)}** total member(s)", ""]
     for position, rid in enumerate(rank_role_ids):
         members = grouped[rid]
         if not members:
             continue
         role = guild.get_role(rid)
-        label = role.name if role else "deleted role"
+        label = role.name if role else "Deleted role"  # NOTE: field names can't render role mentions — plain text only
         icon = RANK_TIER_ICONS[position] if position < len(RANK_TIER_ICONS) else "▪️"
-        overview_lines.append(f"{icon} `{bar(len(members), len(roster))}` {label} — **{len(members)}**")
-        overview_lines.append("")  # blank line between each rank's bar for breathing room
-    if unranked:
-        overview_lines.append(f"❔ `{bar(len(unranked), len(roster))}` Unranked — **{len(unranked)}**")
-    embed.description = "\n".join(overview_lines).rstrip() + f"\n{SPACER}"
-
-    embed.add_field(name=SPACER, value=SPACER, inline=False)
-
-    for position, rid in enumerate(rank_role_ids):
-        members = grouped[rid]
-        if not members:
-            continue
-        role = guild.get_role(rid)
-        label = role.mention if role else "(deleted role)"
-        icon = RANK_TIER_ICONS[position] if position < len(RANK_TIER_ICONS) else "▪️"
-        value = "\n".join(member_line(i, e) for i, e in enumerate(members, start=1))
-        embed.add_field(name=f"{icon} {label} — {len(members)}", value=value, inline=False)
-        embed.add_field(name=SPACER, value=SPACER, inline=False)
+        embed.add_field(name=f"{icon} {label} — {len(members)}", value=member_mentions(members), inline=False)
 
     if unranked:
-        value = "\n".join(member_line(i, e) for i, e in enumerate(unranked, start=1))
-        embed.add_field(name=f"❔ Unranked — {len(unranked)}", value=value, inline=False)
+        embed.add_field(name=f"❔ Unranked — {len(unranked)}", value=member_mentions(unranked), inline=False)
 
     embed.set_footer(text=f"{len(roster)} member(s) on the roster • Last updated")
     embed.timestamp = discord.utils.utcnow()
@@ -1324,18 +1308,15 @@ async def stats(interaction: discord.Interaction):
         else:
             unranked += 1
 
-    embed.description = SPACER
-
     for position, rid in enumerate(rank_role_ids):
         role = interaction.guild.get_role(rid)
-        label = role.mention if role else "(deleted role)"
+        label = role.name if role else "Deleted role"  # NOTE: field names can't render role mentions — plain text only
         icon = RANK_TIER_ICONS[position] if position < len(RANK_TIER_ICONS) else "▪️"
         embed.add_field(
             name=f"{icon} {label} — {counts[rid]}",
             value=f"`{bar(counts[rid], len(roster))}`",
             inline=False,
         )
-        embed.add_field(name=SPACER, value=SPACER, inline=False)
 
     if unranked:
         embed.add_field(
@@ -2417,8 +2398,9 @@ async def run_broadcast(
 
     announced = 0
     if voice_channels:
+        spoken_text = f"Announcement. {message}"
         try:
-            tmp_path = await generate_tts_file(f"Announcement: {message}")
+            tmp_path = await generate_tts_file(spoken_text)
         except Exception:
             tmp_path = None
 
