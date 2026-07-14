@@ -51,6 +51,7 @@ A slash-command bot that lets your staff instantly assign or remove roles
 | `/audit` | Admins + the manager role | Shows the last 20 rank/roster actions across everyone in the server |
 | `/backup` | Server admins | Exports this server's bot config (ranks, settings, roster, history) as a downloadable file |
 | `/announce #channel title:... message:...` | Admins + the manager role | Posts a formatted announcement embed to a channel |
+| `/massannounce message:... [title]` | Admins + the manager role | Posts to every channel with "announcement" in its name AND speaks the message aloud in every voice channel that currently has people in it |
 | `/massrename [prefix] [suffix] [role]` | Admins + the manager role | Adds a prefix/suffix to multiple members' nicknames at once — asks you to confirm first |
 | `/massaddrole role:@... [filter_role]` | Admins + the manager role | Gives a role to multiple members at once — asks you to confirm first |
 | `/massremoverole role:@... [filter_role]` | Admins + the manager role | Removes a role from multiple members at once — asks you to confirm first |
@@ -241,6 +242,12 @@ Sends you a downloadable JSON file containing this server's full bot configurati
 /announce channel:#news title:Server Update message:We just added a new tournament system!
 ```
 Posts a clean announcement embed to whatever channel you choose, with your name credited in the footer — nicer than typing a raw message by hand.
+
+### Mass announce (text + voice)
+```
+/massannounce message:Servers restarting in 10 minutes, save your progress! title:Heads Up
+```
+Goes further than `/announce` — it posts the embed to **every text channel whose name contains "announcement"** (no setup needed, just name your channels normally, e.g. `#announcements`, `#server-announcements`) and **speaks the message out loud** in every voice channel that currently has at least one person in it, one channel at a time. Runs in the background so the command responds instantly instead of making you wait for every voice channel to finish. Needs the bot's `Connect` and `Speak` permissions to reach voice channels (see Setup above) — if it can't join a particular VC, it just skips that one and keeps going.
 
 ### Mass rename
 ```

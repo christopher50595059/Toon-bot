@@ -49,6 +49,7 @@ Commands:
   /audit                                  - show the last 20 rank/roster actions across everyone
   /backup                                 - (admin only) export this server's bot config as a file
   /announce channel:<channel> title:<text> message:<text> - post a formatted announcement
+  /massannounce message:<text> [title]    - post to all announcement channels AND speak it in every active voice channel
   /massrename [prefix] [suffix] [role]    - add a prefix/suffix to multiple members' nicknames — asks for confirmation
   /massaddrole role:<role> [filter_role]  - give a role to multiple members at once — asks for confirmation
   /massremoverole role:<role> [filter_role] - remove a role from multiple members at once — asks for confirmation
@@ -352,6 +353,45 @@ async def dm_notify(
         return False
 
 
+async def generate_tts_file(text: str) -> str:
+    """Generate an MP3 file for the given text via gTTS. Blocking network call,
+    so it's run off the event loop. Returns the temp file path."""
+    loop = asyncio.get_event_loop()
+    result = {}
+
+    def make_tts_file():
+        tts = gTTS(text=text)
+        fd, path = tempfile.mkstemp(suffix=".mp3")
+        os.close(fd)
+        tts.save(path)
+        result["path"] = path
+
+    await loop.run_in_executor(None, make_tts_file)
+    return result["path"]
+
+
+async def play_tts_in_voice_channel(voice_channel: discord.VoiceChannel, tmp_path: str):
+    """Join a voice channel, play the given MP3 file, wait for it to finish, then leave."""
+    guild = voice_channel.guild
+    loop = asyncio.get_event_loop()
+
+    voice_client = guild.voice_client
+    if voice_client is None:
+        voice_client = await voice_channel.connect()
+    elif voice_client.channel != voice_channel:
+        await voice_client.move_to(voice_channel)
+
+    done = asyncio.Event()
+
+    def after_playback(error):
+        loop.call_soon_threadsafe(done.set)
+
+    source = discord.FFmpegPCMAudio(tmp_path)
+    voice_client.play(source, after=after_playback)
+    await done.wait()
+    await voice_client.disconnect()
+
+
 async def announce_timeout_in_vc(member: discord.Member, minutes: int, reason: str):
     """If the member is currently in a voice channel, join it, speak their name,
     the timeout duration, and the reason via TTS, then leave. Never raises —
@@ -361,42 +401,13 @@ async def announce_timeout_in_vc(member: discord.Member, minutes: int, reason: s
         if member.voice is None or member.voice.channel is None:
             return
 
-        voice_channel = member.voice.channel
-        guild = member.guild
         text = f"{member.display_name} has been timed out for {minutes} minutes. Reason: {reason}"
-
-        # gTTS's generation call is blocking (network request) — run it off the event loop.
-        loop = asyncio.get_event_loop()
-        tmp_path = None
-
-        def make_tts_file():
-            nonlocal tmp_path
-            tts = gTTS(text=text)
-            fd, path = tempfile.mkstemp(suffix=".mp3")
-            os.close(fd)
-            tts.save(path)
-            tmp_path = path
-
-        await loop.run_in_executor(None, make_tts_file)
-
-        voice_client = guild.voice_client
-        if voice_client is None:
-            voice_client = await voice_channel.connect()
-        elif voice_client.channel != voice_channel:
-            await voice_client.move_to(voice_channel)
-
-        done = asyncio.Event()
-
-        def after_playback(error):
-            loop.call_soon_threadsafe(done.set)
-
-        source = discord.FFmpegPCMAudio(tmp_path)
-        voice_client.play(source, after=after_playback)
-        await done.wait()
-        await voice_client.disconnect()
-
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        tmp_path = await generate_tts_file(text)
+        try:
+            await play_tts_in_voice_channel(member.voice.channel, tmp_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
     except Exception:
         pass
 
@@ -2380,6 +2391,81 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
     await interaction.response.send_message(f"✅ Announcement posted in {channel.mention}.", ephemeral=True)
 
 
+async def run_broadcast(
+    guild: discord.Guild,
+    moderator: discord.Member,
+    title: str,
+    message: str,
+    text_channels: list,
+    voice_channels: list,
+):
+    """Background worker for /broadcast — posts the embed, then speaks the
+    announcement in each active voice channel one at a time (a bot can only
+    be connected to one voice channel per server at once)."""
+    embed = discord.Embed(title=f"📢 {title}", description=message, color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    embed.set_footer(text=f"Posted by {moderator.display_name}", icon_url=moderator.display_avatar.url)
+
+    posted = 0
+    for channel in text_channels:
+        try:
+            await channel.send(embed=embed)
+            posted += 1
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    announced = 0
+    if voice_channels:
+        try:
+            tmp_path = await generate_tts_file(f"Announcement: {message}")
+        except Exception:
+            tmp_path = None
+
+        if tmp_path:
+            for vc in voice_channels:
+                try:
+                    await play_tts_in_voice_channel(vc, tmp_path)
+                    announced += 1
+                except Exception:
+                    continue
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    await log_bulk_action(
+        guild,
+        title="📢 Broadcast Sent",
+        color=discord.Color.blurple(),
+        moderator=moderator,
+        description=f"**{title}**\n{message}",
+        fields={"Text Channels": str(posted), "Voice Channels Announced": str(announced)},
+    )
+
+
+@bot.tree.command(name="massannounce", description="Send an announcement to all announcement channels and speak it in every active voice channel.")
+@app_commands.describe(message="The announcement text", title="Optional title (defaults to 'Announcement')")
+async def massannounce(interaction: discord.Interaction, message: str, title: str = "Announcement"):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    text_channels = [c for c in interaction.guild.text_channels if "announcement" in c.name.lower()]
+    active_vcs = [vc for vc in interaction.guild.voice_channels if any(not m.bot for m in vc.members)]
+
+    if not text_channels and not active_vcs:
+        await interaction.response.send_message(
+            "ℹ️ Nothing to broadcast to — no channel names contain 'announcement', and no voice channels currently have anyone in them.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"📢 Broadcasting to {len(text_channels)} announcement channel(s) and speaking in {len(active_vcs)} active voice channel(s)...",
+        ephemeral=True,
+    )
+    asyncio.create_task(run_broadcast(interaction.guild, interaction.user, title, message, text_channels, active_vcs))
+
+
 # ---------- mass rename ----------
 
 @bot.tree.command(name="massrename", description="Add a prefix/suffix to multiple members' nicknames at once.")
@@ -2680,7 +2766,8 @@ HELP_CATEGORIES = {
     ],
     "🔧 Utility": [
         ("/afk", "Mark yourself AFK"),
-        ("/announce", "Post a formatted announcement"),
+        ("/announce", "Post a formatted announcement to one channel"),
+        ("/massannounce", "Post + speak an announcement everywhere (text + VC)"),
     ],
 }
 
