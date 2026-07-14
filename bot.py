@@ -54,6 +54,8 @@ Commands:
   /massaddrole role:<role> [filter_role]  - give a role to multiple members at once — asks for confirmation
   /massremoverole role:<role> [filter_role] - remove a role from multiple members at once — asks for confirmation
   /afk [reason]                           - mark yourself AFK; clears automatically when you send a message again
+  /setvcgreeting user:<member> message:<text> - say something out loud whenever this person joins a voice channel
+  /removevcgreeting user:<member>         - stop greeting this person when they join a VC
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -211,6 +213,27 @@ async def on_member_join(member: discord.Member):
 @bot.event
 async def on_member_remove(member: discord.Member):
     await refresh_server_stats_message(member.guild)
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.bot:
+        return
+    # Only fire when they've actually landed in a NEW voice channel (not on mute/deafen toggles, etc.)
+    if after.channel is None or after.channel == before.channel:
+        return
+
+    cfg = get_guild_cfg(member.guild.id)
+    greetings = cfg.get("vc_greetings", {})
+    message = greetings.get(str(member.id))
+    if not message:
+        return
+
+    perms = after.channel.permissions_for(member.guild.me)
+    if not perms.connect or not perms.speak:
+        return
+
+    asyncio.create_task(speak_vc_greeting(member, after.channel, message))
 
 
 async def send_to_log_channel(guild: discord.Guild, embed: discord.Embed):
@@ -408,6 +431,26 @@ async def announce_timeout_in_vc(member: discord.Member, minutes: int, reason: s
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+    except Exception:
+        pass
+
+
+vc_greeting_locks: dict[int, asyncio.Lock] = {}  # guild_id -> Lock, prevents overlapping VC joins
+
+
+async def speak_vc_greeting(member: discord.Member, voice_channel: discord.VoiceChannel, message: str):
+    """Join the member's voice channel and speak their custom greeting, then leave.
+    Serialized per-guild so two people joining at once don't collide over the
+    bot's single voice connection. Never raises."""
+    lock = vc_greeting_locks.setdefault(member.guild.id, asyncio.Lock())
+    try:
+        async with lock:
+            tmp_path = await generate_tts_file(message)
+            try:
+                await play_tts_in_voice_channel(voice_channel, tmp_path)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
     except Exception:
         pass
 
@@ -2774,6 +2817,7 @@ HELP_CATEGORIES = {
         ("/afk", "Mark yourself AFK"),
         ("/announce", "Post a formatted announcement to one channel"),
         ("/massannounce", "Post + speak an announcement everywhere (text + VC)"),
+        ("/setvcgreeting / removevcgreeting", "Bot speaks a custom greeting when someone joins a VC"),
     ],
 }
 
@@ -2794,6 +2838,43 @@ async def help_command(interaction: discord.Interaction):
 
     embed.set_footer(text="Most commands require the manager role or Administrator permission")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ---------- VC greetings ----------
+
+@bot.tree.command(name="setvcgreeting", description="The bot will say something out loud whenever this person joins any voice channel.")
+@app_commands.describe(user="Who to greet", message="What the bot should say when they join a VC")
+async def setvcgreeting(interaction: discord.Interaction, user: discord.Member, message: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    greetings = cfg.setdefault("vc_greetings", {})
+    greetings[str(user.id)] = message
+    save_config(config)
+
+    await interaction.response.send_message(
+        f"✅ From now on, when {user.mention} joins a voice channel I'll say: \"{message}\"", ephemeral=True
+    )
+
+
+@bot.tree.command(name="removevcgreeting", description="Stop announcing when this person joins a voice channel.")
+@app_commands.describe(user="Who to stop greeting")
+async def removevcgreeting(interaction: discord.Interaction, user: discord.Member):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    greetings = cfg.setdefault("vc_greetings", {})
+    if str(user.id) not in greetings:
+        await interaction.response.send_message(f"ℹ️ {user.mention} doesn't have a VC greeting set.", ephemeral=True)
+        return
+
+    greetings.pop(str(user.id))
+    save_config(config)
+    await interaction.response.send_message(f"✅ Removed {user.mention}'s VC greeting.", ephemeral=True)
 
 
 # ---------- error handling ----------

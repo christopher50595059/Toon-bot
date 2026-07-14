@@ -56,6 +56,8 @@ A slash-command bot that lets your staff instantly assign or remove roles
 | `/massaddrole role:@... [filter_role]` | Admins + the manager role | Gives a role to multiple members at once — asks you to confirm first |
 | `/massremoverole role:@... [filter_role]` | Admins + the manager role | Removes a role from multiple members at once — asks you to confirm first |
 | `/afk [reason]` | Anyone | Marks you AFK; clears automatically the next time you send a message, and anyone who @mentions you gets a heads-up |
+| `/setvcgreeting @user message:...` | Admins + the manager role | The bot speaks a custom message out loud whenever that person joins any voice channel |
+| `/removevcgreeting @user` | Admins + the manager role | Stops greeting that person when they join a VC |
 | `/help` | Anyone | Shows every command this bot has, grouped by category |
 
 ## Setup
@@ -279,6 +281,13 @@ Safety notes:
 /afk reason:Grabbing food, back in 20
 ```
 Marks you AFK — anyone who @mentions you afterward gets an automatic heads-up in the same channel showing your reason and how long you've been away. The moment you send any message again, your AFK status clears automatically and the bot lets the channel know you're back.
+
+### VC greetings
+```
+/setvcgreeting user:@Jerry message:The legend has arrived!
+/removevcgreeting user:@Jerry
+```
+Once set, the bot automatically joins whatever voice channel that person joins and speaks the message out loud, then leaves — no command needs to be run each time, it just happens. If two greeted people join voice channels close together, the greetings play one after another rather than overlapping. Needs the bot's `Connect` and `Speak` permissions in that channel (already covered if you gave the bot Administrator).
 
 ## Notes
 - Role changes are stored in `guild_config.json`, created automatically next to `bot.py`.
