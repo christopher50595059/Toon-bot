@@ -56,7 +56,16 @@ Commands:
   /afk [reason]                           - mark yourself AFK; clears automatically when you send a message again
   /setvcgreeting user:<member> message:<text> - say something out loud whenever this person joins a voice channel
   /removevcgreeting user:<member>         - stop greeting this person when they join a VC
+  /showcase add role:<role> description:<text>  - add a self-assignable role to the showcase
+  /showcase remove role:<role>            - remove a role from the showcase
+  /showcase setchannel channel:<channel>  - (admin only) post the live showcase here
+  /showcase list                          - show the current showcase
   /evaluate [user]                        - show message activity for the current week (leaderboard or one person); auto-resets weekly
+  /setbirthday month:<1-12> day:<1-31>    - set your own birthday
+  /removebirthday                         - remove your saved birthday
+  /mybirthday                             - show your currently saved birthday
+  /setbirthdayrole [role]                 - (admin only) role auto-given on someone's birthday (omit to disable)
+  /setbirthdaychannel [channel]           - (admin only) channel for birthday shoutouts (omit to disable)
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -70,7 +79,7 @@ import json
 import os
 import random
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import discord
@@ -79,7 +88,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from gtts import gTTS
 
-from keep_alive import keep_alive
+from web import start_web_app
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -127,6 +136,8 @@ async def on_ready():
         gamenight_reminder_loop.start()
     if not weekly_evaluation_loop.is_running():
         weekly_evaluation_loop.start()
+    if not birthday_check_loop.is_running():
+        birthday_check_loop.start()
 
 
 @bot.event
@@ -434,7 +445,7 @@ async def announce_timeout_in_vc(member: discord.Member, minutes: int, reason: s
         if member.voice is None or member.voice.channel is None:
             return
 
-        text = f"{member.display_name} has been timed out for {minutes} minutes, reason: {reason}"
+        text = f"{member.display_name} is about to be timed out for {minutes} minutes, reason: {reason}"
         tmp_path = await generate_tts_file(text)
         try:
             await play_tts_in_voice_channel(member.voice.channel, tmp_path)
@@ -466,6 +477,102 @@ async def speak_vc_greeting(member: discord.Member, voice_channel: discord.Voice
 
 
 RANK_TIER_ICONS = ["🥇", "🥈", "🥉", "🔹", "🔸", "▪️", "▪️", "▪️"]
+
+
+def build_showcase_embed(guild: discord.Guild, cfg: dict) -> discord.Embed:
+    entries = cfg.get("showcase_roles", [])
+    embed = discord.Embed(title="🎭 Role Showcase", color=discord.Color.blurple())
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    if not entries:
+        embed.description = "No roles have been added to the showcase yet."
+        return embed
+
+    embed.description = "Click a button below to get (or remove) that role for yourself."
+    for entry in entries:
+        role = guild.get_role(entry["role_id"])
+        label = role.name if role else "(deleted role)"  # field names can't render mentions
+        member_count = len(role.members) if role else 0
+        embed.add_field(
+            name=f"🔸 {label} — {member_count} member(s)",
+            value=entry.get("description") or "*No description.*",
+            inline=False,
+        )
+    embed.set_footer(text="Last updated")
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+
+class ShowcaseView(discord.ui.View):
+    """One toggle button per showcased role — clicking gives you the role if
+    you don't have it, or removes it if you do."""
+
+    def __init__(self, guild: discord.Guild, entries: list):
+        super().__init__(timeout=None)
+        for entry in entries[:25]:  # Discord's hard cap on buttons per message
+            role_id = entry["role_id"]
+            role = guild.get_role(role_id)
+            label = role.name if role else "Deleted role"
+            button = discord.ui.Button(label=label[:80], style=discord.ButtonStyle.secondary)
+            button.callback = self._make_callback(guild.id, role_id)
+            self.add_item(button)
+
+    def _make_callback(self, guild_id: int, role_id: int):
+        async def callback(interaction: discord.Interaction):
+            guild = interaction.guild
+            role = guild.get_role(role_id)
+            if role is None:
+                await interaction.response.send_message("❌ That role no longer exists.", ephemeral=True)
+                return
+            if role >= guild.me.top_role:
+                await interaction.response.send_message(
+                    "❌ I can't manage that role — it's above my own role in the server settings.", ephemeral=True
+                )
+                return
+
+            member = interaction.user
+            try:
+                if role in member.roles:
+                    await member.remove_roles(role, reason="Self-removed via /showcase")
+                    await interaction.response.send_message(f"✅ Removed {role.mention}.", ephemeral=True)
+                else:
+                    await member.add_roles(role, reason="Self-assigned via /showcase")
+                    await interaction.response.send_message(f"✅ Gave you {role.mention}.", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message("❌ I don't have permission to manage that role.", ephemeral=True)
+        return callback
+
+
+async def refresh_showcase_message(guild: discord.Guild):
+    """Edit the live showcase embed in the configured channel, if one is set."""
+    cfg = get_guild_cfg(guild.id)
+    channel_id = cfg.get("showcase_channel_id")
+    if not channel_id:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+
+    entries = cfg.get("showcase_roles", [])
+    embed = build_showcase_embed(guild, cfg)
+    view = ShowcaseView(guild, entries) if entries else None
+    message_id = cfg.get("showcase_message_id")
+
+    if message_id:
+        try:
+            message = await channel.fetch_message(message_id)
+            await message.edit(embed=embed, view=view)
+            return
+        except (discord.NotFound, discord.Forbidden):
+            pass  # fall through and post a fresh message
+
+    try:
+        message = await channel.send(embed=embed, view=view)
+        cfg["showcase_message_id"] = message.id
+        save_config(config)
+    except discord.Forbidden:
+        pass
 
 
 def build_roster_embed(guild: discord.Guild) -> discord.Embed:
@@ -1938,6 +2045,69 @@ async def weekly_evaluation_loop():
         save_config(config)
 
 
+@tasks.loop(hours=1)
+async def birthday_check_loop():
+    """Runs hourly but only actually acts once per UTC day per guild — checking
+    hourly (rather than a plain 24h loop) makes it resilient to the bot
+    restarting/redeploying at odd times, since it just compares dates."""
+    now = datetime.now(timezone.utc)
+    today_str = now.strftime("%m-%d")
+    today_date = now.date().isoformat()
+
+    for guild in bot.guilds:
+        cfg = get_guild_cfg(guild.id)
+        if cfg.get("birthday_last_checked") == today_date:
+            continue
+        cfg["birthday_last_checked"] = today_date
+
+        role_id = cfg.get("birthday_role_id")
+        role = guild.get_role(role_id) if role_id else None
+        birthdays = cfg.get("birthdays", {})
+
+        # Remove the role from anyone who had it for a birthday that isn't today anymore.
+        holders = cfg.get("birthday_role_holders", [])
+        still_holding = []
+        if role:
+            for uid in holders:
+                member = guild.get_member(uid)
+                if member and birthdays.get(str(uid)) == today_str:
+                    still_holding.append(uid)  # still their birthday somehow — keep it
+                elif member and role in member.roles:
+                    try:
+                        await member.remove_roles(role, reason="Birthday role expired")
+                    except discord.Forbidden:
+                        pass
+        cfg["birthday_role_holders"] = still_holding
+
+        # Grant the role (and announce) for anyone whose birthday is today.
+        channel_id = cfg.get("birthday_channel_id")
+        channel = guild.get_channel(channel_id) if channel_id else None
+
+        for uid_str, bday in birthdays.items():
+            if bday != today_str:
+                continue
+            member = guild.get_member(int(uid_str))
+            if not member:
+                continue
+
+            if role and role < guild.me.top_role and role not in member.roles:
+                try:
+                    await member.add_roles(role, reason="Happy birthday!")
+                    cfg.setdefault("birthday_role_holders", [])
+                    if member.id not in cfg["birthday_role_holders"]:
+                        cfg["birthday_role_holders"].append(member.id)
+                except discord.Forbidden:
+                    pass
+
+            if channel:
+                try:
+                    await channel.send(f"🎉🎂 Happy Birthday, {member.mention}! Hope it's a great one!")
+                except discord.Forbidden:
+                    pass
+
+        save_config(config)
+
+
 # ---------- MVP voting ----------
 
 def build_mvp_embed(guild: discord.Guild, poll: dict) -> discord.Embed:
@@ -2248,16 +2418,17 @@ async def timeout(interaction: discord.Interaction, user: discord.Member, minute
         )
         return
 
+    await interaction.response.defer(ephemeral=True)
+
+    # Announce in their voice channel BEFORE the timeout actually takes effect,
+    # so they (and anyone with them) hear it land in real time.
+    await announce_timeout_in_vc(user, minutes, reason)
+
     try:
         await user.timeout(timedelta(minutes=minutes), reason=f"By {interaction.user} via /timeout: {reason}")
     except discord.Forbidden:
-        await interaction.response.send_message("❌ I don't have permission to time out that member.", ephemeral=True)
+        await interaction.followup.send("❌ I don't have permission to time out that member.", ephemeral=True)
         return
-
-    # Runs in the background so it doesn't delay the command's response —
-    # if they're not in a voice channel, or anything about voice fails, this
-    # silently does nothing (see announce_timeout_in_vc).
-    asyncio.create_task(announce_timeout_in_vc(user, minutes, reason))
 
     dm_sent = await dm_notify(
         interaction.guild, user,
@@ -2266,7 +2437,7 @@ async def timeout(interaction: discord.Interaction, user: discord.Member, minute
         fields={"Duration": f"{minutes} minute(s)", "Reason": reason},
     )
     note = "\n\n*(couldn't DM them)*" if not dm_sent else ""
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"✅ Timed out {user.mention} for {minutes} minute(s). Reason: {reason}{note}", ephemeral=True
     )
     await log_movement(
@@ -2906,6 +3077,9 @@ HELP_CATEGORIES = {
         ("/announce", "Post a formatted announcement to one channel"),
         ("/massannounce", "Post + speak an announcement everywhere (text + VC)"),
         ("/setvcgreeting / removevcgreeting", "Bot speaks a custom greeting when someone joins a VC"),
+        ("/setbirthday / mybirthday / removebirthday", "Set your birthday"),
+        ("/setbirthdayrole / _channel", "(admin) Auto-role + shoutout on birthdays"),
+        ("/showcase add / remove / setchannel / list", "Self-assignable role showcase with a live channel"),
     ],
 }
 
@@ -2988,6 +3162,179 @@ async def evaluate(interaction: discord.Interaction, user: discord.Member = None
     await interaction.response.send_message(embed=embed)
 
 
+# ---------- birthdays ----------
+
+@bot.tree.command(name="setbirthday", description="Set your birthday (no year needed).")
+@app_commands.describe(month="Birth month (1-12)", day="Birth day (1-31)")
+async def setbirthday(interaction: discord.Interaction, month: app_commands.Range[int, 1, 12], day: app_commands.Range[int, 1, 31]):
+    try:
+        # Use a leap year (2000) so Feb 29 validates correctly; only the month/day is stored.
+        date(2000, month, day)
+    except ValueError:
+        await interaction.response.send_message("❌ That's not a valid date.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    birthdays = cfg.setdefault("birthdays", {})
+    birthdays[str(interaction.user.id)] = f"{month:02d}-{day:02d}"
+    save_config(config)
+
+    await interaction.response.send_message(
+        f"🎂 Got it — your birthday is set to **{month:02d}-{day:02d}**.", ephemeral=True
+    )
+
+
+@bot.tree.command(name="removebirthday", description="Remove your saved birthday.")
+async def removebirthday(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    birthdays = cfg.setdefault("birthdays", {})
+    if str(interaction.user.id) not in birthdays:
+        await interaction.response.send_message("ℹ️ You don't have a birthday saved.", ephemeral=True)
+        return
+    birthdays.pop(str(interaction.user.id))
+    save_config(config)
+    await interaction.response.send_message("✅ Your birthday has been removed.", ephemeral=True)
+
+
+@bot.tree.command(name="mybirthday", description="Show your currently saved birthday.")
+async def mybirthday(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    bday = cfg.get("birthdays", {}).get(str(interaction.user.id))
+    if not bday:
+        await interaction.response.send_message("ℹ️ You haven't set a birthday yet — use `/setbirthday`.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"🎂 Your saved birthday is **{bday}**.", ephemeral=True)
+
+
+@bot.tree.command(name="setbirthdayrole", description="Set the role members automatically get on their birthday.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(role="The role to auto-assign on someone's birthday (omit to turn this off)")
+async def setbirthdayrole(interaction: discord.Interaction, role: discord.Role = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+
+    if role is None:
+        cfg.pop("birthday_role_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Birthday role disabled.", ephemeral=True)
+        return
+
+    if role >= interaction.guild.me.top_role:
+        await interaction.response.send_message(
+            f"❌ I can't assign {role.mention} — it's higher than or equal to my own top role. "
+            "Move my bot role above it in Server Settings > Roles.",
+            ephemeral=True,
+        )
+        return
+
+    cfg["birthday_role_id"] = role.id
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ Members will now automatically get {role.mention} on their birthday.", ephemeral=True
+    )
+
+
+@bot.tree.command(name="setbirthdaychannel", description="Post a shoutout here whenever it's someone's birthday.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="The channel to post birthday shoutouts in (omit to turn this off)")
+async def setbirthdaychannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+
+    if channel is None:
+        cfg.pop("birthday_channel_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Birthday shoutouts disabled.", ephemeral=True)
+        return
+
+    cfg["birthday_channel_id"] = channel.id
+    save_config(config)
+    await interaction.response.send_message(f"✅ Birthday shoutouts will now be posted in {channel.mention}.", ephemeral=True)
+
+
+# ---------- role showcase ----------
+
+showcase_group = app_commands.Group(name="showcase", description="Manage the self-assignable role showcase.")
+
+
+@showcase_group.command(name="add", description="Add a role to the showcase with a description.")
+@app_commands.describe(role="The role to showcase", description="What this role is for / how to earn it")
+async def showcase_add(interaction: discord.Interaction, role: discord.Role, description: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    entries = cfg.setdefault("showcase_roles", [])
+    existing = next((e for e in entries if e["role_id"] == role.id), None)
+
+    if existing:
+        existing["description"] = description
+        msg = f"✅ Updated {role.mention}'s description in the showcase."
+    else:
+        if len(entries) >= 25:
+            await interaction.response.send_message(
+                "❌ The showcase is full — Discord allows a maximum of 25 roles per message.", ephemeral=True
+            )
+            return
+        entries.append({"role_id": role.id, "description": description})
+        msg = f"✅ Added {role.mention} to the showcase."
+
+    save_config(config)
+    await interaction.response.send_message(msg, ephemeral=True)
+    await refresh_showcase_message(interaction.guild)
+
+
+@showcase_group.command(name="remove", description="Remove a role from the showcase.")
+@app_commands.describe(role="The role to remove")
+async def showcase_remove(interaction: discord.Interaction, role: discord.Role):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    entries = cfg.setdefault("showcase_roles", [])
+    new_entries = [e for e in entries if e["role_id"] != role.id]
+    if len(new_entries) == len(entries):
+        await interaction.response.send_message(f"ℹ️ {role.mention} isn't in the showcase.", ephemeral=True)
+        return
+
+    cfg["showcase_roles"] = new_entries
+    save_config(config)
+    await interaction.response.send_message(f"✅ Removed {role.mention} from the showcase.", ephemeral=True)
+    await refresh_showcase_message(interaction.guild)
+
+
+@showcase_group.command(name="setchannel", description="Post the live role showcase in this channel.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="The channel to post the showcase in")
+async def showcase_setchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    cfg = get_guild_cfg(interaction.guild_id)
+    cfg["showcase_channel_id"] = channel.id
+    cfg.pop("showcase_message_id", None)  # force a fresh message in the new channel
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ The role showcase will now be posted and kept updated in {channel.mention}.", ephemeral=True
+    )
+    await refresh_showcase_message(interaction.guild)
+
+
+@showcase_setchannel.error
+async def showcase_setchannel_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ Only server administrators can use this command.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"⚠️ Error: {error}", ephemeral=True)
+
+
+@showcase_group.command(name="list", description="Show the current role showcase.")
+async def showcase_list(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    embed = build_showcase_embed(interaction.guild, cfg)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+bot.tree.add_command(showcase_group)
+
+
 # ---------- error handling ----------
 
 @setlogchannel.error
@@ -3001,6 +3348,8 @@ async def evaluate(interaction: discord.Interaction, user: discord.Member = None
 @crosspost_remove.error
 @crosspost_list.error
 @backup.error
+@setbirthdayrole.error
+@setbirthdaychannel.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -3015,5 +3364,5 @@ if __name__ == "__main__":
         raise SystemExit(
             "No token found. Copy .env.example to .env and add your bot token as DISCORD_TOKEN."
         )
-    keep_alive()
+    start_web_app(bot, config, save_config, get_guild_cfg)
     bot.run(TOKEN)

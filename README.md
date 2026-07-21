@@ -50,6 +50,11 @@ A slash-command bot that lets your staff instantly assign or remove roles
 | `/slowmode seconds:10` | Admins + the manager role | Sets the current channel's slowmode delay |
 | `/audit` | Admins + the manager role | Shows the last 20 rank/roster actions across everyone in the server |
 | `/evaluate [@user]` | Anyone | Shows the message-activity leaderboard for the current week, or one person's count |
+| `/setbirthday month:.. day:..` | Anyone | Sets your own birthday (no year needed) |
+| `/removebirthday` | Anyone | Removes your saved birthday |
+| `/mybirthday` | Anyone | Shows your currently saved birthday |
+| `/setbirthdayrole [@role]` | Server admins | Role auto-given to members on their birthday (omit to disable) |
+| `/setbirthdaychannel [#channel]` | Server admins | Channel for birthday shoutouts (omit to disable) |
 | `/backup` | Server admins | Exports this server's bot config (ranks, settings, roster, history) as a downloadable file |
 | `/announce #channel title:... message:... [ping_everyone]` | Admins + the manager role | Posts a formatted announcement embed to a channel, pinging @everyone by default |
 | `/massannounce message:... [title] [ping_everyone]` | Admins + the manager role | Posts to every channel with "announcement" in its name AND speaks it aloud in every active voice channel — pings @everyone by default |
@@ -59,6 +64,10 @@ A slash-command bot that lets your staff instantly assign or remove roles
 | `/afk [reason]` | Anyone | Marks you AFK; clears automatically the next time you send a message, and anyone who @mentions you gets a heads-up |
 | `/setvcgreeting @user message:...` | Admins + the manager role | The bot speaks a custom message out loud whenever that person joins any voice channel |
 | `/removevcgreeting @user` | Admins + the manager role | Stops greeting that person when they join a VC |
+| `/showcase add role:@... description:...` | Admins + the manager role | Adds a self-assignable role to the showcase, with a description |
+| `/showcase remove role:@...` | Admins + the manager role | Removes a role from the showcase |
+| `/showcase setchannel #channel` | Server admins | Posts a live, self-assign role showcase in that channel |
+| `/showcase list` | Anyone | Shows the current showcase |
 | `/help` | Anyone | Shows every command this bot has, grouped by category |
 
 ## Setup
@@ -75,7 +84,22 @@ A slash-command bot that lets your staff instantly assign or remove roles
 
 **Important:** In your server's role list, drag the bot's own role **above** any role you want it to assign (Discord bots can only manage roles below their own).
 
-### 2. Install and run
+### 2. (Optional) Set up the web dashboard
+This lets admins log in with Discord and edit settings (channels, roles, ranks) from a browser instead of slash commands. Skip this whole section if you're happy with just slash commands — everything else works fine without it.
+
+1. In the same Developer Portal application, go to **OAuth2 → General**.
+2. Copy the **Client ID** shown there.
+3. Click **Reset Secret** (or **Copy** if a secret already shows), and copy the **Client Secret**. Treat this like a password — anyone with it can impersonate your app's login.
+4. Under **Redirects**, click **Add Redirect** and enter your Render URL followed by `/callback`, e.g. `https://toon-bot-ltn8.onrender.com/callback` — then **Save Changes**.
+5. Add three more environment variables (same place you added `DISCORD_TOKEN` — locally in `.env`, or on Render under Environment):
+   - `DISCORD_CLIENT_ID` — from step 2
+   - `DISCORD_CLIENT_SECRET` — from step 3
+   - `DASHBOARD_URL` — your Render URL with **no trailing slash**, e.g. `https://toon-bot-ltn8.onrender.com`
+   - `FLASK_SECRET_KEY` — any long random string you make up (used to secure login sessions — if you skip this, one gets generated automatically each time the bot restarts, which will log everyone out on every redeploy; setting your own keeps people logged in across restarts)
+
+Once deployed, visit your Render URL in a browser and click **Login with Discord**. Anyone who's a server Administrator, or holds the role set via `/setmanagerrole`, will see that server in their list and can edit its settings.
+
+### 3. Install and run
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
@@ -83,7 +107,7 @@ cp .env.example .env
 python bot.py
 ```
 
-### 3. Configure it in your server
+### 4. Configure it in your server
 Once the bot is online and slash commands have synced (may take a minute the first time):
 ```
 /setlogchannel #staff-logs
@@ -300,6 +324,41 @@ Once set, the bot automatically joins whatever voice channel that person joins a
 /evaluate user:@SomeUser
 ```
 The bot quietly counts how many messages each person sends (no content is read or stored, just a running count per person). `/evaluate` with no user shows a top-10 leaderboard for the current tracking period; with a user, it shows just their count. The period automatically resets every 7 days — if you have a log channel set with `/setlogchannel`, the bot also auto-posts the full leaderboard there right before each weekly reset, so you get a standing record even if nobody checks manually.
+
+### Birthdays
+```
+/setbirthday month:7 day:18
+/mybirthday
+/removebirthday
+```
+Anyone can set their own birthday — just month and day, no year needed (kept private in that sense). Two optional admin setup steps make it actually do something on the day:
+```
+/setbirthdayrole role:@Birthday
+/setbirthdaychannel channel:#general
+```
+`/setbirthdayrole` automatically gives that role to anyone whose birthday it is, and takes it back off them once the day passes — checked every hour, so it's resilient to the bot restarting at odd times (a Render redeploy won't cause it to miss the day). `/setbirthdaychannel` posts a shoutout message in that channel for each birthday. Either one is optional and works independently — set just the role, just the channel, or both.
+
+### Web dashboard
+If you completed the OAuth setup above, visiting your bot's URL in a browser gives you a login-protected settings page — an alternative to typing slash commands for the settings that benefit most from a visual picker:
+
+- Log channel, live roster channel, live stats channel, birthday shoutout channel
+- Manager role, birthday role
+- The full rank order (all 8 slots, picked from real roles in your server)
+- Cooldown hours and inactivity threshold
+
+Click **Login with Discord**, and you'll land on a list of every server where you're either an Administrator or hold the role set via `/setmanagerrole` (and where the bot is present). Pick one, edit whatever you want, and hit **Save changes** — it writes to the exact same config the bot already uses, so changes take effect immediately, no restart needed. This doesn't replace the slash commands — things like roster membership, warnings, and history still go through Discord — it's specifically for the "which channel/role should X use" type settings.
+
+Nothing here needs a database: the dashboard reads and writes the bot's existing `guild_config.json` directly, since it runs in the same process.
+
+### Role showcase (self-assignable roles)
+```
+/showcase add role:@Valorant description:Get pinged for Valorant scrims and game nights
+/showcase add role:@Minecraft description:Access to the Minecraft server + channels
+/showcase setchannel channel:#roles
+```
+Builds a live, self-updating embed listing every showcased role with its description and current member count — each with its own button underneath. Anyone in the server can click a role's button to instantly give themselves that role, or click again to remove it — no staff involvement needed. Great for game tags, notification pings, or any role people should be able to opt into freely.
+
+`/showcase remove role:@...` takes a role back out of the showcase (existing members keep the role, it just stops being offered). `/showcase list` shows the current lineup without needing the live channel. Discord caps this at 25 roles per showcase message. As with any role the bot manages, make sure the bot's own role sits above whatever you showcase in Server Settings > Roles.
 
 ## Notes
 - Role changes are stored in `guild_config.json`, created automatically next to `bot.py`.
