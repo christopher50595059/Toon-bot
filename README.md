@@ -66,7 +66,7 @@ A slash-command bot that lets your staff instantly assign or remove roles
 | `/removevcgreeting @user` | Admins + the manager role | Stops greeting that person when they join a VC |
 | `/showcase add role:@... description:...` | Admins + the manager role | Adds a self-assignable role to the showcase, with a description |
 | `/showcase remove role:@...` | Admins + the manager role | Removes a role from the showcase |
-| `/showcase setchannel #channel` | Server admins | Posts a live, self-assign role showcase in that channel |
+| `/showcase setchannel #channel` | Admins + the manager role | Posts a live, self-assign role showcase in that channel |
 | `/showcase list` | Anyone | Shows the current showcase |
 | `/help` | Anyone | Shows every command this bot has, grouped by category |
 

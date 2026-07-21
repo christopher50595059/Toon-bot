@@ -3304,9 +3304,12 @@ async def showcase_remove(interaction: discord.Interaction, role: discord.Role):
 
 
 @showcase_group.command(name="setchannel", description="Post the live role showcase in this channel.")
-@app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(channel="The channel to post the showcase in")
 async def showcase_setchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
     cfg = get_guild_cfg(interaction.guild_id)
     cfg["showcase_channel_id"] = channel.id
     cfg.pop("showcase_message_id", None)  # force a fresh message in the new channel
@@ -3315,14 +3318,6 @@ async def showcase_setchannel(interaction: discord.Interaction, channel: discord
         f"✅ The role showcase will now be posted and kept updated in {channel.mention}.", ephemeral=True
     )
     await refresh_showcase_message(interaction.guild)
-
-
-@showcase_setchannel.error
-async def showcase_setchannel_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("❌ Only server administrators can use this command.", ephemeral=True)
-    else:
-        await interaction.response.send_message(f"⚠️ Error: {error}", ephemeral=True)
 
 
 @showcase_group.command(name="list", description="Show the current role showcase.")
