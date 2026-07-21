@@ -88,7 +88,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from gtts import gTTS
 
-from web import start_web_app
+from keep_alive import keep_alive
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -3359,5 +3359,5 @@ if __name__ == "__main__":
         raise SystemExit(
             "No token found. Copy .env.example to .env and add your bot token as DISCORD_TOKEN."
         )
-    start_web_app(bot, config, save_config, get_guild_cfg)
+    keep_alive()
     bot.run(TOKEN)
