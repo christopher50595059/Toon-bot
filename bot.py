@@ -2522,10 +2522,6 @@ async def purge(interaction: discord.Interaction, amount: int):
     await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=amount)
     await interaction.followup.send(f"✅ Deleted {len(deleted)} message(s).", ephemeral=True)
-    await log_movement(
-        interaction.guild, member=interaction.user, target=f"purged {len(deleted)} messages in {interaction.channel.mention}",
-        reason="—", moderator=interaction.user,
-    )
 
 
 @bot.tree.command(name="lock", description="Prevent everyone from sending messages in this channel.")
@@ -2548,10 +2544,6 @@ async def lock(interaction: discord.Interaction, reason: str = "No reason given"
         return
 
     await interaction.response.send_message(f"🔒 Channel locked. Reason: {reason}")
-    await log_movement(
-        interaction.guild, member=interaction.user, target=f"locked {interaction.channel.mention}",
-        reason=reason, moderator=interaction.user,
-    )
 
 
 @bot.tree.command(name="unlock", description="Allow everyone to send messages in this channel again.")
@@ -2573,10 +2565,6 @@ async def unlock(interaction: discord.Interaction):
         return
 
     await interaction.response.send_message("🔓 Channel unlocked.")
-    await log_movement(
-        interaction.guild, member=interaction.user, target=f"unlocked {interaction.channel.mention}",
-        reason="—", moderator=interaction.user,
-    )
 
 
 @bot.tree.command(name="slowmode", description="Set slowmode delay for this channel.")
