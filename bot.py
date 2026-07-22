@@ -2568,8 +2568,8 @@ async def unlock(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="slowmode", description="Set slowmode delay for this channel.")
-@app_commands.describe(seconds="Seconds between messages per person (0 to disable, max 21600)")
-async def slowmode(interaction: discord.Interaction, seconds: int):
+@app_commands.describe(seconds="Seconds between messages per person — omit or use 0 to disable, max 21600")
+async def slowmode(interaction: discord.Interaction, seconds: int = 0):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
@@ -2582,9 +2582,9 @@ async def slowmode(interaction: discord.Interaction, seconds: int):
 
     await interaction.channel.edit(slowmode_delay=seconds, reason=f"Set by {interaction.user}")
     if seconds == 0:
-        await interaction.response.send_message("✅ Slowmode disabled.")
+        await interaction.response.send_message("✅ Slowmode disabled.", ephemeral=True)
     else:
-        await interaction.response.send_message(f"✅ Slowmode set to {seconds} second(s).")
+        await interaction.response.send_message(f"✅ Slowmode set to {seconds} second(s).", ephemeral=True)
 
 
 # ---------- admin utility ----------
