@@ -99,7 +99,22 @@ This lets admins log in with Discord and edit settings (channels, roles, ranks) 
 
 Once deployed, visit your Render URL in a browser and click **Login with Discord**. Anyone who's a server Administrator, or holds the role set via `/setmanagerrole`, will see that server in their list and can edit its settings.
 
-### 3. Install and run
+### 3. (Strongly recommended) Set up persistent storage
+**Without this, all your bot's settings — ranks, channels, roster, everything — get wiped every time you push a code update or Render redeploys.** That's not a bug; Render's free tier resets the filesystem on every deploy. This step fixes it, using [Neon](https://neon.tech), a Postgres provider with a genuinely permanent free tier (unlike Render's own free database, which auto-deletes after 30 days).
+
+1. Go to https://neon.tech and sign up (free, no credit card).
+2. Create a new project — any name is fine.
+3. On the project dashboard, find the **Connection string** (sometimes under "Connect" or "Quickstart"). It looks like:
+   `postgresql://user:password@host/dbname?sslmode=require`
+4. Copy the whole thing.
+5. Add it as one more environment variable (same place as the others):
+   - `DATABASE_URL` — paste the connection string from step 4
+
+That's it — no table setup needed, the bot creates what it needs automatically the first time it connects. From then on, every setting change (via slash commands or the dashboard) is saved there instead of the local disk, so it survives redeploys, restarts, and updates.
+
+**If you skip this step**, the bot still works fine — it just falls back to the old local-file behavior, meaning settings reset on every deploy like before. You can add `DATABASE_URL` at any time later; nothing else needs to change.
+
+### 4. Install and run
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
@@ -107,7 +122,7 @@ cp .env.example .env
 python bot.py
 ```
 
-### 4. Configure it in your server
+### 5. Configure it in your server
 Once the bot is online and slash commands have synced (may take a minute the first time):
 ```
 /setlogchannel #staff-logs
@@ -361,6 +376,6 @@ Builds a live, self-updating embed listing every showcased role with its descrip
 `/showcase remove role:@...` takes a role back out of the showcase (existing members keep the role, it just stops being offered). `/showcase list` shows the current lineup without needing the live channel. Discord caps this at 25 roles per showcase message. As with any role the bot manages, make sure the bot's own role sits above whatever you showcase in Server Settings > Roles.
 
 ## Notes
-- Role changes are stored in `guild_config.json`, created automatically next to `bot.py`.
+- Settings are stored in a Postgres database if you set `DATABASE_URL` (see Setup step 3) — otherwise in `guild_config.json` next to `bot.py`, which does **not** survive Render redeploys on the free tier.
 - For 24/7 uptime you'll want to host this somewhere (a small VPS, Railway, Render, etc.) rather than running it on your own machine.
 - If a command doesn't appear in Discord right away, it can take up to an hour for global slash commands to propagate on first sync — restarting the bot after inviting it usually speeds this up.

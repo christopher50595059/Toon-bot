@@ -79,6 +79,7 @@ import json
 import os
 import random
 import tempfile
+import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -94,19 +95,68 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 CONFIG_PATH = Path(__file__).parent / "guild_config.json"
+DATABASE_URL = os.getenv("DATABASE_URL")  # optional — set this to persist settings across redeploys
 
-# ---------- simple JSON-backed per-guild config ----------
+# ---------- per-guild config, backed by Postgres (Neon) if configured, else a local JSON file ----------
+#
+# Render's free tier wipes the local filesystem on every deploy, so a local
+# JSON file alone doesn't survive updates. If DATABASE_URL is set (e.g. a
+# free Neon Postgres database), settings persist there instead and survive
+# redeploys. Without it, the bot still works exactly as before — settings
+# will just reset on each deploy, same as always.
+
+def _pg_connect():
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL)
+
 
 def load_config() -> dict:
+    if DATABASE_URL:
+        try:
+            conn = _pg_connect()
+            cur = conn.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS bot_config (guild_id TEXT PRIMARY KEY, data JSONB NOT NULL)")
+            conn.commit()
+            cur.execute("SELECT guild_id, data FROM bot_config")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return {guild_id: data for guild_id, data in rows}
+        except Exception as e:
+            print(f"⚠️ Couldn't load config from database, starting empty: {e}")
+            return {}
+
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r") as f:
             return json.load(f)
     return {}
 
 
-def save_config(cfg: dict) -> None:
+def _write_config(cfg: dict) -> None:
+    """Runs off the main thread (see save_config) so a slow DB write never blocks the bot."""
+    if DATABASE_URL:
+        try:
+            conn = _pg_connect()
+            cur = conn.cursor()
+            for guild_id, data in cfg.items():
+                cur.execute(
+                    "INSERT INTO bot_config (guild_id, data) VALUES (%s, %s) "
+                    "ON CONFLICT (guild_id) DO UPDATE SET data = EXCLUDED.data",
+                    (guild_id, json.dumps(data)),
+                )
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ Couldn't save config to database: {e}")
+        return
+
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
+
+
+def save_config(cfg: dict) -> None:
+    threading.Thread(target=_write_config, args=(cfg,), daemon=True).start()
 
 
 config = load_config()
