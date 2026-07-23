@@ -447,6 +447,66 @@ async def dm_notify(
         return False
 
 
+async def web_give_role(guild_id: int, user_id: int, role_id: int, reason: str, actor_id: int) -> str:
+    """Give a role to a member, triggered from the web dashboard. Mirrors /addrole
+    exactly — same hierarchy check, DM, and log entry — so behavior is identical
+    regardless of whether staff used Discord or the browser."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    role = guild.get_role(role_id)
+    actor = guild.get_member(actor_id)
+    if member is None or role is None or actor is None:
+        return "❌ Couldn't find that member, role, or your account in this server."
+
+    if role >= guild.me.top_role:
+        return f"❌ I can't assign @{role.name} — it's above my own role in Server Settings > Roles."
+    if role in member.roles:
+        return f"ℹ️ {member.display_name} already has @{role.name}."
+
+    try:
+        await member.add_roles(role, reason=f"Added by {actor} via web dashboard: {reason}")
+    except discord.Forbidden:
+        return "❌ I don't have permission to assign that role."
+
+    dm_sent = await dm_notify(
+        guild, member, title="🟢 You were given a role", color=discord.Color.green(),
+        fields={"Role": role.name, "Reason": reason},
+    )
+    await log_movement(guild, member=member, target=role.mention, reason=reason, moderator=actor)
+    note = "" if dm_sent else " (couldn't DM them — their DMs may be closed)"
+    return f"✅ Gave @{role.name} to {member.display_name}.{note}"
+
+
+async def web_remove_role(guild_id: int, user_id: int, role_id: int, reason: str, actor_id: int) -> str:
+    """Remove a role from a member, triggered from the web dashboard. Mirrors /removerole exactly."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    role = guild.get_role(role_id)
+    actor = guild.get_member(actor_id)
+    if member is None or role is None or actor is None:
+        return "❌ Couldn't find that member, role, or your account in this server."
+
+    if role not in member.roles:
+        return f"ℹ️ {member.display_name} doesn't have @{role.name}."
+
+    try:
+        await member.remove_roles(role, reason=f"Removed by {actor} via web dashboard: {reason}")
+    except discord.Forbidden:
+        return "❌ I don't have permission to remove that role."
+
+    dm_sent = await dm_notify(
+        guild, member, title="🔴 A role was removed from you", color=discord.Color.red(),
+        fields={"Role": role.name, "Reason": reason},
+    )
+    await log_movement(guild, member=member, target=f"~~@{role.name}~~ removed", reason=reason, moderator=actor)
+    note = "" if dm_sent else " (couldn't DM them — their DMs may be closed)"
+    return f"✅ Removed @{role.name} from {member.display_name}.{note}"
+
+
 async def generate_tts_file(text: str) -> str:
     """Generate an MP3 file for the given text via gTTS. Blocking network call,
     so it's run off the event loop. Returns the temp file path."""
@@ -3397,5 +3457,5 @@ if __name__ == "__main__":
         raise SystemExit(
             "No token found. Copy .env.example to .env and add your bot token as DISCORD_TOKEN."
         )
-    start_web_app(bot, config, save_config, get_guild_cfg)
+    start_web_app(bot, config, save_config, get_guild_cfg, web_give_role, web_remove_role)
     bot.run(TOKEN)

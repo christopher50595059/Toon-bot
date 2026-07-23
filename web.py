@@ -14,6 +14,7 @@ since the dashboard runs in the same process. That keeps setup to just
 one OAuth app (the bot's own) and avoids a second set of API calls.
 """
 
+import asyncio
 import os
 import secrets
 import threading
@@ -36,6 +37,8 @@ _bot = None
 _config = None
 _save_config = None
 _get_guild_cfg = None
+_give_role = None
+_remove_role = None
 
 
 # ---------- shared page chrome ----------
@@ -299,6 +302,24 @@ def _role_options(guild, selected_id, allow_none=True):
     return "".join(opts)
 
 
+def _member_options(guild):
+    opts = ['<option value="">— pick a member —</option>']
+    members = sorted((m for m in guild.members if not m.bot), key=lambda m: m.display_name.lower())
+    for m in members:
+        opts.append(f'<option value="{m.id}">{m.display_name} ({m})</option>')
+    return "".join(opts)
+
+
+def _run_async(coro, timeout=15):
+    """Bridge a Flask request (running in its own thread) into the bot's
+    asyncio event loop (running in the main thread), and wait for the result."""
+    future = asyncio.run_coroutine_threadsafe(coro, _bot.loop)
+    try:
+        return future.result(timeout=timeout)
+    except Exception as e:
+        return f"❌ Something went wrong: {e}"
+
+
 @app.route("/dashboard/<int:guild_id>", methods=["GET"])
 def dashboard(guild_id):
     guild, member = _check_access(guild_id)
@@ -330,9 +351,17 @@ def dashboard(guild_id):
     <h1 style="margin-top:18px;">{guild_icon_html}{guild.name}</h1>
     {flash_html}
 
+    <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:16px;">
+      <div>
+        <div style="font-weight:700; margin-bottom:2px;">🎭 Give or remove roles from members</div>
+        <div class="hint" style="margin-top:0;">Instantly assign or take away a role, right from the browser.</div>
+      </div>
+      <a class="btn" href="/dashboard/{guild_id}/roles" style="white-space:nowrap;">Manage Roles</a>
+    </div>
+
     <div class="quicknav">
       <a href="#channels">📢 Channels</a>
-      <a href="#roles">🎭 Roles</a>
+      <a href="#roles">🎭 Settings</a>
       <a href="#ranks">📋 Ranks</a>
       <a href="#other">⚙️ Other</a>
     </div>
@@ -454,20 +483,120 @@ def dashboard_save(guild_id):
     return redirect(url_for("dashboard", guild_id=guild_id, saved=1))
 
 
+# ---------- role actions (give/remove) ----------
+
+@app.route("/dashboard/<int:guild_id>/roles")
+def roles_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    member_opts = _member_options(guild)
+    role_opts = _role_options(guild, None, allow_none=False)
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🎭 Give / Remove Roles</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>🟢 Give a role</h2>
+      <form method="post" action="/dashboard/{guild_id}/roles/give">
+        <div class="grid-2">
+          <div class="field">
+            <label>Member</label>
+            <select name="user_id" required>{member_opts}</select>
+          </div>
+          <div class="field">
+            <label>Role</label>
+            <select name="role_id" required>{role_opts}</select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Reason</label>
+          <input type="text" name="reason" placeholder="Why you're giving this role" required>
+        </div>
+        <button class="btn" type="submit">Give Role</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🔴 Remove a role</h2>
+      <form method="post" action="/dashboard/{guild_id}/roles/remove">
+        <div class="grid-2">
+          <div class="field">
+            <label>Member</label>
+            <select name="user_id" required>{member_opts}</select>
+          </div>
+          <div class="field">
+            <label>Role</label>
+            <select name="role_id" required>{role_opts}</select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Reason</label>
+          <input type="text" name="reason" placeholder="Why you're removing this role" required>
+        </div>
+        <button class="btn btn-secondary" type="submit">Remove Role</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Roles", body)
+
+
+@app.route("/dashboard/<int:guild_id>/roles/give", methods=["POST"])
+def roles_give(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    try:
+        user_id = int(request.form["user_id"])
+        role_id = int(request.form["role_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("roles_page", guild_id=guild_id, result="❌ Pick a member and a role."))
+
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_give_role(guild_id, user_id, role_id, reason, session["user_id"]))
+    return redirect(url_for("roles_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/roles/remove", methods=["POST"])
+def roles_remove(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    try:
+        user_id = int(request.form["user_id"])
+        role_id = int(request.form["role_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("roles_page", guild_id=guild_id, result="❌ Pick a member and a role."))
+
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_remove_role(guild_id, user_id, role_id, reason, session["user_id"]))
+    return redirect(url_for("roles_page", guild_id=guild_id, result=result))
+
+
 # ---------- entrypoint ----------
 
 def _run(port: int):
     app.run(host="0.0.0.0", port=port)
 
 
-def start_web_app(bot, config, save_config, get_guild_cfg):
+def start_web_app(bot, config, save_config, get_guild_cfg, give_role, remove_role):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
-    global _bot, _config, _save_config, _get_guild_cfg
+    global _bot, _config, _save_config, _get_guild_cfg, _give_role, _remove_role
     _bot = bot
     _config = config
     _save_config = save_config
     _get_guild_cfg = get_guild_cfg
+    _give_role = give_role
+    _remove_role = remove_role
 
     port = int(os.environ.get("PORT", 8080))
     thread = threading.Thread(target=_run, args=(port,), daemon=True)

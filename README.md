@@ -361,9 +361,11 @@ If you completed the OAuth setup above, visiting your bot's URL in a browser giv
 - The full rank order (all 8 slots, picked from real roles in your server)
 - Cooldown hours and inactivity threshold
 
-Click **Login with Discord**, and you'll land on a list of every server where you're either an Administrator or hold the role set via `/setmanagerrole` (and where the bot is present). Pick one, edit whatever you want, and hit **Save changes** — it writes to the exact same config the bot already uses, so changes take effect immediately, no restart needed. This doesn't replace the slash commands — things like roster membership, warnings, and history still go through Discord — it's specifically for the "which channel/role should X use" type settings.
+Click **Login with Discord**, and you'll land on a list of every server where you're either an Administrator or hold the role set via `/setmanagerrole` (and where the bot is present). Pick one, edit whatever you want, and hit **Save changes** — it writes to the exact same config the bot already uses, so changes take effect immediately, no restart needed.
 
-Nothing here needs a database: the dashboard reads and writes the bot's existing `guild_config.json` directly, since it runs in the same process.
+**Giving and removing roles from members:** click **Manage Roles** at the top of a server's dashboard page to open a page where you can pick a member, pick a role, give a reason, and instantly give or take that role — no Discord client needed. This behaves exactly like `/addrole` and `/removerole`: same permission checks, same DM to the member, same log channel entry. This is currently the only *action* (as opposed to settings) available from the dashboard — things like roster management, moderation, and history still go through Discord slash commands for now.
+
+If you set up `DATABASE_URL` (see Setup step 3), the dashboard reads and writes to that same database — otherwise it uses the local `guild_config.json`, same as the bot.
 
 ### Role showcase (self-assignable roles)
 ```
