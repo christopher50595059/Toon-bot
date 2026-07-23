@@ -18,6 +18,7 @@ import asyncio
 import os
 import secrets
 import threading
+from datetime import datetime
 
 import requests
 from flask import Flask, redirect, request, session, url_for, render_template_string
@@ -124,6 +125,17 @@ BASE_STYLE = """
   .save-bar .btn { width:100%; padding:15px; font-size:15px; box-shadow:0 6px 24px rgba(124,90,255,0.35); }
   .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   @media (max-width:520px) { .grid-2 { grid-template-columns:1fr; } }
+  .log-wrap { max-height:640px; overflow-y:auto; border-radius:10px; border:1px solid #35363c; }
+  table.log-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .log-table th { position:sticky; top:0; background:#1c1a26; text-align:left; padding:10px 12px;
+                  font-size:11px; text-transform:uppercase; letter-spacing:0.4px; color:#949ba4; border-bottom:1px solid #35363c; }
+  .log-table td { padding:10px 12px; border-bottom:1px solid #26282c; vertical-align:top; }
+  .log-table tr:hover td { background:rgba(88,101,242,0.06); }
+  .log-table tr:last-child td { border-bottom:none; }
+  .pill { display:inline-block; background:#2a2740; border:1px solid #40415a; color:#c9c9ff;
+          padding:2px 9px; border-radius:12px; font-size:12px; font-weight:600; }
+  .filter-bar { display:flex; gap:10px; align-items:end; margin-bottom:18px; flex-wrap:wrap; }
+  .filter-bar .field { margin-bottom:0; flex:1; min-width:200px; }
 </style>
 """
 
@@ -392,6 +404,14 @@ def dashboard(guild_id):
         <div class="hint" style="margin-top:0;">Warn, timeout, kick, or ban a member.</div>
       </div>
       <a class="btn btn-secondary" href="/dashboard/{guild_id}/moderation" style="white-space:nowrap;">Open Moderation</a>
+    </div>
+
+    <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
+      <div>
+        <div style="font-weight:700; margin-bottom:2px;">🗂️ Logs & Movements</div>
+        <div class="hint" style="margin-top:0;">See every rank/roster action and warning, server-wide or per member.</div>
+      </div>
+      <a class="btn btn-secondary" href="/dashboard/{guild_id}/logs" style="white-space:nowrap;">View Logs</a>
     </div>
 
     <div class="quicknav">
@@ -858,6 +878,135 @@ def moderation_warn(guild_id):
     reason = request.form.get("reason", "").strip() or "No reason given"
     result = _run_async(_warn(guild_id, user_id, reason, session["user_id"]))
     return redirect(url_for("moderation_page", guild_id=guild_id, result=result))
+
+
+# ---------- logs / movements ----------
+
+def _format_ts(iso_str):
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%b %d, %Y %I:%M %p")
+    except (ValueError, TypeError):
+        return iso_str or "—"
+
+
+@app.route("/dashboard/<int:guild_id>/logs")
+def logs_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    history = cfg.get("history", {})
+    warnings = cfg.get("warnings", {})
+
+    filter_user_id = request.args.get("user", "").strip()
+
+    all_entries = []
+    for uid_str, entries in history.items():
+        if filter_user_id and uid_str != filter_user_id:
+            continue
+        for e in entries:
+            all_entries.append((int(uid_str), e))
+    all_entries.sort(key=lambda pair: pair[1].get("timestamp", ""), reverse=True)
+
+    limit = 300 if filter_user_id else 100
+    shown = all_entries[:limit]
+
+    def action_color(action):
+        a = action.lower()
+        if "promot" in a: return "#f5c15c"
+        if "demot" in a: return "#ff9f5a"
+        if "remov" in a: return "#ff6b6b"
+        if "add" in a: return "#5ee0a0"
+        return "#a9b3ff"
+
+    rows = ""
+    if not shown:
+        rows = '<tr><td colspan="5" class="hint" style="padding:20px;">No recorded activity yet.</td></tr>'
+    for uid, e in shown:
+        m = guild.get_member(uid)
+        name = m.display_name if m else f"Unknown ({uid})"
+        mod = guild.get_member(e.get("moderator_id"))
+        mod_name = mod.display_name if mod else f"Unknown ({e.get('moderator_id')})"
+        action = e.get("action", "—")
+        detail = e.get("detail", "") or ""
+        reason = e.get("reason") or ""
+        color = action_color(action)
+        rows += f"""
+        <tr>
+          <td>{name}</td>
+          <td><span class="pill" style="background:{color}22; border-color:{color}55; color:{color};">{action}</span></td>
+          <td>{detail}</td>
+          <td>{mod_name}</td>
+          <td>{reason}</td>
+          <td class="hint" style="white-space:nowrap;">{_format_ts(e.get("timestamp"))}</td>
+        </tr>
+        """
+
+    # Warnings block only shown when filtered to one person.
+    warnings_html = ""
+    if filter_user_id:
+        user_warnings = warnings.get(filter_user_id, [])
+        if user_warnings:
+            w_rows = ""
+            for w in reversed(user_warnings):
+                mod = guild.get_member(w.get("moderator_id"))
+                mod_name = mod.display_name if mod else f"Unknown ({w.get('moderator_id')})"
+                w_rows += f"""
+                <tr>
+                  <td>{w.get('reason','')}</td>
+                  <td>{mod_name}</td>
+                  <td class="hint" style="white-space:nowrap;">{_format_ts(w.get('timestamp'))}</td>
+                </tr>
+                """
+            warnings_html = f"""
+            <div class="card">
+              <h2>⚠️ Warnings ({len(user_warnings)})</h2>
+              <div class="log-wrap"><table class="log-table">
+                <tr><th>Reason</th><th>Moderator</th><th>When</th></tr>
+                {w_rows}
+              </table></div>
+            </div>
+            """
+
+    member_opts = '<option value="">— everyone —</option>' + _member_options(guild).split("</option>", 1)[1]
+    # Re-mark the currently selected filter, if any.
+    if filter_user_id:
+        member_opts = member_opts.replace(f'value="{filter_user_id}"', f'value="{filter_user_id}" selected')
+
+    filter_label = ""
+    if filter_user_id:
+        fm = guild.get_member(int(filter_user_id))
+        filter_label = f' — {fm.display_name}' if fm else ""
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🗂️ Logs & Movements{filter_label}</h1>
+    <div class="hint" style="margin-bottom:18px;">
+      {"Showing this member's full history (up to 300 entries)." if filter_user_id else f"Showing the {len(shown)} most recent action(s) across everyone."}
+    </div>
+
+    <form method="get" class="filter-bar">
+      <div class="field">
+        <label>Filter to one member</label>
+        <select name="user" onchange="this.form.submit()">{member_opts}</select>
+      </div>
+    </form>
+
+    {warnings_html}
+
+    <div class="card">
+      <h2>📋 Rank / Roster History</h2>
+      <div class="log-wrap">
+        <table class="log-table">
+          <tr><th>Member</th><th>Action</th><th>Detail</th><th>By</th><th>Reason</th><th>When</th></tr>
+          {rows}
+        </table>
+      </div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Logs", body)
 
 
 # ---------- entrypoint ----------
