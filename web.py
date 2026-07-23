@@ -44,53 +44,73 @@ BASE_STYLE = """
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  body { background:#17181c; color:#dbdee1; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-         margin:0; padding:0 0 80px; line-height:1.4; }
+  body {
+    background:
+      radial-gradient(circle at 15% -10%, rgba(88,101,242,0.20) 0%, transparent 45%),
+      radial-gradient(circle at 90% 10%, rgba(155,107,255,0.16) 0%, transparent 40%),
+      linear-gradient(160deg, #16121f 0%, #131320 40%, #101014 100%);
+    background-attachment:fixed;
+    color:#dbdee1; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    margin:0; padding:0 0 80px; line-height:1.4;
+  }
   .wrap { max-width:800px; margin:0 auto; padding:36px 24px; }
-  h1 { font-size:24px; margin:0 0 4px; font-weight:700; letter-spacing:-0.3px; }
+  h1 {
+    font-size:26px; margin:0 0 4px; font-weight:800; letter-spacing:-0.3px;
+    background:linear-gradient(90deg,#7c9aff,#b18aff); -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
   h2 { font-size:15px; color:#f2f3f5; margin:0 0 18px; font-weight:700; display:flex; align-items:center; gap:8px; }
   .card {
-    background:linear-gradient(180deg,#2b2d31,#26282c); border:1px solid #35363c; border-radius:12px;
-    padding:22px 24px; margin-bottom:18px; box-shadow:0 2px 8px rgba(0,0,0,0.25);
+    background:linear-gradient(160deg, rgba(88,101,242,0.08), rgba(43,45,49,0.9) 30%);
+    border:1px solid #35363c; border-left:3px solid #5865f2; border-radius:12px;
+    padding:22px 24px; margin-bottom:18px; box-shadow:0 4px 14px rgba(0,0,0,0.35);
   }
-  a { color:#5b9dff; text-decoration:none; }
-  a:hover { text-decoration:underline; }
-  .btn { display:inline-block; background:#5865f2; color:#fff; padding:11px 20px; border-radius:8px;
-         border:none; font-size:14px; cursor:pointer; font-weight:600; transition:background 0.15s ease; }
-  .btn:hover { background:#4752c4; text-decoration:none; }
+  .card#roles { border-left-color:#9b6bff; background:linear-gradient(160deg, rgba(155,107,255,0.09), rgba(43,45,49,0.9) 30%); }
+  .card#ranks { border-left-color:#7c8cff; background:linear-gradient(160deg, rgba(124,140,255,0.09), rgba(43,45,49,0.9) 30%); }
+  .card#other { border-left-color:#6ea8fe; background:linear-gradient(160deg, rgba(110,168,254,0.09), rgba(43,45,49,0.9) 30%); }
+  a { color:#7c9aff; text-decoration:none; }
+  a:hover { text-decoration:underline; color:#9db4ff; }
+  .btn {
+    display:inline-block; background:linear-gradient(135deg,#5865f2,#9b6bff); color:#fff; padding:11px 20px;
+    border-radius:8px; border:none; font-size:14px; cursor:pointer; font-weight:600;
+    transition:filter 0.15s ease, transform 0.15s ease;
+  }
+  .btn:hover { filter:brightness(1.12); text-decoration:none; }
   .btn-secondary { background:#3f4147; }
-  .btn-secondary:hover { background:#54565c; }
+  .btn-secondary:hover { background:#54565c; filter:none; }
   .field { margin-bottom:18px; }
   .field:last-child { margin-bottom:0; }
   label { display:block; font-size:11px; text-transform:uppercase; letter-spacing:0.4px; color:#949ba4;
           margin:0 0 6px; font-weight:700; }
   select, input[type=number], input[type=text] {
-    width:100%; background:#1e1f22; border:1px solid #3f4147; color:#f2f3f5;
+    width:100%; background:#1c1a26; border:1px solid #40415a; color:#f2f3f5;
     padding:10px 12px; border-radius:8px; font-size:14px; transition:border-color 0.15s ease, background 0.15s ease;
   }
   select {
     appearance:none; -webkit-appearance:none;
-    background-image:url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23949ba4' stroke-width='2'%3e%3cpath d='M6 9l6 6 6-6'/%3e%3c/svg%3e");
+    background-image:url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a9b3ff' stroke-width='2'%3e%3cpath d='M6 9l6 6 6-6'/%3e%3c/svg%3e");
     background-repeat:no-repeat; background-position:right 10px center; background-size:18px; padding-right:36px;
   }
-  select:hover, input:hover { border-color:#5865f2; background:#232428; }
-  select:focus, input:focus { outline:none; border-color:#5865f2; box-shadow:0 0 0 3px rgba(88,101,242,0.25); }
+  select:hover, input:hover { border-color:#9b6bff; background:#231f30; }
+  select:focus, input:focus { outline:none; border-color:#9b6bff; box-shadow:0 0 0 3px rgba(155,107,255,0.25); }
   .hint { color:#80848e; font-size:12px; margin-top:6px; }
-  .flash { background:#2d6a4f; border:1px solid #40916c; color:#d8f3dc; padding:12px 16px; border-radius:8px;
-           margin-bottom:18px; font-size:14px; font-weight:600; }
-  .guild-list a { display:flex; align-items:center; gap:12px; background:#26282c; border:1px solid #35363c;
-                  padding:14px 16px; border-radius:10px; margin-bottom:8px; color:#dbdee1; transition:all 0.15s ease; }
-  .guild-list a:hover { background:#2f3136; border-color:#5865f2; text-decoration:none; transform:translateX(2px); }
+  .flash { background:linear-gradient(135deg,#2d6a4f,#1f5a44); border:1px solid #40916c; color:#d8f3dc;
+           padding:12px 16px; border-radius:8px; margin-bottom:18px; font-size:14px; font-weight:600; }
+  .guild-list a {
+    display:flex; align-items:center; gap:12px; background:linear-gradient(135deg, rgba(88,101,242,0.08), rgba(38,40,44,0.9));
+    border:1px solid #35363c; padding:14px 16px; border-radius:10px; margin-bottom:8px; color:#dbdee1;
+    transition:all 0.15s ease;
+  }
+  .guild-list a:hover { border-color:#9b6bff; box-shadow:0 0 0 1px #9b6bff; text-decoration:none; transform:translateX(2px); }
   .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
   .topbar a { color:#949ba4; font-size:13px; }
   .topbar a:hover { color:#dbdee1; }
   form { margin:0; }
   .quicknav { display:flex; gap:8px; margin:20px 0 24px; flex-wrap:wrap; }
-  .quicknav a { background:#26282c; border:1px solid #35363c; padding:9px 16px; border-radius:20px;
+  .quicknav a { background:#211d2e; border:1px solid #3a3550; padding:9px 16px; border-radius:20px;
                 font-size:13px; font-weight:600; color:#dbdee1; transition:all 0.15s ease; }
-  .quicknav a:hover { background:#5865f2; border-color:#5865f2; color:#fff; text-decoration:none; }
+  .quicknav a:hover { background:linear-gradient(135deg,#5865f2,#9b6bff); border-color:transparent; color:#fff; text-decoration:none; }
   .save-bar { position:sticky; bottom:20px; margin-top:12px; }
-  .save-bar .btn { width:100%; padding:15px; font-size:15px; box-shadow:0 6px 20px rgba(0,0,0,0.5); }
+  .save-bar .btn { width:100%; padding:15px; font-size:15px; box-shadow:0 6px 24px rgba(124,90,255,0.35); }
   .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   @media (max-width:520px) { .grid-2 { grid-template-columns:1fr; } }
 </style>
