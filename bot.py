@@ -787,6 +787,219 @@ async def web_warn(guild_id: int, user_id: int, reason: str, actor_id: int) -> s
     return f"✅ Warned {member.display_name} (warning #{len(user_warnings)}).{note}"
 
 
+async def web_mass_add_role(guild_id: int, role_id: int, filter_role_id: int, reason: str, actor_id: int) -> str:
+    """Mirrors /massaddrole."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    role = guild.get_role(role_id)
+    actor = guild.get_member(actor_id)
+    if role is None or actor is None:
+        return "❌ Couldn't find that role or your account in this server."
+    if role >= guild.me.top_role:
+        return f"❌ I can't assign @{role.name} — it's above my own role in Server Settings > Roles."
+
+    filter_role = guild.get_role(filter_role_id) if filter_role_id else None
+    targets = [m for m in guild.members if role not in m.roles and (filter_role is None or filter_role in m.roles)]
+    if not targets:
+        return "ℹ️ No eligible members matched — nothing to do."
+
+    added, failed = 0, 0
+    for member in targets:
+        try:
+            await member.add_roles(role, reason=f"Mass add by {actor} via web dashboard: {reason}")
+            added += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    scope = f"members with @{filter_role.name}" if filter_role else "all eligible members"
+    await log_bulk_action(
+        guild, title="🟢 Mass Role Add", color=discord.Color.green(), moderator=actor,
+        description=f"Gave @{role.name} to {scope}.",
+        fields={"Added": str(added), "Failed": str(failed), "Reason": reason},
+    )
+    fail_note = f" ⚠️ {failed} failed." if failed else ""
+    return f"✅ Gave @{role.name} to {added} member(s).{fail_note}"
+
+
+async def web_mass_remove_role(guild_id: int, role_id: int, filter_role_id: int, reason: str, actor_id: int) -> str:
+    """Mirrors /massremoverole."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    role = guild.get_role(role_id)
+    actor = guild.get_member(actor_id)
+    if role is None or actor is None:
+        return "❌ Couldn't find that role or your account in this server."
+    if role >= guild.me.top_role:
+        return f"❌ I can't manage @{role.name} — it's above my own role in Server Settings > Roles."
+
+    filter_role = guild.get_role(filter_role_id) if filter_role_id else None
+    targets = [m for m in guild.members if role in m.roles and (filter_role is None or filter_role in m.roles)]
+    if not targets:
+        return "ℹ️ No eligible members matched — nothing to do."
+
+    removed, failed = 0, 0
+    for member in targets:
+        try:
+            await member.remove_roles(role, reason=f"Mass remove by {actor} via web dashboard: {reason}")
+            removed += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    scope = f"members who also have @{filter_role.name}" if filter_role else "all members who have it"
+    await log_bulk_action(
+        guild, title="🔴 Mass Role Remove", color=discord.Color.red(), moderator=actor,
+        description=f"Removed @{role.name} from {scope}.",
+        fields={"Removed": str(removed), "Failed": str(failed), "Reason": reason},
+    )
+    fail_note = f" ⚠️ {failed} failed." if failed else ""
+    return f"✅ Removed @{role.name} from {removed} member(s).{fail_note}"
+
+
+async def web_mass_rename(guild_id: int, prefix: str, suffix: str, filter_role_id: int, reason: str, actor_id: int) -> str:
+    """Mirrors /massrename."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    actor = guild.get_member(actor_id)
+    if actor is None:
+        return "❌ Couldn't find your account in this server."
+    if not prefix and not suffix:
+        return "❌ Provide at least a prefix or a suffix."
+    if not guild.me.guild_permissions.manage_nicknames:
+        return "❌ I don't have permission to manage nicknames."
+
+    filter_role = guild.get_role(filter_role_id) if filter_role_id else None
+    bot_top_role = guild.me.top_role
+    targets = [
+        m for m in guild.members
+        if not m.bot and m.id != guild.owner_id and m.top_role < bot_top_role
+        and (filter_role is None or filter_role in m.roles)
+    ]
+    if not targets:
+        return "ℹ️ No eligible members matched — nothing to rename."
+
+    renamed, failed = 0, 0
+    for member in targets:
+        base_name = member.nick or member.name
+        new_nick = f"{prefix or ''}{base_name}{suffix or ''}"[:32]
+        try:
+            await member.edit(nick=new_nick, reason=f"Mass rename by {actor} via web dashboard: {reason}")
+            renamed += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    scope = f"members with @{filter_role.name}" if filter_role else "all eligible members"
+    preview = f"{prefix or ''}<name>{suffix or ''}"
+    await log_bulk_action(
+        guild, title="✏️ Mass Rename", color=discord.Color.dark_teal(), moderator=actor,
+        description=f"Applied pattern `{preview}` to {scope}.",
+        fields={"Renamed": str(renamed), "Failed": str(failed), "Reason": reason},
+    )
+    fail_note = f" ⚠️ {failed} failed." if failed else ""
+    return f"✅ Renamed {renamed} member(s).{fail_note}"
+
+
+async def web_announce(guild_id: int, channel_id: int, title: str, message: str, ping_everyone: bool, actor_id: int) -> str:
+    """Mirrors /announce."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    channel = guild.get_channel(channel_id)
+    actor = guild.get_member(actor_id)
+    if channel is None or actor is None:
+        return "❌ Couldn't find that channel or your account in this server."
+    if not channel.permissions_for(guild.me).send_messages:
+        return f"❌ I don't have permission to send messages in #{channel.name}."
+
+    warn_no_ping = ping_everyone and not channel.permissions_for(guild.me).mention_everyone
+
+    embed = discord.Embed(color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+    embed.title = f"📣 {title}"
+    embed.description = f"{SPACER}\n{message}\n{SPACER}"
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    embed.set_footer(text=f"Posted by {actor.display_name}", icon_url=actor.display_avatar.url)
+
+    content = "@everyone" if ping_everyone else None
+    allowed = discord.AllowedMentions(everyone=ping_everyone)
+    try:
+        await channel.send(content=content, embed=embed, allowed_mentions=allowed)
+    except discord.Forbidden:
+        return f"❌ I don't have permission to send messages in #{channel.name}."
+
+    note = " ⚠️ (I lack Mention Everyone permission there, so nobody was pinged)" if warn_no_ping else ""
+    return f"✅ Announcement posted in #{channel.name}.{note}"
+
+
+async def web_massannounce(guild_id: int, title: str, message: str, ping_everyone: bool, actor_id: int) -> str:
+    """Mirrors /massannounce — posts to every 'announcement' channel and speaks
+    in every active voice channel. Runs synchronously (unlike the slash command's
+    background task) since the web request already waits for a result either way."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    actor = guild.get_member(actor_id)
+    if actor is None:
+        return "❌ Couldn't find your account in this server."
+
+    text_channels = [c for c in guild.text_channels if "announcement" in c.name.lower()]
+    active_vcs = [vc for vc in guild.voice_channels if any(not m.bot for m in vc.members)]
+    if not text_channels and not active_vcs:
+        return "ℹ️ Nothing to broadcast to — no channel names contain 'announcement', and no voice channels currently have anyone in them."
+
+    await run_broadcast(guild, actor, title, message, text_channels, active_vcs, ping_everyone)
+    return f"✅ Broadcast sent to {len(text_channels)} announcement channel(s) and spoken in {len(active_vcs)} voice channel(s)."
+
+
+async def web_showcase_add(guild_id: int, role_id: int, description: str, actor_id: int) -> str:
+    """Mirrors /showcase add."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    role = guild.get_role(role_id)
+    if role is None:
+        return "❌ Couldn't find that role."
+
+    cfg = get_guild_cfg(guild_id)
+    entries = cfg.setdefault("showcase_roles", [])
+    existing = next((e for e in entries if e["role_id"] == role.id), None)
+    if existing:
+        existing["description"] = description
+        msg = f"✅ Updated @{role.name}'s description in the showcase."
+    else:
+        if len(entries) >= 25:
+            return "❌ The showcase is full — Discord allows a maximum of 25 roles per message."
+        entries.append({"role_id": role.id, "description": description})
+        msg = f"✅ Added @{role.name} to the showcase."
+
+    save_config(config)
+    await refresh_showcase_message(guild)
+    return msg
+
+
+async def web_showcase_remove(guild_id: int, role_id: int, actor_id: int) -> str:
+    """Mirrors /showcase remove."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    role = guild.get_role(role_id)
+    if role is None:
+        return "❌ Couldn't find that role."
+
+    cfg = get_guild_cfg(guild_id)
+    entries = cfg.setdefault("showcase_roles", [])
+    new_entries = [e for e in entries if e["role_id"] != role.id]
+    if len(new_entries) == len(entries):
+        return f"ℹ️ @{role.name} isn't in the showcase."
+
+    cfg["showcase_roles"] = new_entries
+    save_config(config)
+    await refresh_showcase_message(guild)
+    return f"✅ Removed @{role.name} from the showcase."
+
+
 async def generate_tts_file(text: str) -> str:
     """Generate an MP3 file for the given text via gTTS. Blocking network call,
     so it's run off the event loop. Returns the temp file path."""
@@ -3742,5 +3955,8 @@ if __name__ == "__main__":
         web_give_role, web_remove_role,
         web_roster_add, web_roster_remove, web_promote, web_demote,
         web_kick, web_ban, web_timeout, web_warn,
+        web_mass_add_role, web_mass_remove_role, web_mass_rename,
+        web_announce, web_massannounce,
+        web_showcase_add, web_showcase_remove,
     )
     bot.run(TOKEN)

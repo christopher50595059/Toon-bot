@@ -15,13 +15,14 @@ one OAuth app (the bot's own) and avoids a second set of API calls.
 """
 
 import asyncio
+import json
 import os
 import secrets
 import threading
 from datetime import datetime
 
 import requests
-from flask import Flask, redirect, request, session, url_for, render_template_string
+from flask import Flask, Response, redirect, request, session, url_for, render_template_string
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET")
@@ -48,6 +49,13 @@ _kick = None
 _ban = None
 _timeout = None
 _warn = None
+_mass_add_role = None
+_mass_remove_role = None
+_mass_rename = None
+_announce = None
+_massannounce = None
+_showcase_add = None
+_showcase_remove = None
 
 
 # ---------- shared page chrome ----------
@@ -136,6 +144,14 @@ BASE_STYLE = """
           padding:2px 9px; border-radius:12px; font-size:12px; font-weight:600; }
   .filter-bar { display:flex; gap:10px; align-items:end; margin-bottom:18px; flex-wrap:wrap; }
   .filter-bar .field { margin-bottom:0; flex:1; min-width:200px; }
+  .action-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:10px; }
+  .action-tile {
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;
+    background:#1e1c29; border:1px solid #3a3550; border-radius:10px; padding:16px 10px;
+    color:#dbdee1; font-weight:600; font-size:13px; text-align:center; transition:all 0.15s ease;
+  }
+  .action-tile span { font-size:22px; }
+  .action-tile:hover { border-color:#9b6bff; background:#241f36; text-decoration:none; transform:translateY(-2px); }
 </style>
 """
 
@@ -382,36 +398,21 @@ def dashboard(guild_id):
     <h1 style="margin-top:18px;">{guild_icon_html}{guild.name}</h1>
     {flash_html}
 
-    <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
-      <div>
-        <div style="font-weight:700; margin-bottom:2px;">🎭 Give or remove roles from members</div>
-        <div class="hint" style="margin-top:0;">Instantly assign or take away a role, right from the browser.</div>
+    <div class="card">
+      <h2>⚡ Actions</h2>
+      <div class="action-grid">
+        <a class="action-tile" href="/dashboard/{guild_id}/roles"><span>🎭</span>Roles</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/roster"><span>📋</span>Roster</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/moderation"><span>🛡️</span>Moderation</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/mass"><span>🧰</span>Mass Actions</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/announce"><span>📣</span>Announcements</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/showcase"><span>🎭</span>Showcase</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/crosspost"><span>🔀</span>Cross-Posting</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/greetings"><span>🔊</span>VC Greetings</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/logs"><span>🗂️</span>Logs</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
       </div>
-      <a class="btn" href="/dashboard/{guild_id}/roles" style="white-space:nowrap;">Manage Roles</a>
-    </div>
-
-    <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
-      <div>
-        <div style="font-weight:700; margin-bottom:2px;">📋 Roster actions</div>
-        <div class="hint" style="margin-top:0;">Add, promote, demote, or remove members on the roster.</div>
-      </div>
-      <a class="btn" href="/dashboard/{guild_id}/roster" style="white-space:nowrap;">Manage Roster</a>
-    </div>
-
-    <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
-      <div>
-        <div style="font-weight:700; margin-bottom:2px;">🛡️ Moderation</div>
-        <div class="hint" style="margin-top:0;">Warn, timeout, kick, or ban a member.</div>
-      </div>
-      <a class="btn btn-secondary" href="/dashboard/{guild_id}/moderation" style="white-space:nowrap;">Open Moderation</a>
-    </div>
-
-    <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
-      <div>
-        <div style="font-weight:700; margin-bottom:2px;">🗂️ Logs & Movements</div>
-        <div class="hint" style="margin-top:0;">See every rank/roster action and warning, server-wide or per member.</div>
-      </div>
-      <a class="btn btn-secondary" href="/dashboard/{guild_id}/logs" style="white-space:nowrap;">View Logs</a>
     </div>
 
     <div class="quicknav">
@@ -1009,6 +1010,536 @@ def logs_page(guild_id):
     return render_page(f"{guild.name} — Logs", body)
 
 
+# ---------- mass actions ----------
+
+@app.route("/dashboard/<int:guild_id>/mass")
+def mass_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+    role_opts = _role_options(guild, None, allow_none=False)
+    role_opts_optional = _role_options(guild, None, allow_none=True)
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🧰 Mass Actions</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>🟢 Give a role to many members</h2>
+      <form method="post" action="/dashboard/{guild_id}/mass/addrole">
+        <div class="grid-2">
+          <div class="field"><label>Role to give</label><select name="role_id" required>{role_opts}</select></div>
+          <div class="field"><label>Only members who have this role (optional)</label><select name="filter_role_id">{role_opts_optional}</select></div>
+        </div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn" type="submit">Give to All Matching</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🔴 Remove a role from many members</h2>
+      <form method="post" action="/dashboard/{guild_id}/mass/removerole">
+        <div class="grid-2">
+          <div class="field"><label>Role to remove</label><select name="role_id" required>{role_opts}</select></div>
+          <div class="field"><label>Only members who also have this role (optional)</label><select name="filter_role_id">{role_opts_optional}</select></div>
+        </div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn btn-secondary" type="submit">Remove from All Matching</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>✏️ Mass rename</h2>
+      <form method="post" action="/dashboard/{guild_id}/mass/rename">
+        <div class="grid-2">
+          <div class="field"><label>Prefix (optional)</label><input type="text" name="prefix" placeholder="[Staff] "></div>
+          <div class="field"><label>Suffix (optional)</label><input type="text" name="suffix" placeholder=" | Verified"></div>
+        </div>
+        <div class="field"><label>Only members with this role (optional)</label><select name="filter_role_id">{role_opts_optional}</select></div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn btn-secondary" type="submit">Rename All Matching</button>
+      </form>
+      <div class="hint">The server owner and anyone above the bot's own role are automatically skipped.</div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Mass Actions", body)
+
+
+@app.route("/dashboard/<int:guild_id>/mass/addrole", methods=["POST"])
+def mass_addrole_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        role_id = int(request.form["role_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("mass_page", guild_id=guild_id, result="❌ Pick a role."))
+    filter_role_id = int(request.form["filter_role_id"]) if request.form.get("filter_role_id") else None
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_mass_add_role(guild_id, role_id, filter_role_id, reason, session["user_id"]), timeout=60)
+    return redirect(url_for("mass_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/mass/removerole", methods=["POST"])
+def mass_removerole_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        role_id = int(request.form["role_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("mass_page", guild_id=guild_id, result="❌ Pick a role."))
+    filter_role_id = int(request.form["filter_role_id"]) if request.form.get("filter_role_id") else None
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_mass_remove_role(guild_id, role_id, filter_role_id, reason, session["user_id"]), timeout=60)
+    return redirect(url_for("mass_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/mass/rename", methods=["POST"])
+def mass_rename_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    prefix = request.form.get("prefix", "").strip()
+    suffix = request.form.get("suffix", "").strip()
+    if not prefix and not suffix:
+        return redirect(url_for("mass_page", guild_id=guild_id, result="❌ Provide at least a prefix or a suffix."))
+    filter_role_id = int(request.form["filter_role_id"]) if request.form.get("filter_role_id") else None
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_mass_rename(guild_id, prefix, suffix, filter_role_id, reason, session["user_id"]), timeout=60)
+    return redirect(url_for("mass_page", guild_id=guild_id, result=result))
+
+
+# ---------- announcements ----------
+
+@app.route("/dashboard/<int:guild_id>/announce")
+def announce_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+    channel_opts = _channel_options(guild, None)
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">📣 Announcements</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>📢 Post to one channel</h2>
+      <form method="post" action="/dashboard/{guild_id}/announce/single">
+        <div class="field"><label>Channel</label><select name="channel_id" required>{channel_opts}</select></div>
+        <div class="field"><label>Title</label><input type="text" name="title" value="Announcement" required></div>
+        <div class="field"><label>Message</label><input type="text" name="message" placeholder="What's the announcement?" required></div>
+        <div class="field"><label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:14px;">
+          <input type="checkbox" name="ping_everyone" value="1" checked style="width:auto;"> Ping @everyone
+        </label></div>
+        <button class="btn" type="submit">Post</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>📢 Broadcast everywhere (text + voice)</h2>
+      <div class="hint" style="margin-bottom:12px;">Posts to every channel with "announcement" in its name, and speaks the message aloud in every voice channel that currently has people in it.</div>
+      <form method="post" action="/dashboard/{guild_id}/announce/broadcast">
+        <div class="field"><label>Title</label><input type="text" name="title" value="Announcement" required></div>
+        <div class="field"><label>Message</label><input type="text" name="message" placeholder="What's the announcement?" required></div>
+        <div class="field"><label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:14px;">
+          <input type="checkbox" name="ping_everyone" value="1" checked style="width:auto;"> Ping @everyone
+        </label></div>
+        <button class="btn btn-secondary" type="submit">Broadcast</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Announcements", body)
+
+
+@app.route("/dashboard/<int:guild_id>/announce/single", methods=["POST"])
+def announce_single_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        channel_id = int(request.form["channel_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("announce_page", guild_id=guild_id, result="❌ Pick a channel."))
+    title = request.form.get("title", "").strip() or "Announcement"
+    message = request.form.get("message", "").strip()
+    if not message:
+        return redirect(url_for("announce_page", guild_id=guild_id, result="❌ Write a message."))
+    ping_everyone = request.form.get("ping_everyone") == "1"
+    result = _run_async(_announce(guild_id, channel_id, title, message, ping_everyone, session["user_id"]))
+    return redirect(url_for("announce_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/announce/broadcast", methods=["POST"])
+def announce_broadcast_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    title = request.form.get("title", "").strip() or "Announcement"
+    message = request.form.get("message", "").strip()
+    if not message:
+        return redirect(url_for("announce_page", guild_id=guild_id, result="❌ Write a message."))
+    ping_everyone = request.form.get("ping_everyone") == "1"
+    result = _run_async(_massannounce(guild_id, title, message, ping_everyone, session["user_id"]), timeout=60)
+    return redirect(url_for("announce_page", guild_id=guild_id, result=result))
+
+
+# ---------- role showcase ----------
+
+@app.route("/dashboard/<int:guild_id>/showcase")
+def showcase_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    entries = cfg.get("showcase_roles", [])
+    current_rows = ""
+    if entries:
+        for e in entries:
+            role = guild.get_role(e["role_id"])
+            name = f"@{role.name}" if role else f"(deleted role {e['role_id']})"
+            current_rows += f"""
+            <tr>
+              <td>{name}</td>
+              <td>{e.get('description','')}</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/showcase/remove" style="margin:0;">
+                  <input type="hidden" name="role_id" value="{e['role_id']}">
+                  <button class="btn btn-secondary" type="submit" style="padding:6px 12px; font-size:12px;">Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        current_rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No roles in the showcase yet.</td></tr>'
+
+    role_opts = _role_options(guild, None, allow_none=False)
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🎭 Role Showcase</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>Current showcase ({len(entries)}/25)</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Role</th><th>Description</th><th></th></tr>
+        {current_rows}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>➕ Add or update a role</h2>
+      <form method="post" action="/dashboard/{guild_id}/showcase/add">
+        <div class="field"><label>Role</label><select name="role_id" required>{role_opts}</select></div>
+        <div class="field"><label>Description</label><input type="text" name="description" placeholder="What this role is for / how to earn it" required></div>
+        <button class="btn" type="submit">Add / Update</button>
+      </form>
+      <div class="hint">Set a showcase channel from the main settings page for members to see this with clickable "get role" buttons.</div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Showcase", body)
+
+
+@app.route("/dashboard/<int:guild_id>/showcase/add", methods=["POST"])
+def showcase_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        role_id = int(request.form["role_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("showcase_page", guild_id=guild_id, result="❌ Pick a role."))
+    description = request.form.get("description", "").strip()
+    if not description:
+        return redirect(url_for("showcase_page", guild_id=guild_id, result="❌ Write a description."))
+    result = _run_async(_showcase_add(guild_id, role_id, description, session["user_id"]))
+    return redirect(url_for("showcase_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/showcase/remove", methods=["POST"])
+def showcase_remove_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        role_id = int(request.form["role_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("showcase_page", guild_id=guild_id, result="❌ Pick a role."))
+    result = _run_async(_showcase_remove(guild_id, role_id, session["user_id"]))
+    return redirect(url_for("showcase_page", guild_id=guild_id, result=result))
+
+
+# ---------- cross-posting (pure config, no Discord action needed to set up) ----------
+
+@app.route("/dashboard/<int:guild_id>/crosspost")
+def crosspost_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    crossposts = cfg.get("crossposts", {})
+    rows = ""
+    if crossposts:
+        for source_id, dest_id in crossposts.items():
+            source_channel = guild.get_channel(int(source_id))
+            dest_channel = _bot.get_channel(dest_id)
+            source_label = f"#{source_channel.name}" if source_channel else f"(deleted channel {source_id})"
+            dest_label = f"#{dest_channel.name} in {dest_channel.guild.name}" if dest_channel else f"(unreachable channel {dest_id})"
+            rows += f"""
+            <tr>
+              <td>{source_label}</td>
+              <td>→ {dest_label}</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/crosspost/remove" style="margin:0;">
+                  <input type="hidden" name="source_id" value="{source_id}">
+                  <button class="btn btn-secondary" type="submit" style="padding:6px 12px; font-size:12px;">Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No mirrors set up yet.</td></tr>'
+
+    channel_opts = _channel_options(guild, None)
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🔀 Cross-Posting</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>Current mirrors</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>From</th><th>To</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>➕ Add a mirror</h2>
+      <form method="post" action="/dashboard/{guild_id}/crosspost/add">
+        <div class="field"><label>Source channel (in this server)</label><select name="source_channel_id" required>{channel_opts}</select></div>
+        <div class="field">
+          <label>Destination channel ID (in another server, bot must be there too)</label>
+          <input type="text" name="dest_channel_id" placeholder="123456789012345678" required>
+        </div>
+        <button class="btn" type="submit">Add Mirror</button>
+      </form>
+      <div class="hint">To get a channel ID: enable Developer Mode in Discord (User Settings → Advanced), then right-click the destination channel → Copy Channel ID.</div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Cross-Posting", body)
+
+
+@app.route("/dashboard/<int:guild_id>/crosspost/add", methods=["POST"])
+def crosspost_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        source_channel_id = int(request.form["source_channel_id"])
+        dest_channel_id = int(request.form["dest_channel_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("crosspost_page", guild_id=guild_id, result="❌ Fill in both fields with valid values."))
+
+    dest_channel = _bot.get_channel(dest_channel_id)
+    if dest_channel is None:
+        return redirect(url_for(
+            "crosspost_page", guild_id=guild_id,
+            result="❌ I can't see that channel. Make sure the bot is invited to that server and has access to it.",
+        ))
+
+    cfg = _get_guild_cfg(guild_id)
+    crossposts = cfg.setdefault("crossposts", {})
+    crossposts[str(source_channel_id)] = dest_channel_id
+    _save_config(_config)
+    return redirect(url_for("crosspost_page", guild_id=guild_id, result=f"✅ Mirror added: #{guild.get_channel(source_channel_id).name} → #{dest_channel.name}"))
+
+
+@app.route("/dashboard/<int:guild_id>/crosspost/remove", methods=["POST"])
+def crosspost_remove_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    source_id = request.form.get("source_id", "")
+    cfg = _get_guild_cfg(guild_id)
+    crossposts = cfg.setdefault("crossposts", {})
+    if source_id in crossposts:
+        crossposts.pop(source_id)
+        _save_config(_config)
+        return redirect(url_for("crosspost_page", guild_id=guild_id, result="✅ Mirror removed."))
+    return redirect(url_for("crosspost_page", guild_id=guild_id, result="ℹ️ That mirror wasn't found."))
+
+
+# ---------- VC greetings (pure config, no Discord action needed to set up) ----------
+
+@app.route("/dashboard/<int:guild_id>/greetings")
+def greetings_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    greetings = cfg.get("vc_greetings", {})
+    rows = ""
+    if greetings:
+        for uid_str, message in greetings.items():
+            m = guild.get_member(int(uid_str))
+            name = m.display_name if m else f"Unknown ({uid_str})"
+            rows += f"""
+            <tr>
+              <td>{name}</td>
+              <td>{message}</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/greetings/remove" style="margin:0;">
+                  <input type="hidden" name="user_id" value="{uid_str}">
+                  <button class="btn btn-secondary" type="submit" style="padding:6px 12px; font-size:12px;">Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No VC greetings set up yet.</td></tr>'
+
+    member_opts = _member_options(guild)
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🔊 VC Greetings</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>Current greetings</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Member</th><th>Message</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>➕ Add / update a greeting</h2>
+      <form method="post" action="/dashboard/{guild_id}/greetings/add">
+        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        <div class="field"><label>What the bot should say when they join a VC</label><input type="text" name="message" placeholder="The legend has arrived!" required></div>
+        <button class="btn" type="submit">Save Greeting</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — VC Greetings", body)
+
+
+@app.route("/dashboard/<int:guild_id>/greetings/add", methods=["POST"])
+def greetings_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("greetings_page", guild_id=guild_id, result="❌ Pick a member."))
+    message = request.form.get("message", "").strip()
+    if not message:
+        return redirect(url_for("greetings_page", guild_id=guild_id, result="❌ Write a greeting message."))
+
+    cfg = _get_guild_cfg(guild_id)
+    greetings = cfg.setdefault("vc_greetings", {})
+    greetings[str(user_id)] = message
+    _save_config(_config)
+    target = guild.get_member(user_id)
+    name = target.display_name if target else str(user_id)
+    return redirect(url_for("greetings_page", guild_id=guild_id, result=f"✅ Greeting saved for {name}."))
+
+
+@app.route("/dashboard/<int:guild_id>/greetings/remove", methods=["POST"])
+def greetings_remove_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    user_id = request.form.get("user_id", "")
+    cfg = _get_guild_cfg(guild_id)
+    greetings = cfg.setdefault("vc_greetings", {})
+    if user_id in greetings:
+        greetings.pop(user_id)
+        _save_config(_config)
+        return redirect(url_for("greetings_page", guild_id=guild_id, result="✅ Greeting removed."))
+    return redirect(url_for("greetings_page", guild_id=guild_id, result="ℹ️ That greeting wasn't found."))
+
+
+# ---------- message activity (read-only) ----------
+
+@app.route("/dashboard/<int:guild_id>/activity")
+def activity_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    counts = cfg.get("message_counts", {})
+    since_str = cfg.get("message_count_since")
+    since_label = _format_ts(since_str) if since_str else "—"
+
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:50]
+    rows = ""
+    if ranked:
+        for i, (uid, count) in enumerate(ranked, start=1):
+            m = guild.get_member(int(uid))
+            name = m.display_name if m else f"Unknown ({uid})"
+            rows += f"<tr><td>#{i}</td><td>{name}</td><td>{count}</td></tr>"
+    else:
+        rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No messages recorded yet this period.</td></tr>'
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">📈 Message Activity</h1>
+    <div class="hint" style="margin-bottom:18px;">Counting since {since_label} — resets automatically every 7 days.</div>
+
+    <div class="card">
+      <h2>Top {len(ranked)}</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Rank</th><th>Member</th><th>Messages</th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Activity", body)
+
+
+# ---------- backup download ----------
+
+@app.route("/dashboard/<int:guild_id>/backup")
+def backup_download(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    data = json.dumps(cfg, indent=2)
+    return Response(
+        data, mimetype="application/json",
+        headers={"Content-Disposition": f"attachment; filename=backup-{guild_id}.json"},
+    )
+
+
 # ---------- entrypoint ----------
 
 def _run(port: int):
@@ -1020,11 +1551,16 @@ def start_web_app(
     give_role, remove_role,
     roster_add, roster_remove, promote, demote,
     kick, ban, timeout, warn,
+    mass_add_role, mass_remove_role, mass_rename,
+    announce, massannounce,
+    showcase_add, showcase_remove,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
     global _bot, _config, _save_config, _get_guild_cfg, _give_role, _remove_role
     global _roster_add, _roster_remove, _promote, _demote, _kick, _ban, _timeout, _warn
+    global _mass_add_role, _mass_remove_role, _mass_rename, _announce, _massannounce
+    global _showcase_add, _showcase_remove
     _bot = bot
     _config = config
     _save_config = save_config
@@ -1039,6 +1575,13 @@ def start_web_app(
     _ban = ban
     _timeout = timeout
     _warn = warn
+    _mass_add_role = mass_add_role
+    _mass_remove_role = mass_remove_role
+    _mass_rename = mass_rename
+    _announce = announce
+    _massannounce = massannounce
+    _showcase_add = showcase_add
+    _showcase_remove = showcase_remove
 
     port = int(os.environ.get("PORT", 8080))
     thread = threading.Thread(target=_run, args=(port,), daemon=True)
