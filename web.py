@@ -43,36 +43,56 @@ _get_guild_cfg = None
 BASE_STYLE = """
 <style>
   :root { color-scheme: dark; }
-  body { background:#1e1f22; color:#dbdee1; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-         margin:0; padding:0 0 60px; }
-  .wrap { max-width:760px; margin:0 auto; padding:32px 20px; }
-  h1 { font-size:22px; margin:0 0 4px; }
-  h2 { font-size:16px; color:#b5bac1; margin:28px 0 10px; border-bottom:1px solid #35363c; padding-bottom:6px; }
-  .card { background:#2b2d31; border-radius:8px; padding:20px; margin-bottom:16px; }
-  a { color:#5865f2; text-decoration:none; }
-  a:hover { text-decoration:underline; }
-  .btn { display:inline-block; background:#5865f2; color:#fff; padding:10px 18px; border-radius:6px;
-         border:none; font-size:14px; cursor:pointer; font-weight:600; }
-  .btn:hover { background:#4752c4; text-decoration:none; }
-  .btn-secondary { background:#4e5058; }
-  .btn-secondary:hover { background:#6d6f78; }
-  label { display:block; font-size:12px; text-transform:uppercase; color:#b5bac1; margin:14px 0 4px; font-weight:600; }
-  select, input[type=number], input[type=text] {
-    width:100%; box-sizing:border-box; background:#1e1f22; border:1px solid #35363c; color:#dbdee1;
-    padding:9px 10px; border-radius:4px; font-size:14px;
+  * { box-sizing: border-box; }
+  body { background:#17181c; color:#dbdee1; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         margin:0; padding:0 0 80px; line-height:1.4; }
+  .wrap { max-width:800px; margin:0 auto; padding:36px 24px; }
+  h1 { font-size:24px; margin:0 0 4px; font-weight:700; letter-spacing:-0.3px; }
+  h2 { font-size:15px; color:#f2f3f5; margin:0 0 18px; font-weight:700; display:flex; align-items:center; gap:8px; }
+  .card {
+    background:linear-gradient(180deg,#2b2d31,#26282c); border:1px solid #35363c; border-radius:12px;
+    padding:22px 24px; margin-bottom:18px; box-shadow:0 2px 8px rgba(0,0,0,0.25);
   }
-  .hint { color:#949ba4; font-size:12px; margin-top:4px; }
-  .flash { background:#2b6b3d; color:#fff; padding:10px 14px; border-radius:6px; margin-bottom:16px; font-size:14px; }
-  .guild-list a { display:block; background:#2b2d31; padding:14px 16px; border-radius:8px; margin-bottom:8px; color:#dbdee1; }
-  .guild-list a:hover { background:#35363c; text-decoration:none; }
+  a { color:#5b9dff; text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .btn { display:inline-block; background:#5865f2; color:#fff; padding:11px 20px; border-radius:8px;
+         border:none; font-size:14px; cursor:pointer; font-weight:600; transition:background 0.15s ease; }
+  .btn:hover { background:#4752c4; text-decoration:none; }
+  .btn-secondary { background:#3f4147; }
+  .btn-secondary:hover { background:#54565c; }
+  .field { margin-bottom:18px; }
+  .field:last-child { margin-bottom:0; }
+  label { display:block; font-size:11px; text-transform:uppercase; letter-spacing:0.4px; color:#949ba4;
+          margin:0 0 6px; font-weight:700; }
+  select, input[type=number], input[type=text] {
+    width:100%; background:#1e1f22; border:1px solid #3f4147; color:#f2f3f5;
+    padding:10px 12px; border-radius:8px; font-size:14px; transition:border-color 0.15s ease, background 0.15s ease;
+  }
+  select {
+    appearance:none; -webkit-appearance:none;
+    background-image:url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23949ba4' stroke-width='2'%3e%3cpath d='M6 9l6 6 6-6'/%3e%3c/svg%3e");
+    background-repeat:no-repeat; background-position:right 10px center; background-size:18px; padding-right:36px;
+  }
+  select:hover, input:hover { border-color:#5865f2; background:#232428; }
+  select:focus, input:focus { outline:none; border-color:#5865f2; box-shadow:0 0 0 3px rgba(88,101,242,0.25); }
+  .hint { color:#80848e; font-size:12px; margin-top:6px; }
+  .flash { background:#2d6a4f; border:1px solid #40916c; color:#d8f3dc; padding:12px 16px; border-radius:8px;
+           margin-bottom:18px; font-size:14px; font-weight:600; }
+  .guild-list a { display:flex; align-items:center; gap:12px; background:#26282c; border:1px solid #35363c;
+                  padding:14px 16px; border-radius:10px; margin-bottom:8px; color:#dbdee1; transition:all 0.15s ease; }
+  .guild-list a:hover { background:#2f3136; border-color:#5865f2; text-decoration:none; transform:translateX(2px); }
   .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
   .topbar a { color:#949ba4; font-size:13px; }
+  .topbar a:hover { color:#dbdee1; }
   form { margin:0; }
-  .quicknav { display:flex; gap:8px; margin:18px 0; flex-wrap:wrap; }
-  .quicknav a { background:#2b2d31; padding:8px 14px; border-radius:20px; font-size:13px; color:#dbdee1; }
-  .quicknav a:hover { background:#35363c; text-decoration:none; }
-  .save-bar { position:sticky; bottom:16px; margin-top:8px; }
-  .save-bar .btn { width:100%; padding:14px; font-size:15px; box-shadow:0 4px 16px rgba(0,0,0,0.4); }
+  .quicknav { display:flex; gap:8px; margin:20px 0 24px; flex-wrap:wrap; }
+  .quicknav a { background:#26282c; border:1px solid #35363c; padding:9px 16px; border-radius:20px;
+                font-size:13px; font-weight:600; color:#dbdee1; transition:all 0.15s ease; }
+  .quicknav a:hover { background:#5865f2; border-color:#5865f2; color:#fff; text-decoration:none; }
+  .save-bar { position:sticky; bottom:20px; margin-top:12px; }
+  .save-bar .btn { width:100%; padding:15px; font-size:15px; box-shadow:0 6px 20px rgba(0,0,0,0.5); }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:520px) { .grid-2 { grid-template-columns:1fr; } }
 </style>
 """
 
@@ -270,22 +290,24 @@ def dashboard(guild_id):
     flash_html = '<div class="flash">✅ Settings saved.</div>' if flash else ""
 
     ranks = cfg.get("ranks", [])
-    rank_selects = ""
+    rank_fields = ""
     for i in range(8):
         selected = ranks[i] if i < len(ranks) else None
-        rank_selects += f"""
-            <label>Rank {i + 1} {'(highest)' if i == 0 else ''}</label>
-            <select name="rank{i}">{_role_options(guild, selected)}</select>
+        rank_fields += f"""
+            <div class="field">
+              <label>Rank {i + 1} {'(highest)' if i == 0 else ''}</label>
+              <select name="rank{i}">{_role_options(guild, selected)}</select>
+            </div>
         """
 
     guild_icon_html = (
-        f'<img src="{guild.icon.url}" style="width:28px;height:28px;border-radius:6px;vertical-align:middle;margin-right:8px;">'
+        f'<img src="{guild.icon.url}" style="width:32px;height:32px;border-radius:8px;vertical-align:middle;margin-right:10px;">'
         if guild.icon else ""
     )
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/guilds">&larr; All servers</a></div>
-    <h1 style="margin-top:16px;">{guild_icon_html}{guild.name}</h1>
+    <h1 style="margin-top:18px;">{guild_icon_html}{guild.name}</h1>
     {flash_html}
 
     <div class="quicknav">
@@ -298,46 +320,66 @@ def dashboard(guild_id):
     <form method="post" action="/dashboard/{guild_id}/save">
 
       <div class="card" id="channels">
-        <h2 style="margin-top:0;border:none;">📢 Channels</h2>
-        <label>Log channel</label>
-        <select name="log_channel">{_channel_options(guild, cfg.get('log_channel_id'))}</select>
-        <div class="hint">Role/roster actions get posted here.</div>
-
-        <label>Live roster channel</label>
-        <select name="roster_channel">{_channel_options(guild, cfg.get('roster_channel_id'))}</select>
-
-        <label>Live stats channel</label>
-        <select name="stats_channel">{_channel_options(guild, cfg.get('stats_channel_id'))}</select>
-
-        <label>Birthday shoutout channel</label>
-        <select name="birthday_channel">{_channel_options(guild, cfg.get('birthday_channel_id'))}</select>
-
-        <label>Role showcase channel</label>
-        <select name="showcase_channel">{_channel_options(guild, cfg.get('showcase_channel_id'))}</select>
+        <h2>📢 Channels</h2>
+        <div class="grid-2">
+          <div class="field">
+            <label>Log channel</label>
+            <select name="log_channel">{_channel_options(guild, cfg.get('log_channel_id'))}</select>
+            <div class="hint">Role/roster actions get posted here.</div>
+          </div>
+          <div class="field">
+            <label>Live roster channel</label>
+            <select name="roster_channel">{_channel_options(guild, cfg.get('roster_channel_id'))}</select>
+          </div>
+          <div class="field">
+            <label>Live stats channel</label>
+            <select name="stats_channel">{_channel_options(guild, cfg.get('stats_channel_id'))}</select>
+          </div>
+          <div class="field">
+            <label>Birthday shoutout channel</label>
+            <select name="birthday_channel">{_channel_options(guild, cfg.get('birthday_channel_id'))}</select>
+          </div>
+          <div class="field">
+            <label>Role showcase channel</label>
+            <select name="showcase_channel">{_channel_options(guild, cfg.get('showcase_channel_id'))}</select>
+          </div>
+        </div>
       </div>
 
       <div class="card" id="roles">
-        <h2 style="margin-top:0;border:none;">🎭 Roles</h2>
-        <label>Manager role (can use staff commands)</label>
-        <select name="manager_role">{_role_options(guild, cfg.get('manager_role_id'))}</select>
-
-        <label>Birthday role</label>
-        <select name="birthday_role">{_role_options(guild, cfg.get('birthday_role_id'))}</select>
+        <h2>🎭 Roles</h2>
+        <div class="grid-2">
+          <div class="field">
+            <label>Manager role (can use staff commands)</label>
+            <select name="manager_role">{_role_options(guild, cfg.get('manager_role_id'))}</select>
+          </div>
+          <div class="field">
+            <label>Birthday role</label>
+            <select name="birthday_role">{_role_options(guild, cfg.get('birthday_role_id'))}</select>
+          </div>
+        </div>
       </div>
 
       <div class="card" id="ranks">
-        <h2 style="margin-top:0;border:none;">📋 Ranks (highest to lowest)</h2>
-        {rank_selects}
+        <h2>📋 Ranks (highest to lowest)</h2>
+        <div class="grid-2">
+          {rank_fields}
+        </div>
         <div class="hint">Leave lower ones on "none" if you have fewer than 8 ranks.</div>
       </div>
 
       <div class="card" id="other">
-        <h2 style="margin-top:0;border:none;">⚙️ Other settings</h2>
-        <label>Promotion/demotion cooldown (hours, 0 = off)</label>
-        <input type="number" name="cooldown_hours" min="0" value="{cfg.get('cooldown_hours', 0)}">
-
-        <label>Inactivity threshold (days, 0 = off)</label>
-        <input type="number" name="inactivity_days" min="0" value="{cfg.get('inactivity_days', 0)}">
+        <h2>⚙️ Other settings</h2>
+        <div class="grid-2">
+          <div class="field">
+            <label>Promotion/demotion cooldown (hours, 0 = off)</label>
+            <input type="number" name="cooldown_hours" min="0" value="{cfg.get('cooldown_hours', 0)}">
+          </div>
+          <div class="field">
+            <label>Inactivity threshold (days, 0 = off)</label>
+            <input type="number" name="inactivity_days" min="0" value="{cfg.get('inactivity_days', 0)}">
+          </div>
+        </div>
       </div>
 
       <div class="save-bar">
