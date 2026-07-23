@@ -39,6 +39,14 @@ _save_config = None
 _get_guild_cfg = None
 _give_role = None
 _remove_role = None
+_roster_add = None
+_roster_remove = None
+_promote = None
+_demote = None
+_kick = None
+_ban = None
+_timeout = None
+_warn = None
 
 
 # ---------- shared page chrome ----------
@@ -310,6 +318,17 @@ def _member_options(guild):
     return "".join(opts)
 
 
+def _rank_options(guild, cfg):
+    """Only the roles configured via /setranks, highest first — used for roster forms."""
+    rank_ids = cfg.get("ranks", [])
+    opts = ['<option value="">— pick a rank —</option>']
+    for rid in rank_ids:
+        role = guild.get_role(rid)
+        if role:
+            opts.append(f'<option value="{role.id}">@{role.name}</option>')
+    return "".join(opts)
+
+
 def _run_async(coro, timeout=15):
     """Bridge a Flask request (running in its own thread) into the bot's
     asyncio event loop (running in the main thread), and wait for the result."""
@@ -351,12 +370,28 @@ def dashboard(guild_id):
     <h1 style="margin-top:18px;">{guild_icon_html}{guild.name}</h1>
     {flash_html}
 
-    <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:16px;">
+    <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
       <div>
         <div style="font-weight:700; margin-bottom:2px;">🎭 Give or remove roles from members</div>
         <div class="hint" style="margin-top:0;">Instantly assign or take away a role, right from the browser.</div>
       </div>
       <a class="btn" href="/dashboard/{guild_id}/roles" style="white-space:nowrap;">Manage Roles</a>
+    </div>
+
+    <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
+      <div>
+        <div style="font-weight:700; margin-bottom:2px;">📋 Roster actions</div>
+        <div class="hint" style="margin-top:0;">Add, promote, demote, or remove members on the roster.</div>
+      </div>
+      <a class="btn" href="/dashboard/{guild_id}/roster" style="white-space:nowrap;">Manage Roster</a>
+    </div>
+
+    <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
+      <div>
+        <div style="font-weight:700; margin-bottom:2px;">🛡️ Moderation</div>
+        <div class="hint" style="margin-top:0;">Warn, timeout, kick, or ban a member.</div>
+      </div>
+      <a class="btn btn-secondary" href="/dashboard/{guild_id}/moderation" style="white-space:nowrap;">Open Moderation</a>
     </div>
 
     <div class="quicknav">
@@ -581,22 +616,280 @@ def roles_remove(guild_id):
     return redirect(url_for("roles_page", guild_id=guild_id, result=result))
 
 
+# ---------- roster actions (add/remove/promote/demote) ----------
+
+@app.route("/dashboard/<int:guild_id>/roster")
+def roster_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    member_opts = _member_options(guild)
+    rank_opts = _rank_options(guild, cfg)
+    no_ranks_hint = "" if cfg.get("ranks") else '<div class="hint">No ranks configured yet — set them up in this server\'s settings first.</div>'
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">📋 Roster Actions</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>📋 Add / move on roster</h2>
+      {no_ranks_hint}
+      <form method="post" action="/dashboard/{guild_id}/roster/add">
+        <div class="grid-2">
+          <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+          <div class="field"><label>Rank</label><select name="rank_id" required>{rank_opts}</select></div>
+        </div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn" type="submit">Add / Move</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>⬆️ Promote</h2>
+      <form method="post" action="/dashboard/{guild_id}/roster/promote">
+        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn" type="submit">Promote</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>⬇️ Demote</h2>
+      <form method="post" action="/dashboard/{guild_id}/roster/demote">
+        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn btn-secondary" type="submit">Demote</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🗑️ Remove from roster</h2>
+      <form method="post" action="/dashboard/{guild_id}/roster/remove">
+        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn btn-secondary" type="submit">Remove</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Roster", body)
+
+
+@app.route("/dashboard/<int:guild_id>/roster/add", methods=["POST"])
+def roster_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+        rank_id = int(request.form["rank_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick a member and a rank."))
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_roster_add(guild_id, user_id, rank_id, reason, session["user_id"]))
+    return redirect(url_for("roster_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/roster/remove", methods=["POST"])
+def roster_remove_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick a member."))
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_roster_remove(guild_id, user_id, reason, session["user_id"]))
+    return redirect(url_for("roster_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/roster/promote", methods=["POST"])
+def roster_promote_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick a member."))
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_promote(guild_id, user_id, reason, session["user_id"]))
+    return redirect(url_for("roster_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/roster/demote", methods=["POST"])
+def roster_demote_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick a member."))
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_demote(guild_id, user_id, reason, session["user_id"]))
+    return redirect(url_for("roster_page", guild_id=guild_id, result=result))
+
+
+# ---------- moderation actions (kick/ban/timeout/warn) ----------
+
+@app.route("/dashboard/<int:guild_id>/moderation")
+def moderation_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+    member_opts = _member_options(guild)
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🛡️ Moderation</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>⚠️ Warn</h2>
+      <form method="post" action="/dashboard/{guild_id}/moderation/warn">
+        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn" type="submit">Warn</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🔇 Timeout</h2>
+      <form method="post" action="/dashboard/{guild_id}/moderation/timeout">
+        <div class="grid-2">
+          <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+          <div class="field"><label>Minutes</label><input type="number" name="minutes" min="1" max="40320" value="60" required></div>
+        </div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn" type="submit">Time Out</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>👢 Kick</h2>
+      <form method="post" action="/dashboard/{guild_id}/moderation/kick">
+        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn btn-secondary" type="submit">Kick</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🔨 Ban</h2>
+      <form method="post" action="/dashboard/{guild_id}/moderation/ban">
+        <div class="grid-2">
+          <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+          <div class="field"><label>Delete message history (days, 0-7)</label><input type="number" name="delete_days" min="0" max="7" value="0"></div>
+        </div>
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        <button class="btn btn-secondary" type="submit">Ban</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Moderation", body)
+
+
+@app.route("/dashboard/<int:guild_id>/moderation/kick", methods=["POST"])
+def moderation_kick(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick a member."))
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_kick(guild_id, user_id, reason, session["user_id"]))
+    return redirect(url_for("moderation_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/moderation/ban", methods=["POST"])
+def moderation_ban(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick a member."))
+    try:
+        delete_days = int(request.form.get("delete_days", 0))
+    except ValueError:
+        delete_days = 0
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_ban(guild_id, user_id, reason, delete_days, session["user_id"]))
+    return redirect(url_for("moderation_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/moderation/timeout", methods=["POST"])
+def moderation_timeout(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+        minutes = int(request.form["minutes"])
+    except (KeyError, ValueError):
+        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick a member and a valid duration."))
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_timeout(guild_id, user_id, minutes, reason, session["user_id"]))
+    return redirect(url_for("moderation_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/moderation/warn", methods=["POST"])
+def moderation_warn(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick a member."))
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_warn(guild_id, user_id, reason, session["user_id"]))
+    return redirect(url_for("moderation_page", guild_id=guild_id, result=result))
+
+
 # ---------- entrypoint ----------
 
 def _run(port: int):
     app.run(host="0.0.0.0", port=port)
 
 
-def start_web_app(bot, config, save_config, get_guild_cfg, give_role, remove_role):
+def start_web_app(
+    bot, config, save_config, get_guild_cfg,
+    give_role, remove_role,
+    roster_add, roster_remove, promote, demote,
+    kick, ban, timeout, warn,
+):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
     global _bot, _config, _save_config, _get_guild_cfg, _give_role, _remove_role
+    global _roster_add, _roster_remove, _promote, _demote, _kick, _ban, _timeout, _warn
     _bot = bot
     _config = config
     _save_config = save_config
     _get_guild_cfg = get_guild_cfg
     _give_role = give_role
     _remove_role = remove_role
+    _roster_add = roster_add
+    _roster_remove = roster_remove
+    _promote = promote
+    _demote = demote
+    _kick = kick
+    _ban = ban
+    _timeout = timeout
+    _warn = warn
 
     port = int(os.environ.get("PORT", 8080))
     thread = threading.Thread(target=_run, args=(port,), daemon=True)

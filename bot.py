@@ -507,6 +507,286 @@ async def web_remove_role(guild_id: int, user_id: int, role_id: int, reason: str
     return f"✅ Removed @{role.name} from {member.display_name}.{note}"
 
 
+async def web_roster_add(guild_id: int, user_id: int, rank_role_id: int, reason: str, actor_id: int) -> str:
+    """Add/move a member on the roster + give them the rank role. Mirrors /rosteradd."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    rank = guild.get_role(rank_role_id)
+    actor = guild.get_member(actor_id)
+    if member is None or rank is None or actor is None:
+        return "❌ Couldn't find that member, rank, or your account in this server."
+
+    cfg = get_guild_cfg(guild_id)
+    valid_rank_ids = cfg.get("ranks", [])
+    if rank.id not in valid_rank_ids:
+        return f"❌ @{rank.name} isn't a configured rank. Run /setranks first."
+    if rank >= guild.me.top_role:
+        return f"❌ I can't assign @{rank.name} — it's above my own role in Server Settings > Roles."
+
+    roster = cfg.setdefault("roster", [])
+    existing = next((entry for entry in roster if entry["user_id"] == member.id), None)
+
+    try:
+        if rank not in member.roles:
+            await member.add_roles(rank, reason=f"Added by {actor} via web dashboard: {reason}")
+        if existing:
+            old_rank_role = guild.get_role(existing.get("rank_role_id"))
+            if old_rank_role and old_rank_role.id != rank.id and old_rank_role in member.roles:
+                await member.remove_roles(old_rank_role, reason=f"Rank changed by {actor} via web dashboard: {reason}")
+    except discord.Forbidden:
+        return "❌ I don't have permission to manage that role."
+
+    if existing:
+        old_rank_role = guild.get_role(existing.get("rank_role_id"))
+        old_label = old_rank_role.name if old_rank_role else "an unknown rank"
+        existing["rank_role_id"] = rank.id
+        save_config(config)
+        dm_sent = await dm_notify(
+            guild, member, title="📋 Your roster rank changed", color=discord.Color.teal(),
+            fields={"Previous Rank": old_label, "New Rank": rank.name, "Reason": reason},
+        )
+        await log_movement(guild, member=member, target=rank.mention, reason=reason, moderator=actor)
+        record_history(guild_id, member.id, "Rank Changed", f"{old_label} → {rank.mention}", actor_id, reason)
+        await refresh_roster_message(guild)
+        await refresh_server_stats_message(guild)
+        note = "" if dm_sent else " (couldn't DM them)"
+        return f"✅ Moved {member.display_name} from {old_label} to @{rank.name}.{note}"
+
+    roster.append({"user_id": member.id, "rank_role_id": rank.id})
+    save_config(config)
+    dm_sent = await dm_notify(
+        guild, member, title="📋 You were added to the roster", color=discord.Color.teal(),
+        fields={"Rank": rank.name, "Reason": reason},
+    )
+    await log_movement(guild, member=member, target=f"{rank.mention} (added to roster)", reason=reason, moderator=actor)
+    record_history(guild_id, member.id, "Added to Roster", rank.mention, actor_id, reason)
+    await refresh_roster_message(guild)
+    await refresh_server_stats_message(guild)
+    note = "" if dm_sent else " (couldn't DM them)"
+    return f"✅ Added {member.display_name} to the roster as @{rank.name}.{note}"
+
+
+async def web_roster_remove(guild_id: int, user_id: int, reason: str, actor_id: int) -> str:
+    """Remove a member from the roster. Mirrors /rosterremove (skips the extra
+    confirm step here since submitting the web form already is the confirmation)."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    actor = guild.get_member(actor_id)
+    if member is None or actor is None:
+        return "❌ Couldn't find that member or your account in this server."
+
+    cfg = get_guild_cfg(guild_id)
+    roster = cfg.setdefault("roster", [])
+    new_roster = [entry for entry in roster if entry["user_id"] != member.id]
+    if len(new_roster) == len(roster):
+        return f"ℹ️ {member.display_name} isn't on the roster."
+
+    cfg["roster"] = new_roster
+    save_config(config)
+    dm_sent = await dm_notify(
+        guild, member, title="📋 You were removed from the roster", color=discord.Color.orange(),
+        fields={"Reason": reason},
+    )
+    await log_movement(guild, member=member, target="removed from roster", reason=reason, moderator=actor)
+    record_history(guild_id, member.id, "Removed from Roster", "", actor_id, reason)
+    await refresh_roster_message(guild)
+    await refresh_server_stats_message(guild)
+    note = "" if dm_sent else " (couldn't DM them)"
+    return f"✅ Removed {member.display_name} from the roster.{note}"
+
+
+async def _web_change_rank(guild_id: int, user_id: int, reason: str, actor_id: int, step: int, verb: str) -> str:
+    """Shared logic for web_promote (step=-1) and web_demote (step=+1). Mirrors /promote and /demote
+    (skips the extra confirm step for demote — submitting the web form is the confirmation)."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    actor = guild.get_member(actor_id)
+    if member is None or actor is None:
+        return "❌ Couldn't find that member or your account in this server."
+
+    cfg = get_guild_cfg(guild_id)
+    rank_ids = cfg.get("ranks", [])
+    if not rank_ids:
+        return "❌ No ranks have been set up yet. Run /setranks first."
+
+    roster = cfg.setdefault("roster", [])
+    existing = next((entry for entry in roster if entry["user_id"] == member.id), None)
+    if not existing or existing.get("rank_role_id") not in rank_ids:
+        return f"❌ {member.display_name} isn't on the roster at a known rank yet."
+
+    user_cooldowns = cfg.get("user_cooldowns", {})
+    cooldown_hours = user_cooldowns.get(str(member.id), cfg.get("cooldown_hours", 0))
+    last_change_str = existing.get("last_rank_change")
+    if cooldown_hours and last_change_str:
+        elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(last_change_str)
+        remaining = timedelta(hours=cooldown_hours) - elapsed
+        if remaining.total_seconds() > 0:
+            hours_left = int(remaining.total_seconds() // 3600)
+            minutes_left = int((remaining.total_seconds() % 3600) // 60)
+            return f"⏳ {member.display_name} was rank-changed too recently. Try again in about {hours_left}h {minutes_left}m."
+
+    current_index = rank_ids.index(existing["rank_role_id"])
+    new_index = current_index + step
+    if new_index < 0:
+        return f"ℹ️ {member.display_name} is already at the highest rank."
+    if new_index >= len(rank_ids):
+        return f"ℹ️ {member.display_name} is already at the lowest rank."
+
+    old_role = guild.get_role(rank_ids[current_index])
+    new_role = guild.get_role(rank_ids[new_index])
+    if new_role is None:
+        return "❌ That rank's role no longer exists. Run /setranks again."
+    if new_role >= guild.me.top_role:
+        return f"❌ I can't assign @{new_role.name} — it's above my own role in Server Settings > Roles."
+
+    try:
+        if new_role not in member.roles:
+            await member.add_roles(new_role, reason=f"{verb}d by {actor} via web dashboard: {reason}")
+        if old_role and old_role in member.roles:
+            await member.remove_roles(old_role, reason=f"{verb}d by {actor} via web dashboard: {reason}")
+    except discord.Forbidden:
+        return "❌ I don't have permission to manage those roles."
+
+    existing["rank_role_id"] = new_role.id
+    existing["last_rank_change"] = datetime.now(timezone.utc).isoformat()
+    save_config(config)
+
+    old_label = old_role.name if old_role else "an unknown rank"
+    dm_title = "⬆️ You were promoted!" if step < 0 else "⬇️ You were demoted"
+    dm_color = discord.Color.gold() if step < 0 else discord.Color.dark_orange()
+    dm_sent = await dm_notify(
+        guild, member, title=dm_title, color=dm_color,
+        fields={"Previous Rank": old_label, "New Rank": new_role.name, "Reason": reason},
+    )
+    await log_movement(guild, member=member, target=new_role.mention, reason=reason, moderator=actor)
+    record_history(guild_id, member.id, f"{verb}d", f"{old_label} → {new_role.mention}", actor_id, reason)
+    await refresh_roster_message(guild)
+    await refresh_server_stats_message(guild)
+    note = "" if dm_sent else " (couldn't DM them)"
+    return f"✅ {verb}d {member.display_name} from {old_label} to @{new_role.name}.{note}"
+
+
+async def web_promote(guild_id: int, user_id: int, reason: str, actor_id: int) -> str:
+    return await _web_change_rank(guild_id, user_id, reason, actor_id, step=-1, verb="Promote")
+
+
+async def web_demote(guild_id: int, user_id: int, reason: str, actor_id: int) -> str:
+    return await _web_change_rank(guild_id, user_id, reason, actor_id, step=1, verb="Demote")
+
+
+async def web_kick(guild_id: int, user_id: int, reason: str, actor_id: int) -> str:
+    """Mirrors /kick (skips the extra confirm step — submitting the web form is the confirmation)."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    actor = guild.get_member(actor_id)
+    if member is None or actor is None:
+        return "❌ Couldn't find that member or your account in this server."
+    if not guild.me.guild_permissions.kick_members:
+        return "❌ I don't have permission to kick members."
+    if member.top_role >= guild.me.top_role:
+        return "❌ I can't kick that member — their role is higher than or equal to mine."
+
+    dm_sent = await dm_notify(guild, member, title="👢 You were kicked", color=discord.Color.dark_red(), fields={"Reason": reason})
+    try:
+        await member.kick(reason=f"By {actor} via web dashboard: {reason}")
+    except discord.Forbidden:
+        return "❌ I don't have permission to kick that member."
+    await log_movement(guild, member=member, target="kicked", reason=reason, moderator=actor)
+    note = "" if dm_sent else " (couldn't DM them before kicking)"
+    return f"✅ Kicked {member.display_name}.{note}"
+
+
+async def web_ban(guild_id: int, user_id: int, reason: str, delete_days: int, actor_id: int) -> str:
+    """Mirrors /ban (skips the extra confirm step — submitting the web form is the confirmation)."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    actor = guild.get_member(actor_id)
+    if member is None or actor is None:
+        return "❌ Couldn't find that member or your account in this server."
+    if not guild.me.guild_permissions.ban_members:
+        return "❌ I don't have permission to ban members."
+    if member.top_role >= guild.me.top_role:
+        return "❌ I can't ban that member — their role is higher than or equal to mine."
+    delete_days = max(0, min(7, delete_days))
+
+    dm_sent = await dm_notify(guild, member, title="🔨 You were banned", color=discord.Color.dark_red(), fields={"Reason": reason})
+    try:
+        await member.ban(reason=f"By {actor} via web dashboard: {reason}", delete_message_days=delete_days)
+    except discord.Forbidden:
+        return "❌ I don't have permission to ban that member."
+    await log_movement(guild, member=member, target="banned", reason=reason, moderator=actor)
+    note = "" if dm_sent else " (couldn't DM them before banning)"
+    return f"✅ Banned {member.display_name}.{note}"
+
+
+async def web_timeout(guild_id: int, user_id: int, minutes: int, reason: str, actor_id: int) -> str:
+    """Mirrors /timeout, including the pre-timeout voice channel announcement."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    actor = guild.get_member(actor_id)
+    if member is None or actor is None:
+        return "❌ Couldn't find that member or your account in this server."
+    if not guild.me.guild_permissions.moderate_members:
+        return "❌ I don't have permission to time out members."
+    if minutes <= 0 or minutes > 40320:
+        return "❌ Minutes must be between 1 and 40320 (28 days)."
+    if member.top_role >= guild.me.top_role:
+        return "❌ I can't time out that member — their role is higher than or equal to mine."
+
+    await announce_timeout_in_vc(member, minutes, reason)
+    try:
+        await member.timeout(timedelta(minutes=minutes), reason=f"By {actor} via web dashboard: {reason}")
+    except discord.Forbidden:
+        return "❌ I don't have permission to time out that member."
+
+    dm_sent = await dm_notify(
+        guild, member, title="🔇 You were timed out", color=discord.Color.dark_orange(),
+        fields={"Duration": f"{minutes} minute(s)", "Reason": reason},
+    )
+    await log_movement(guild, member=member, target=f"timed out ({minutes}m)", reason=reason, moderator=actor)
+    note = "" if dm_sent else " (couldn't DM them)"
+    return f"✅ Timed out {member.display_name} for {minutes} minute(s).{note}"
+
+
+async def web_warn(guild_id: int, user_id: int, reason: str, actor_id: int) -> str:
+    """Mirrors /warn."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    actor = guild.get_member(actor_id)
+    if member is None or actor is None:
+        return "❌ Couldn't find that member or your account in this server."
+
+    cfg = get_guild_cfg(guild_id)
+    warnings = cfg.setdefault("warnings", {})
+    user_warnings = warnings.setdefault(str(member.id), [])
+    user_warnings.append({
+        "reason": reason, "moderator_id": actor_id, "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    save_config(config)
+
+    dm_sent = await dm_notify(
+        guild, member, title="⚠️ You were warned", color=discord.Color.gold(),
+        fields={"Reason": reason, "Total Warnings": str(len(user_warnings))},
+    )
+    await log_movement(guild, member=member, target=f"warned (#{len(user_warnings)})", reason=reason, moderator=actor)
+    note = "" if dm_sent else " (couldn't DM them)"
+    return f"✅ Warned {member.display_name} (warning #{len(user_warnings)}).{note}"
+
+
 async def generate_tts_file(text: str) -> str:
     """Generate an MP3 file for the given text via gTTS. Blocking network call,
     so it's run off the event loop. Returns the temp file path."""
@@ -3457,5 +3737,10 @@ if __name__ == "__main__":
         raise SystemExit(
             "No token found. Copy .env.example to .env and add your bot token as DISCORD_TOKEN."
         )
-    start_web_app(bot, config, save_config, get_guild_cfg, web_give_role, web_remove_role)
+    start_web_app(
+        bot, config, save_config, get_guild_cfg,
+        web_give_role, web_remove_role,
+        web_roster_add, web_roster_remove, web_promote, web_demote,
+        web_kick, web_ban, web_timeout, web_warn,
+    )
     bot.run(TOKEN)
