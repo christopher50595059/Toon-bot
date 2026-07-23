@@ -91,7 +91,7 @@ This lets admins log in with Discord and edit settings (channels, roles, ranks) 
 2. Copy the **Client ID** shown there.
 3. Click **Reset Secret** (or **Copy** if a secret already shows), and copy the **Client Secret**. Treat this like a password — anyone with it can impersonate your app's login.
 4. Under **Redirects**, click **Add Redirect** and enter your Render URL followed by `/callback`, e.g. `https://toon-bot-ltn8.onrender.com/callback` — then **Save Changes**.
-5. Add three more environment variables (same place you added `DISCORD_TOKEN` — locally in `.env`, or on Render under Environment):
+5. Add four environment variables (same place you added `DISCORD_TOKEN` — locally in `.env`, or on Render under Environment):
    - `DISCORD_CLIENT_ID` — from step 2
    - `DISCORD_CLIENT_SECRET` — from step 3
    - `DASHBOARD_URL` — your Render URL with **no trailing slash**, e.g. `https://toon-bot-ltn8.onrender.com`
@@ -341,7 +341,7 @@ Anyone can set their own birthday — just month and day, no year needed (kept p
 ### Web dashboard
 If you completed the OAuth setup above, visiting your bot's URL in a browser gives you a login-protected settings page — an alternative to typing slash commands for the settings that benefit most from a visual picker:
 
-- Log channel, live roster channel, live stats channel, birthday shoutout channel
+- Log channel, live roster channel, live stats channel, birthday shoutout channel, role showcase channel
 - Manager role, birthday role
 - The full rank order (all 8 slots, picked from real roles in your server)
 - Cooldown hours and inactivity threshold

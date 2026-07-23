@@ -1,0 +1,412 @@
+"""
+Web dashboard for the Discord bot.
+
+Runs a Flask app alongside the bot (in a background thread) that:
+  - Serves a "/" health-check route so Render's free tier / an uptime
+    pinger keeps the service awake (same role keep_alive.py used to play).
+  - Lets server admins log in with Discord ("Login with Discord" OAuth2,
+    identify scope only) and view/edit the bot's settings for any server
+    they administer, through a browser instead of slash commands.
+
+This module doesn't talk to Discord's REST API for guild/channel/role
+data — it reads directly from the running bot's cache (bot.get_guild(...))
+since the dashboard runs in the same process. That keeps setup to just
+one OAuth app (the bot's own) and avoids a second set of API calls.
+"""
+
+import os
+import secrets
+import threading
+
+import requests
+from flask import Flask, redirect, request, session, url_for, render_template_string
+
+DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID")
+DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET")
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "").rstrip("/")  # e.g. https://your-app.onrender.com
+FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
+
+DISCORD_API = "https://discord.com/api"
+
+app = Flask(__name__)
+app.secret_key = FLASK_SECRET_KEY
+
+# Set by start_web_app() once the bot is ready to share its live state.
+_bot = None
+_config = None
+_save_config = None
+_get_guild_cfg = None
+
+
+# ---------- shared page chrome ----------
+
+BASE_STYLE = """
+<style>
+  :root { color-scheme: dark; }
+  body { background:#1e1f22; color:#dbdee1; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         margin:0; padding:0 0 60px; }
+  .wrap { max-width:760px; margin:0 auto; padding:32px 20px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  h2 { font-size:16px; color:#b5bac1; margin:28px 0 10px; border-bottom:1px solid #35363c; padding-bottom:6px; }
+  .card { background:#2b2d31; border-radius:8px; padding:20px; margin-bottom:16px; }
+  a { color:#5865f2; text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .btn { display:inline-block; background:#5865f2; color:#fff; padding:10px 18px; border-radius:6px;
+         border:none; font-size:14px; cursor:pointer; font-weight:600; }
+  .btn:hover { background:#4752c4; text-decoration:none; }
+  .btn-secondary { background:#4e5058; }
+  .btn-secondary:hover { background:#6d6f78; }
+  label { display:block; font-size:12px; text-transform:uppercase; color:#b5bac1; margin:14px 0 4px; font-weight:600; }
+  select, input[type=number], input[type=text] {
+    width:100%; box-sizing:border-box; background:#1e1f22; border:1px solid #35363c; color:#dbdee1;
+    padding:9px 10px; border-radius:4px; font-size:14px;
+  }
+  .hint { color:#949ba4; font-size:12px; margin-top:4px; }
+  .flash { background:#2b6b3d; color:#fff; padding:10px 14px; border-radius:6px; margin-bottom:16px; font-size:14px; }
+  .guild-list a { display:block; background:#2b2d31; padding:14px 16px; border-radius:8px; margin-bottom:8px; color:#dbdee1; }
+  .guild-list a:hover { background:#35363c; text-decoration:none; }
+  .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+  .topbar a { color:#949ba4; font-size:13px; }
+  form { margin:0; }
+  .quicknav { display:flex; gap:8px; margin:18px 0; flex-wrap:wrap; }
+  .quicknav a { background:#2b2d31; padding:8px 14px; border-radius:20px; font-size:13px; color:#dbdee1; }
+  .quicknav a:hover { background:#35363c; text-decoration:none; }
+  .save-bar { position:sticky; bottom:16px; margin-top:8px; }
+  .save-bar .btn { width:100%; padding:14px; font-size:15px; box-shadow:0 4px 16px rgba(0,0,0,0.4); }
+</style>
+"""
+
+
+def render_page(title: str, body: str, show_logout: bool = True) -> str:
+    logout_link = '<a href="/logout">Log out</a>' if show_logout and "user_id" in session else ""
+    return render_template_string(
+        f"""
+        <!doctype html><html><head><meta charset="utf-8">
+        <title>{{{{ title }}}}</title>{BASE_STYLE}</head>
+        <body><div class="wrap">
+        <div class="topbar"><h1>🤖 Bot Dashboard</h1>{logout_link}</div>
+        {{{{ body|safe }}}}
+        </div></body></html>
+        """,
+        title=title,
+        body=body,
+    )
+
+
+# ---------- health check (uptime pinger target) ----------
+
+@app.route("/")
+def home():
+    if "user_id" not in session:
+        return render_page("Dashboard", """
+            <div class="card">
+              <p>Manage this bot's settings from your browser.</p>
+              <a class="btn" href="/login">Login with Discord</a>
+            </div>
+        """, show_logout=False)
+    return redirect(url_for("guild_picker"))
+
+
+# ---------- OAuth2 login ----------
+
+@app.route("/login")
+def login():
+    if not DISCORD_CLIENT_ID or not DASHBOARD_URL:
+        return "Dashboard isn't configured yet — missing DISCORD_CLIENT_ID or DASHBOARD_URL.", 500
+    redirect_uri = f"{DASHBOARD_URL}/callback"
+    params = {
+        "client_id": DISCORD_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "identify",
+    }
+    query = "&".join(f"{k}={requests.utils.quote(v)}" for k, v in params.items())
+    return redirect(f"{DISCORD_API}/oauth2/authorize?{query}")
+
+
+@app.route("/callback")
+def callback():
+    code = request.args.get("code")
+    if not code:
+        return redirect(url_for("home"))
+
+    redirect_uri = f"{DASHBOARD_URL}/callback"
+    data = {
+        "client_id": DISCORD_CLIENT_ID,
+        "client_secret": DISCORD_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    try:
+        token_resp = requests.post(f"{DISCORD_API}/oauth2/token", data=data, headers=headers, timeout=10)
+        token_resp.raise_for_status()
+        access_token = token_resp.json()["access_token"]
+
+        user_resp = requests.get(
+            f"{DISCORD_API}/users/@me",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        user_resp.raise_for_status()
+        user = user_resp.json()
+    except requests.RequestException:
+        return "Login failed — couldn't reach Discord. Try again.", 502
+
+    session["user_id"] = int(user["id"])
+    session["username"] = user.get("username", "there")
+    return redirect(url_for("guild_picker"))
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("home"))
+
+
+def _admin_guilds_for(user_id: int):
+    """Every guild the bot is in where this user is an Administrator or holds the manager role."""
+    results = []
+    for guild in _bot.guilds:
+        member = guild.get_member(user_id)
+        if member is None:
+            continue
+        cfg = _get_guild_cfg(guild.id)
+        manager_role_id = cfg.get("manager_role_id")
+        is_manager = manager_role_id and any(r.id == manager_role_id for r in member.roles)
+        if member.guild_permissions.administrator or is_manager:
+            results.append(guild)
+    return results
+
+
+@app.route("/guilds")
+def guild_picker():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    guilds = _admin_guilds_for(session["user_id"])
+    if not guilds:
+        body = """
+            <div class="card">
+              <p>Hi! I couldn't find any servers where you're an admin or have the manager role, and where this bot is present.</p>
+              <p class="hint">If you just set this up, make sure you're using the same Discord account you use in that server.</p>
+            </div>
+        """
+        return render_page("No servers", body)
+
+    items = ""
+    for g in guilds:
+        icon_html = (
+            f'<img src="{g.icon.url}" style="width:32px;height:32px;border-radius:8px;">'
+            if g.icon else
+            '<div style="width:32px;height:32px;border-radius:8px;background:#5865f2;display:flex;'
+            'align-items:center;justify-content:center;font-weight:700;">' + g.name[0].upper() + '</div>'
+        )
+        items += f"""
+        <a href="/dashboard/{g.id}" style="display:flex;align-items:center;gap:12px;">
+          {icon_html}
+          <div>
+            <div style="font-weight:600;">{g.name}</div>
+            <div class="hint" style="margin-top:0;">{g.member_count} member(s)</div>
+          </div>
+        </a>
+        """
+    body = f"""
+        <p>Pick a server to manage:</p>
+        <div class="guild-list">{items}</div>
+    """
+    return render_page("Your servers", body)
+
+
+# ---------- dashboard ----------
+
+def _check_access(guild_id: int):
+    """Returns (guild, member) if the logged-in user can manage this guild, else (None, None)."""
+    if "user_id" not in session:
+        return None, None
+    guild = _bot.get_guild(guild_id)
+    if guild is None:
+        return None, None
+    member = guild.get_member(session["user_id"])
+    if member is None:
+        return None, None
+    cfg = _get_guild_cfg(guild.id)
+    manager_role_id = cfg.get("manager_role_id")
+    is_manager = manager_role_id and any(r.id == manager_role_id for r in member.roles)
+    if not (member.guild_permissions.administrator or is_manager):
+        return None, None
+    return guild, member
+
+
+def _channel_options(guild, selected_id, channel_type="text"):
+    channels = guild.text_channels if channel_type == "text" else guild.voice_channels
+    opts = ['<option value="">— none —</option>']
+    for c in channels:
+        sel = "selected" if selected_id == c.id else ""
+        opts.append(f'<option value="{c.id}" {sel}>#{c.name}</option>')
+    return "".join(opts)
+
+
+def _role_options(guild, selected_id, allow_none=True):
+    opts = ['<option value="">— none —</option>'] if allow_none else ['<option value="">— pick a role —</option>']
+    for r in sorted(guild.roles, key=lambda r: r.position, reverse=True):
+        if r.is_default():
+            continue
+        sel = "selected" if selected_id == r.id else ""
+        opts.append(f'<option value="{r.id}" {sel}>@{r.name}</option>')
+    return "".join(opts)
+
+
+@app.route("/dashboard/<int:guild_id>", methods=["GET"])
+def dashboard(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    flash = request.args.get("saved")
+    flash_html = '<div class="flash">✅ Settings saved.</div>' if flash else ""
+
+    ranks = cfg.get("ranks", [])
+    rank_selects = ""
+    for i in range(8):
+        selected = ranks[i] if i < len(ranks) else None
+        rank_selects += f"""
+            <label>Rank {i + 1} {'(highest)' if i == 0 else ''}</label>
+            <select name="rank{i}">{_role_options(guild, selected)}</select>
+        """
+
+    guild_icon_html = (
+        f'<img src="{guild.icon.url}" style="width:28px;height:28px;border-radius:6px;vertical-align:middle;margin-right:8px;">'
+        if guild.icon else ""
+    )
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/guilds">&larr; All servers</a></div>
+    <h1 style="margin-top:16px;">{guild_icon_html}{guild.name}</h1>
+    {flash_html}
+
+    <div class="quicknav">
+      <a href="#channels">📢 Channels</a>
+      <a href="#roles">🎭 Roles</a>
+      <a href="#ranks">📋 Ranks</a>
+      <a href="#other">⚙️ Other</a>
+    </div>
+
+    <form method="post" action="/dashboard/{guild_id}/save">
+
+      <div class="card" id="channels">
+        <h2 style="margin-top:0;border:none;">📢 Channels</h2>
+        <label>Log channel</label>
+        <select name="log_channel">{_channel_options(guild, cfg.get('log_channel_id'))}</select>
+        <div class="hint">Role/roster actions get posted here.</div>
+
+        <label>Live roster channel</label>
+        <select name="roster_channel">{_channel_options(guild, cfg.get('roster_channel_id'))}</select>
+
+        <label>Live stats channel</label>
+        <select name="stats_channel">{_channel_options(guild, cfg.get('stats_channel_id'))}</select>
+
+        <label>Birthday shoutout channel</label>
+        <select name="birthday_channel">{_channel_options(guild, cfg.get('birthday_channel_id'))}</select>
+
+        <label>Role showcase channel</label>
+        <select name="showcase_channel">{_channel_options(guild, cfg.get('showcase_channel_id'))}</select>
+      </div>
+
+      <div class="card" id="roles">
+        <h2 style="margin-top:0;border:none;">🎭 Roles</h2>
+        <label>Manager role (can use staff commands)</label>
+        <select name="manager_role">{_role_options(guild, cfg.get('manager_role_id'))}</select>
+
+        <label>Birthday role</label>
+        <select name="birthday_role">{_role_options(guild, cfg.get('birthday_role_id'))}</select>
+      </div>
+
+      <div class="card" id="ranks">
+        <h2 style="margin-top:0;border:none;">📋 Ranks (highest to lowest)</h2>
+        {rank_selects}
+        <div class="hint">Leave lower ones on "none" if you have fewer than 8 ranks.</div>
+      </div>
+
+      <div class="card" id="other">
+        <h2 style="margin-top:0;border:none;">⚙️ Other settings</h2>
+        <label>Promotion/demotion cooldown (hours, 0 = off)</label>
+        <input type="number" name="cooldown_hours" min="0" value="{cfg.get('cooldown_hours', 0)}">
+
+        <label>Inactivity threshold (days, 0 = off)</label>
+        <input type="number" name="inactivity_days" min="0" value="{cfg.get('inactivity_days', 0)}">
+      </div>
+
+      <div class="save-bar">
+        <button class="btn" type="submit">Save changes</button>
+      </div>
+    </form>
+    """
+    return render_page(f"{guild.name} — Dashboard", body)
+
+
+@app.route("/dashboard/<int:guild_id>/save", methods=["POST"])
+def dashboard_save(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    f = request.form
+
+    def set_or_clear(key, form_key, cast=int):
+        raw = f.get(form_key, "")
+        if raw:
+            cfg[key] = cast(raw)
+        else:
+            cfg.pop(key, None)
+
+    set_or_clear("log_channel_id", "log_channel")
+    set_or_clear("roster_channel_id", "roster_channel")
+    set_or_clear("stats_channel_id", "stats_channel")
+    set_or_clear("birthday_channel_id", "birthday_channel")
+    set_or_clear("showcase_channel_id", "showcase_channel")
+    set_or_clear("manager_role_id", "manager_role")
+    set_or_clear("birthday_role_id", "birthday_role")
+
+    ranks = []
+    for i in range(8):
+        raw = f.get(f"rank{i}", "")
+        if raw:
+            ranks.append(int(raw))
+    cfg["ranks"] = ranks
+
+    try:
+        cfg["cooldown_hours"] = max(0, int(f.get("cooldown_hours", 0)))
+    except ValueError:
+        pass
+    try:
+        cfg["inactivity_days"] = max(0, int(f.get("inactivity_days", 0)))
+    except ValueError:
+        pass
+
+    _save_config(_config)
+    return redirect(url_for("dashboard", guild_id=guild_id, saved=1))
+
+
+# ---------- entrypoint ----------
+
+def _run(port: int):
+    app.run(host="0.0.0.0", port=port)
+
+
+def start_web_app(bot, config, save_config, get_guild_cfg):
+    """Call once from bot.py after the bot object exists. Runs Flask in a
+    background thread so it doesn't block discord.py's event loop."""
+    global _bot, _config, _save_config, _get_guild_cfg
+    _bot = bot
+    _config = config
+    _save_config = save_config
+    _get_guild_cfg = get_guild_cfg
+
+    port = int(os.environ.get("PORT", 8080))
+    thread = threading.Thread(target=_run, args=(port,), daemon=True)
+    thread.start()
