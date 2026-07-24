@@ -60,6 +60,10 @@ _open_ticket = None
 _close_ticket = None
 _set_ticket_channel = None
 _send_dm = None
+_set_rust_server = None
+_set_rust_status_channel = None
+_get_rust_status = None
+_rust_command = None
 
 
 # ---------- shared page chrome ----------
@@ -268,6 +272,9 @@ SIDENAV_SECTIONS = [
         ("roster_page", "📋", "Roster"),
         ("moderation_page", "🛡️", "Moderation"),
         ("warnings_page", "⚠️", "Warnings"),
+    ]),
+    ("Integrations", [
+        ("rust_page", "🦀", "Rust Server"),
     ]),
     ("Bulk & Broadcast", [
         ("mass_page", "🧰", "Mass Actions"),
@@ -766,6 +773,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/roster"><span>📋</span>Roster</a>
         <a class="action-tile" href="/dashboard/{guild_id}/moderation"><span>🛡️</span>Moderation</a>
         <a class="action-tile" href="/dashboard/{guild_id}/warnings"><span>⚠️</span>Warnings</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/rust"><span>🦀</span>Rust Server</a>
         <a class="action-tile" href="/dashboard/{guild_id}/mass"><span>🧰</span>Mass Actions</a>
         <a class="action-tile" href="/dashboard/{guild_id}/announce"><span>📣</span>Announcements</a>
         <a class="action-tile" href="/dashboard/{guild_id}/showcase"><span>🎭</span>Showcase</a>
@@ -2218,6 +2226,172 @@ def dm_send_route(guild_id):
     return redirect(url_for("dm_page", guild_id=guild_id, result=result))
 
 
+# ---------- Rust server integration ----------
+
+@app.route("/dashboard/<int:guild_id>/rust")
+def rust_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    status = _run_async(_get_rust_status(guild_id))
+    if status.get("error"):
+        status_html = f'<div class="hint" style="color:#ff8080;">⚠️ {status["error"]}</div>'
+    else:
+        info = status["info"]
+        rcon_line = ""
+        if status.get("rcon_configured"):
+            rcon_line = (
+                '<div class="field"><label>RCON</label><div>🟢 Connected</div></div>'
+                if status.get("rcon_connected") else
+                '<div class="field"><label>RCON</label><div>🔴 Not connected</div></div>'
+            )
+        status_html = f"""
+        <div class="grid-2">
+          <div class="field"><label>Server Name</label><div>{info['name']}</div></div>
+          <div class="field"><label>Map</label><div>{info['map']}</div></div>
+          <div class="field"><label>Players</label><div>{info['players']} / {info['max_players']}</div></div>
+          {rcon_line}
+        </div>
+        """
+
+    channel_assets = _channel_search_assets(guild)
+
+    body = f"""
+    <h1>🦀 Rust Server</h1>
+    {result_html}
+    {channel_assets}
+
+    <div class="card">
+      <h2>📡 Live Status</h2>
+      {status_html}
+    </div>
+
+    <div class="card">
+      <h2>🔗 Connection</h2>
+      <div class="hint" style="margin-bottom:12px;">Query port is needed for live status (no password required). RCON port + password are optional — only needed for the chat bridge and running commands.</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/connect">
+        <div class="grid-2">
+          <div class="field"><label>Host / IP</label><input type="text" name="host" value="{cfg.get('rust_host', '')}" placeholder="123.45.67.89" required></div>
+          <div class="field"><label>Query Port</label><input type="number" name="query_port" value="{cfg.get('rust_query_port', '')}" placeholder="28015" required></div>
+        </div>
+        <div class="grid-2">
+          <div class="field"><label>RCON Port (optional)</label><input type="number" name="rcon_port" value="{cfg.get('rust_rcon_port', '')}" placeholder="28016"></div>
+          <div class="field"><label>RCON Password (optional)</label><input type="password" name="rcon_password" placeholder="Leave blank to keep unchanged"></div>
+        </div>
+        <button class="btn" type="submit">Save & Connect</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>💬 Chat Bridge</h2>
+      <div class="hint" style="margin-bottom:12px;">Requires RCON to be connected. Messages sent in this channel get relayed in-game, and in-game chat gets posted here.</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/chatchannel">
+        {_channel_search_field("Channel", "channel_id", guild, cfg.get("rust_chat_channel_id"))}
+        <button class="btn" type="submit">Set Chat Channel</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>📌 Status Channel</h2>
+      <div class="hint" style="margin-bottom:12px;">Posts a live-updating status embed, refreshed automatically every 2 minutes.</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/statuschannel">
+        {_channel_search_field("Channel", "channel_id", guild, cfg.get("rust_status_channel_id"))}
+        <button class="btn" type="submit">Set Status Channel</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>⌨️ RCON Console</h2>
+      <div class="hint" style="margin-bottom:12px;">Run a raw command on the server. Requires RCON to be connected.</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/command">
+        <div class="field"><label>Command</label><input type="text" name="cmd" placeholder="serverinfo" required></div>
+        <button class="btn btn-secondary" type="submit">Run</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Rust Server", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/rust/connect", methods=["POST"])
+def rust_connect_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    host = request.form.get("host", "").strip()
+    try:
+        query_port = int(request.form["query_port"])
+    except (KeyError, ValueError):
+        return redirect(url_for("rust_page", guild_id=guild_id, result="❌ Enter a valid query port."))
+    if not host:
+        return redirect(url_for("rust_page", guild_id=guild_id, result="❌ Enter a host/IP."))
+
+    rcon_port = None
+    rcon_password = request.form.get("rcon_password", "").strip() or None
+    if request.form.get("rcon_port"):
+        try:
+            rcon_port = int(request.form["rcon_port"])
+        except ValueError:
+            rcon_port = None
+
+    # If they left the password blank but a port is set, reuse the saved password (don't wipe it).
+    cfg = _get_guild_cfg(guild_id)
+    if rcon_port and not rcon_password:
+        rcon_password = cfg.get("rust_rcon_password")
+
+    result = _run_async(_set_rust_server(guild_id, host, query_port, rcon_port, rcon_password, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/chatchannel", methods=["POST"])
+def rust_chatchannel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw = request.form.get("channel_id", "")
+    cfg = _get_guild_cfg(guild_id)
+    if not raw:
+        cfg.pop("rust_chat_channel_id", None)
+        _save_config(_config)
+        return redirect(url_for("rust_page", guild_id=guild_id, result="✅ Chat bridge disabled."))
+    try:
+        channel_id = int(raw)
+    except ValueError:
+        return redirect(url_for("rust_page", guild_id=guild_id, result="❌ Pick a channel."))
+    cfg["rust_chat_channel_id"] = channel_id
+    _save_config(_config)
+    channel = guild.get_channel(channel_id)
+    name = f"#{channel.name}" if channel else "that channel"
+    return redirect(url_for("rust_page", guild_id=guild_id, result=f"✅ Chat bridge set to {name}."))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/statuschannel", methods=["POST"])
+def rust_statuschannel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw = request.form.get("channel_id", "")
+    channel_id = int(raw) if raw else None
+    result = _run_async(_set_rust_status_channel(guild_id, channel_id, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/command", methods=["POST"])
+def rust_command_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    cmd = request.form.get("cmd", "").strip()
+    if not cmd:
+        return redirect(url_for("rust_page", guild_id=guild_id, result="❌ Enter a command."))
+    result = _run_async(_rust_command(guild_id, cmd, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=f"📟 {result}"))
+
+
 # ---------- backup download ----------
 
 @app.route("/dashboard/<int:guild_id>/backup")
@@ -2250,6 +2424,7 @@ def start_web_app(
     showcase_add, showcase_remove,
     open_ticket, close_ticket, set_ticket_channel,
     send_dm,
+    set_rust_server, set_rust_status_channel, get_rust_status, rust_command,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -2258,6 +2433,7 @@ def start_web_app(
     global _mass_add_role, _mass_remove_role, _mass_rename, _announce, _massannounce
     global _showcase_add, _showcase_remove, _open_ticket, _close_ticket, _set_ticket_channel
     global _send_dm
+    global _set_rust_server, _set_rust_status_channel, _get_rust_status, _rust_command
     _bot = bot
     _config = config
     _save_config = save_config
@@ -2283,6 +2459,10 @@ def start_web_app(
     _close_ticket = close_ticket
     _set_ticket_channel = set_ticket_channel
     _send_dm = send_dm
+    _set_rust_server = set_rust_server
+    _set_rust_status_channel = set_rust_status_channel
+    _get_rust_status = get_rust_status
+    _rust_command = rust_command
 
     port = int(os.environ.get("PORT", 8080))
     thread = threading.Thread(target=_run, args=(port,), daemon=True)

@@ -62,6 +62,11 @@ Commands:
   /showcase list                          - show the current showcase
   /setticketchannel channel:<channel>     - (admin only) post an Open Ticket button in this channel
   /ticket                                 - open a private support ticket with staff
+  /setrustserver host:<ip> query_port:<int> [rcon_port] [rcon_password] - (admin only) connect to your Rust server
+  /setrustchatchannel [channel]           - (admin only) bridge Discord chat with in-game chat (needs RCON)
+  /setruststatuschannel [channel]         - (admin only) post a live Rust server status embed
+  /ruststatus                             - show current Rust server status
+  /rustcommand cmd:<text>                 - run an RCON command on the Rust server
   /evaluate [user]                        - show message activity for the current week (leaderboard or one person); auto-resets weekly
   /setbirthday month:<1-12> day:<1-31>    - set your own birthday
   /removebirthday                         - remove your saved birthday
@@ -80,6 +85,7 @@ import io
 import json
 import os
 import random
+import socket
 import tempfile
 import threading
 from datetime import date, datetime, timedelta, timezone
@@ -90,6 +96,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from gtts import gTTS
+import websockets
 
 from web import start_web_app
 
@@ -190,6 +197,16 @@ async def on_ready():
         weekly_evaluation_loop.start()
     if not birthday_check_loop.is_running():
         birthday_check_loop.start()
+    if not rust_status_loop.is_running():
+        rust_status_loop.start()
+
+    # Reconnect any Rust RCON connections that were configured before a restart.
+    for guild_id_str, cfg in config.items():
+        if cfg.get("rust_rcon_port") and cfg.get("rust_rcon_password") and cfg.get("rust_host"):
+            try:
+                start_rust_connection(int(guild_id_str), cfg["rust_host"], cfg["rust_rcon_port"], cfg["rust_rcon_password"])
+            except Exception as e:
+                print(f"⚠️ Couldn't restart Rust RCON for guild {guild_id_str}: {e}")
 
 
 @bot.event
@@ -198,6 +215,17 @@ async def on_message(message: discord.Message):
         return
 
     cfg = get_guild_cfg(message.guild.id)
+
+    # ---- Rust chat bridge (Discord -> in-game) ----
+    rust_chat_channel_id = cfg.get("rust_chat_channel_id")
+    if rust_chat_channel_id and message.channel.id == rust_chat_channel_id and message.content:
+        conn = rust_connections.get(message.guild.id)
+        if conn and conn.connected:
+            safe_text = message.content.replace('"', "'")
+            try:
+                asyncio.create_task(conn.send_command(f'say "[Discord] {message.author.display_name}: {safe_text}"'))
+            except Exception:
+                pass
 
     # ---- cross-posting ----
     crossposts = cfg.get("crossposts", {})
@@ -1376,6 +1404,409 @@ async def ticket_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     result = await open_ticket(interaction.guild_id, interaction.user.id)
     await interaction.followup.send(result, ephemeral=True)
+
+
+# ---------- Rust server integration ----------
+#
+# Two independent pieces:
+#   1. Live status via Steam's A2S_INFO query protocol (public, no password
+#      needed) — player count, map, server name.
+#   2. RCON over WebSocket (Rust's "WebRcon") — needed for the chat bridge
+#      and running commands. Requires the server's RCON port + password.
+# Either can be set up without the other. Note: exact RCON behavior can vary
+# slightly by host/version — this follows the commonly documented protocol,
+# but hasn't been tested against a live server from this environment.
+
+def _a2s_query_sync(host: str, port: int, timeout: float = 5.0) -> dict:
+    """Blocking Source Engine Query (A2S_INFO), including the challenge
+    handshake newer servers require. Run this off the event loop."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        def read_cstring(buf, offset):
+            end = buf.index(b"\x00", offset)
+            return buf[offset:end].decode("utf-8", errors="replace"), end + 1
+
+        request = b"\xFF\xFF\xFF\xFFTSource Engine Query\x00"
+        sock.sendto(request, (host, port))
+        data, _ = sock.recvfrom(4096)
+
+        if data[4:5] == b"\x41":  # challenge required
+            challenge = data[5:9]
+            sock.sendto(request + challenge, (host, port))
+            data, _ = sock.recvfrom(4096)
+
+        if data[4:5] != b"\x49":
+            raise ValueError("Unexpected response from server.")
+
+        offset = 6  # header(4) + type(1) + protocol(1)
+        name, offset = read_cstring(data, offset)
+        map_name, offset = read_cstring(data, offset)
+        _, offset = read_cstring(data, offset)  # folder
+        _, offset = read_cstring(data, offset)  # game
+        offset += 2  # app id
+        players = data[offset]
+        max_players = data[offset + 1]
+        return {"name": name, "map": map_name, "players": players, "max_players": max_players}
+    finally:
+        sock.close()
+
+
+async def query_rust_server(host: str, port: int) -> dict:
+    """Async wrapper — the actual query is blocking network I/O."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _a2s_query_sync, host, port)
+
+
+class RustRconConnection:
+    """One persistent WebRcon connection per guild. Auto-reconnects on drop."""
+
+    def __init__(self, guild_id: int, host: str, port: int, password: str):
+        self.guild_id = guild_id
+        self.host = host
+        self.port = port
+        self.password = password
+        self.ws = None
+        self.task: asyncio.Task = None
+        self._next_id = 1
+        self._pending: dict[int, asyncio.Future] = {}
+        self.connected = False
+
+    async def connect_and_listen(self):
+        url = f"ws://{self.host}:{self.port}/{self.password}"
+        while True:
+            try:
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+                    self.ws = ws
+                    self.connected = True
+                    async for raw in ws:
+                        await self._handle_message(raw)
+            except asyncio.CancelledError:
+                self.connected = False
+                raise
+            except Exception as e:
+                print(f"⚠️ Rust RCON connection issue (guild {self.guild_id}): {e}")
+            self.connected = False
+            self.ws = None
+            await asyncio.sleep(15)
+
+    async def _handle_message(self, raw: str):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return
+
+        identifier = data.get("Identifier")
+        if identifier in self._pending:
+            fut = self._pending.pop(identifier)
+            if not fut.done():
+                fut.set_result(data.get("Message", ""))
+            return
+
+        if data.get("Type") == "Chat":
+            await relay_rust_chat_to_discord(self.guild_id, data.get("Message", ""))
+
+    async def send_command(self, command: str, timeout: float = 10.0) -> str:
+        if self.ws is None or not self.connected:
+            raise ConnectionError("Not connected to the Rust server's RCON.")
+        identifier = self._next_id
+        self._next_id += 1
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[identifier] = fut
+        payload = json.dumps({"Identifier": identifier, "Message": command, "Name": "WebRcon"})
+        await self.ws.send(payload)
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        finally:
+            self._pending.pop(identifier, None)
+
+
+rust_connections: dict[int, RustRconConnection] = {}  # guild_id -> connection
+
+
+def start_rust_connection(guild_id: int, host: str, port: int, password: str):
+    """(Re)start the RCON connection for a guild. Safe to call to reconnect
+    after changing settings."""
+    old = rust_connections.get(guild_id)
+    if old and old.task and not old.task.done():
+        old.task.cancel()
+    conn = RustRconConnection(guild_id, host, port, password)
+    conn.task = asyncio.create_task(conn.connect_and_listen())
+    rust_connections[guild_id] = conn
+
+
+async def relay_rust_chat_to_discord(guild_id: int, raw_message: str):
+    cfg = get_guild_cfg(guild_id)
+    channel_id = cfg.get("rust_chat_channel_id")
+    if not channel_id:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+
+    # Rust's chat messages arrive as a JSON string nested inside Message.
+    try:
+        chat_data = json.loads(raw_message)
+        username = chat_data.get("Username", "Player")
+        text = chat_data.get("Message", "")
+    except Exception:
+        username = "Server"
+        text = raw_message
+
+    if not text:
+        return
+    try:
+        await channel.send(f"🎮 **{username}**: {text}")
+    except discord.Forbidden:
+        pass
+
+
+def build_rust_status_embed(server_name: str, info: dict = None, error: str = None) -> discord.Embed:
+    embed = discord.Embed(title=f"🦀 {server_name}", color=discord.Color.dark_orange())
+    if error:
+        embed.description = f"⚠️ Couldn't reach the server: {error}"
+        return embed
+    embed.add_field(name="Server Name", value=info["name"], inline=False)
+    embed.add_field(name="Map", value=info["map"], inline=True)
+    embed.add_field(name="Players", value=f"{info['players']} / {info['max_players']}", inline=True)
+    embed.timestamp = discord.utils.utcnow()
+    embed.set_footer(text="Last updated")
+    return embed
+
+
+async def refresh_rust_status_message(guild_id: int):
+    cfg = get_guild_cfg(guild_id)
+    channel_id = cfg.get("rust_status_channel_id")
+    host = cfg.get("rust_host")
+    query_port = cfg.get("rust_query_port")
+    if not channel_id or not host or not query_port:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+
+    try:
+        info = await query_rust_server(host, query_port)
+        embed = build_rust_status_embed(host, info=info)
+    except Exception as e:
+        embed = build_rust_status_embed(host, error=str(e))
+
+    message_id = cfg.get("rust_status_message_id")
+    if message_id:
+        try:
+            message = await channel.fetch_message(message_id)
+            await message.edit(embed=embed)
+            return
+        except (discord.NotFound, discord.Forbidden):
+            pass
+    try:
+        message = await channel.send(embed=embed)
+        cfg["rust_status_message_id"] = message.id
+        save_config(config)
+    except discord.Forbidden:
+        pass
+
+
+@tasks.loop(minutes=2)
+async def rust_status_loop():
+    for guild_id_str in list(config.keys()):
+        try:
+            guild_id = int(guild_id_str)
+        except ValueError:
+            continue
+        cfg = config.get(guild_id_str, {})
+        if cfg.get("rust_status_channel_id"):
+            await refresh_rust_status_message(guild_id)
+
+
+@bot.tree.command(name="setrustserver", description="Connect this server to your Rust game server.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    host="Your Rust server's IP address or domain (no port)",
+    query_port="Steam query port for live status (often the same as your game port)",
+    rcon_port="RCON WebSocket port (optional — needed for chat bridge and commands)",
+    rcon_password="RCON password (optional — needed for chat bridge and commands)",
+)
+async def setrustserver(
+    interaction: discord.Interaction,
+    host: str,
+    query_port: int,
+    rcon_port: int = None,
+    rcon_password: str = None,
+):
+    cfg = get_guild_cfg(interaction.guild_id)
+    cfg["rust_host"] = host
+    cfg["rust_query_port"] = query_port
+    save_config(config)
+
+    msg = f"✅ Rust server set: `{host}:{query_port}`."
+    if rcon_port and rcon_password:
+        cfg["rust_rcon_port"] = rcon_port
+        cfg["rust_rcon_password"] = rcon_password
+        save_config(config)
+        start_rust_connection(interaction.guild_id, host, rcon_port, rcon_password)
+        msg += " RCON is connecting now — check `/ruststatus` in a moment to confirm."
+
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="setrustchatchannel", description="Bridge this channel's chat with your Rust server (both ways).")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="The channel to bridge (omit to disable)")
+async def setrustchatchannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if channel is None:
+        cfg.pop("rust_chat_channel_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Chat bridge disabled.", ephemeral=True)
+        return
+    cfg["rust_chat_channel_id"] = channel.id
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ {channel.mention} is now bridged with your Rust server's in-game chat. Requires RCON to be connected (see `/setrustserver`).",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="setruststatuschannel", description="Post a live server status embed in this channel.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="The channel to post live status in (omit to disable)")
+async def setruststatuschannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if channel is None:
+        cfg.pop("rust_status_channel_id", None)
+        cfg.pop("rust_status_message_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Live status disabled.", ephemeral=True)
+        return
+    cfg["rust_status_channel_id"] = channel.id
+    cfg.pop("rust_status_message_id", None)
+    save_config(config)
+    await interaction.response.send_message(f"✅ Live server status will now be posted in {channel.mention}.", ephemeral=True)
+    await refresh_rust_status_message(interaction.guild_id)
+
+
+@bot.tree.command(name="ruststatus", description="Show the Rust server's current status.")
+async def ruststatus(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    host = cfg.get("rust_host")
+    query_port = cfg.get("rust_query_port")
+    if not host or not query_port:
+        await interaction.response.send_message("❌ No Rust server set up yet. Run `/setrustserver` first.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    try:
+        info = await query_rust_server(host, query_port)
+        embed = build_rust_status_embed(host, info=info)
+    except Exception as e:
+        embed = build_rust_status_embed(host, error=str(e))
+
+    conn = rust_connections.get(interaction.guild_id)
+    rcon_status = "🟢 Connected" if (conn and conn.connected) else ("🔴 Not connected" if cfg.get("rust_rcon_port") else "— Not configured")
+    embed.add_field(name="RCON", value=rcon_status, inline=True)
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="rustcommand", description="Run a command on the Rust server via RCON.")
+@app_commands.describe(cmd="The RCON command to run")
+async def rustcommand(interaction: discord.Interaction, cmd: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    conn = rust_connections.get(interaction.guild_id)
+    if conn is None or not conn.connected:
+        await interaction.response.send_message(
+            "❌ RCON isn't connected. Run `/setrustserver` with your RCON port and password first.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        response = await conn.send_command(cmd)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Command failed: {e}", ephemeral=True)
+        return
+
+    display = response.strip() if response and response.strip() else "*(no output)*"
+    if len(display) > 1800:
+        display = display[:1800] + "\n... (truncated)"
+    await interaction.followup.send(f"```\n{display}\n```", ephemeral=True)
+
+
+async def web_set_rust_server(guild_id: int, host: str, query_port: int, rcon_port, rcon_password, actor_id: int) -> str:
+    """Mirrors /setrustserver."""
+    cfg = get_guild_cfg(guild_id)
+    cfg["rust_host"] = host
+    cfg["rust_query_port"] = query_port
+    save_config(config)
+
+    msg = f"✅ Rust server set: {host}:{query_port}."
+    if rcon_port and rcon_password:
+        cfg["rust_rcon_port"] = rcon_port
+        cfg["rust_rcon_password"] = rcon_password
+        save_config(config)
+        start_rust_connection(guild_id, host, rcon_port, rcon_password)
+        msg += " RCON is connecting now — check the status page in a moment to confirm."
+    return msg
+
+
+async def web_set_rust_status_channel(guild_id: int, channel_id, actor_id: int) -> str:
+    """Mirrors /setruststatuschannel."""
+    cfg = get_guild_cfg(guild_id)
+    if channel_id is None:
+        cfg.pop("rust_status_channel_id", None)
+        cfg.pop("rust_status_message_id", None)
+        save_config(config)
+        return "✅ Live status disabled."
+    guild = bot.get_guild(guild_id)
+    channel = guild.get_channel(channel_id) if guild else None
+    if channel is None:
+        return "❌ Couldn't find that channel."
+    cfg["rust_status_channel_id"] = channel_id
+    cfg.pop("rust_status_message_id", None)
+    save_config(config)
+    await refresh_rust_status_message(guild_id)
+    return f"✅ Live server status will now be posted in #{channel.name}."
+
+
+async def web_get_rust_status(guild_id: int) -> dict:
+    """Returns a plain dict (not a Discord embed) for the web page to render."""
+    cfg = get_guild_cfg(guild_id)
+    host = cfg.get("rust_host")
+    query_port = cfg.get("rust_query_port")
+    result = {"host": host, "query_port": query_port, "info": None, "error": None}
+    if not host or not query_port:
+        result["error"] = "No Rust server configured yet."
+        return result
+    try:
+        result["info"] = await query_rust_server(host, query_port)
+    except Exception as e:
+        result["error"] = str(e)
+
+    conn = rust_connections.get(guild_id)
+    result["rcon_connected"] = bool(conn and conn.connected)
+    result["rcon_configured"] = bool(cfg.get("rust_rcon_port"))
+    return result
+
+
+async def web_rust_command(guild_id: int, cmd: str, actor_id: int) -> str:
+    """Mirrors /rustcommand."""
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return "❌ RCON isn't connected. Set up your RCON port and password first."
+    try:
+        response = await conn.send_command(cmd)
+    except Exception as e:
+        return f"❌ Command failed: {e}"
+    return response.strip() if response and response.strip() else "(no output)"
 
 
 def build_roster_embed(guild: discord.Guild) -> discord.Embed:
@@ -3811,6 +4242,13 @@ async def afk(interaction: discord.Interaction, reason: str = "AFK"):
 # ---------- help ----------
 
 HELP_CATEGORIES = {
+    "🦀 Rust Server": [
+        ("/setrustserver", "Connect to your Rust server (status + optional RCON)"),
+        ("/setrustchatchannel", "Bridge Discord chat with in-game chat"),
+        ("/setruststatuschannel", "Live server status embed"),
+        ("/ruststatus", "Show current server status"),
+        ("/rustcommand", "Run an RCON command on the server"),
+    ],
     "🎭 Roles": [
         ("/addrole", "Give a role to a member"),
         ("/removerole", "Remove a role from a member"),
@@ -4138,6 +4576,9 @@ bot.tree.add_command(showcase_group)
 @setbirthdayrole.error
 @setbirthdaychannel.error
 @setticketchannel.error
+@setrustserver.error
+@setrustchatchannel.error
+@setruststatuschannel.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -4162,5 +4603,6 @@ if __name__ == "__main__":
         web_showcase_add, web_showcase_remove,
         open_ticket, close_ticket, web_set_ticket_channel,
         web_send_dm,
+        web_set_rust_server, web_set_rust_status_channel, web_get_rust_status, web_rust_command,
     )
     bot.run(TOKEN)
