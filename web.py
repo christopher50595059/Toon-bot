@@ -59,6 +59,7 @@ _showcase_remove = None
 _open_ticket = None
 _close_ticket = None
 _set_ticket_channel = None
+_send_dm = None
 
 
 # ---------- shared page chrome ----------
@@ -182,6 +183,7 @@ SIDENAV_SECTIONS = [
         ("roles_page", "🎭", "Roles"),
         ("roster_page", "📋", "Roster"),
         ("moderation_page", "🛡️", "Moderation"),
+        ("warnings_page", "⚠️", "Warnings"),
     ]),
     ("Bulk & Broadcast", [
         ("mass_page", "🧰", "Mass Actions"),
@@ -190,10 +192,12 @@ SIDENAV_SECTIONS = [
         ("crosspost_page", "🔀", "Cross-Posting"),
         ("greetings_page", "🔊", "VC Greetings"),
         ("tickets_page", "🎫", "Tickets"),
+        ("dm_page", "✉️", "Direct Message"),
     ]),
     ("Insight", [
         ("logs_page", "🗂️", "Logs"),
         ("activity_page", "📈", "Activity"),
+        ("afk_page", "💤", "AFK Status"),
         ("backup_download", "💾", "Backup"),
     ]),
 ]
@@ -511,14 +515,17 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/roles"><span>🎭</span>Roles</a>
         <a class="action-tile" href="/dashboard/{guild_id}/roster"><span>📋</span>Roster</a>
         <a class="action-tile" href="/dashboard/{guild_id}/moderation"><span>🛡️</span>Moderation</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/warnings"><span>⚠️</span>Warnings</a>
         <a class="action-tile" href="/dashboard/{guild_id}/mass"><span>🧰</span>Mass Actions</a>
         <a class="action-tile" href="/dashboard/{guild_id}/announce"><span>📣</span>Announcements</a>
         <a class="action-tile" href="/dashboard/{guild_id}/showcase"><span>🎭</span>Showcase</a>
         <a class="action-tile" href="/dashboard/{guild_id}/crosspost"><span>🔀</span>Cross-Posting</a>
         <a class="action-tile" href="/dashboard/{guild_id}/greetings"><span>🔊</span>VC Greetings</a>
         <a class="action-tile" href="/dashboard/{guild_id}/tickets"><span>🎫</span>Tickets</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/dm"><span>✉️</span>Direct Message</a>
         <a class="action-tile" href="/dashboard/{guild_id}/logs"><span>🗂️</span>Logs</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/afk"><span>💤</span>AFK Status</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
       </div>
     </div>
@@ -1760,6 +1767,228 @@ def tickets_setchannel_route(guild_id):
     return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
 
 
+# ---------- warnings management ----------
+
+@app.route("/dashboard/<int:guild_id>/warnings")
+def warnings_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    all_warnings = cfg.get("warnings", {})
+    rows = ""
+    any_warnings = False
+    for uid_str, entries in all_warnings.items():
+        if not entries:
+            continue
+        any_warnings = True
+        m = guild.get_member(int(uid_str))
+        name = m.display_name if m else f"Unknown ({uid_str})"
+        for i, w in enumerate(entries):
+            mod = guild.get_member(w.get("moderator_id"))
+            mod_name = mod.display_name if mod else "—"
+            rows += f"""
+            <tr>
+              <td>{name}</td>
+              <td>{w.get('reason','')}</td>
+              <td>{mod_name}</td>
+              <td class="hint" style="white-space:nowrap;">{_format_ts(w.get('timestamp'))}</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/warnings/clear" style="margin:0;">
+                  <input type="hidden" name="user_id" value="{uid_str}">
+                  <input type="hidden" name="index" value="{i}">
+                  <button class="btn btn-secondary" type="submit" style="padding:6px 12px; font-size:12px;">Clear</button>
+                </form>
+              </td>
+            </tr>
+            """
+    if not any_warnings:
+        rows = '<tr><td colspan="5" class="hint" style="padding:16px;">No warnings recorded.</td></tr>'
+
+    member_assets = _member_search_assets(guild)
+
+    body = f"""
+    <h1>⚠️ Warnings</h1>
+    {result_html}
+    {member_assets}
+
+    <div class="card">
+      <h2>All warnings</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Member</th><th>Reason</th><th>By</th><th>When</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>🗑️ Clear all warnings for a member</h2>
+      <form method="post" action="/dashboard/{guild_id}/warnings/clearall">
+        {_member_search_field()}
+        <button class="btn btn-secondary" type="submit">Clear All Warnings</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Warnings", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/warnings/clear", methods=["POST"])
+def warnings_clear_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    user_id = request.form.get("user_id", "")
+    try:
+        index = int(request.form["index"])
+    except (KeyError, ValueError):
+        return redirect(url_for("warnings_page", guild_id=guild_id, result="❌ Invalid warning."))
+
+    cfg = _get_guild_cfg(guild_id)
+    warnings = cfg.get("warnings", {})
+    user_warnings = warnings.get(user_id, [])
+    if 0 <= index < len(user_warnings):
+        user_warnings.pop(index)
+        _save_config(_config)
+        return redirect(url_for("warnings_page", guild_id=guild_id, result="✅ Warning cleared."))
+    return redirect(url_for("warnings_page", guild_id=guild_id, result="ℹ️ That warning wasn't found."))
+
+
+@app.route("/dashboard/<int:guild_id>/warnings/clearall", methods=["POST"])
+def warnings_clearall_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("warnings_page", guild_id=guild_id, result="❌ Pick a member."))
+
+    cfg = _get_guild_cfg(guild_id)
+    warnings = cfg.get("warnings", {})
+    if str(user_id) in warnings and warnings[str(user_id)]:
+        count = len(warnings[str(user_id)])
+        warnings[str(user_id)] = []
+        _save_config(_config)
+        m = guild.get_member(user_id)
+        name = m.display_name if m else str(user_id)
+        return redirect(url_for("warnings_page", guild_id=guild_id, result=f"✅ Cleared {count} warning(s) for {name}."))
+    return redirect(url_for("warnings_page", guild_id=guild_id, result="ℹ️ That member has no warnings."))
+
+
+# ---------- AFK status ----------
+
+@app.route("/dashboard/<int:guild_id>/afk")
+def afk_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    afk_users = cfg.get("afk", {})
+    rows = ""
+    if afk_users:
+        for uid_str, entry in afk_users.items():
+            m = guild.get_member(int(uid_str))
+            name = m.display_name if m else f"Unknown ({uid_str})"
+            reason = entry.get("reason", "AFK") if isinstance(entry, dict) else str(entry)
+            since = entry.get("since") if isinstance(entry, dict) else None
+            rows += f"""
+            <tr>
+              <td>{name}</td>
+              <td>{reason}</td>
+              <td class="hint" style="white-space:nowrap;">{_format_ts(since)}</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/afk/clear" style="margin:0;">
+                  <input type="hidden" name="user_id" value="{uid_str}">
+                  <button class="btn btn-secondary" type="submit" style="padding:6px 12px; font-size:12px;">Clear</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="4" class="hint" style="padding:16px;">Nobody is currently AFK.</td></tr>'
+
+    body = f"""
+    <h1>💤 AFK Status</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>Currently AFK</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Member</th><th>Reason</th><th>Since</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — AFK Status", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/afk/clear", methods=["POST"])
+def afk_clear_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    user_id = request.form.get("user_id", "")
+    cfg = _get_guild_cfg(guild_id)
+    afk_users = cfg.get("afk", {})
+    if user_id in afk_users:
+        afk_users.pop(user_id)
+        _save_config(_config)
+        return redirect(url_for("afk_page", guild_id=guild_id, result="✅ AFK status cleared."))
+    return redirect(url_for("afk_page", guild_id=guild_id, result="ℹ️ That member isn't AFK."))
+
+
+# ---------- direct message tool ----------
+
+@app.route("/dashboard/<int:guild_id>/dm")
+def dm_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+    member_assets = _member_search_assets(guild)
+
+    body = f"""
+    <h1>✉️ Direct Message</h1>
+    <div class="hint" style="margin-bottom:18px;">Send a DM to any member on behalf of staff — a quick way to reach out without leaving the dashboard.</div>
+    {result_html}
+    {member_assets}
+
+    <div class="card">
+      <form method="post" action="/dashboard/{guild_id}/dm/send">
+        {_member_search_field()}
+        <div class="field"><label>Message</label><input type="text" name="message" placeholder="What do you want to say?" required></div>
+        <button class="btn" type="submit">Send Message</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Direct Message", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/dm/send", methods=["POST"])
+def dm_send_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("dm_page", guild_id=guild_id, result="❌ Pick a member."))
+    message = request.form.get("message", "").strip()
+    if not message:
+        return redirect(url_for("dm_page", guild_id=guild_id, result="❌ Write a message."))
+    result = _run_async(_send_dm(guild_id, user_id, message, session["user_id"]))
+    return redirect(url_for("dm_page", guild_id=guild_id, result=result))
+
+
 # ---------- backup download ----------
 
 @app.route("/dashboard/<int:guild_id>/backup")
@@ -1791,6 +2020,7 @@ def start_web_app(
     announce, massannounce,
     showcase_add, showcase_remove,
     open_ticket, close_ticket, set_ticket_channel,
+    send_dm,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -1798,6 +2028,7 @@ def start_web_app(
     global _roster_add, _roster_remove, _promote, _demote, _kick, _ban, _timeout, _warn
     global _mass_add_role, _mass_remove_role, _mass_rename, _announce, _massannounce
     global _showcase_add, _showcase_remove, _open_ticket, _close_ticket, _set_ticket_channel
+    global _send_dm
     _bot = bot
     _config = config
     _save_config = save_config
@@ -1822,6 +2053,7 @@ def start_web_app(
     _open_ticket = open_ticket
     _close_ticket = close_ticket
     _set_ticket_channel = set_ticket_channel
+    _send_dm = send_dm
 
     port = int(os.environ.get("PORT", 8080))
     thread = threading.Thread(target=_run, args=(port,), daemon=True)

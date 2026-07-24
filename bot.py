@@ -789,7 +789,29 @@ async def web_warn(guild_id: int, user_id: int, reason: str, actor_id: int) -> s
     return f"✅ Warned {member.display_name} (warning #{len(user_warnings)}).{note}"
 
 
-async def web_mass_add_role(guild_id: int, role_id: int, filter_role_id: int, reason: str, actor_id: int) -> str:
+async def web_send_dm(guild_id: int, user_id: int, message: str, actor_id: int) -> str:
+    """Send a direct message to a member on behalf of staff. Web-only convenience
+    tool — there's no Discord slash command equivalent since staff can already
+    DM someone directly in Discord; this just saves alt-tabbing."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    actor = guild.get_member(actor_id)
+    if member is None or actor is None:
+        return "❌ Couldn't find that member or your account in this server."
+
+    embed = discord.Embed(description=message, color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+    embed.set_author(name=f"Message from {guild.name} staff", icon_url=guild.icon.url if guild.icon else None)
+    embed.set_footer(text=f"Sent by {actor.display_name}")
+    try:
+        await member.send(embed=embed)
+    except Exception:
+        return f"❌ Couldn't DM {member.display_name} — their DMs may be closed."
+    return f"✅ Message sent to {member.display_name}."
+
+
+
     """Mirrors /massaddrole."""
     guild = bot.get_guild(guild_id)
     if guild is None:
@@ -4139,5 +4161,6 @@ if __name__ == "__main__":
         web_announce, web_massannounce,
         web_showcase_add, web_showcase_remove,
         open_ticket, close_ticket, web_set_ticket_channel,
+        web_send_dm,
     )
     bot.run(TOKEN)
