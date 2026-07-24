@@ -528,6 +528,92 @@ def _member_search_field(label="Member", field_name="user_id"):
     """
 
 
+def _role_search_assets(guild):
+    """Include ONCE per page. Builds a shared datalist of every role, plus the
+    JS that resolves a typed name back to a Discord ID for any _role_search_field()."""
+    options = []
+    mapping = {}
+    for r in sorted(guild.roles, key=lambda r: r.position, reverse=True):
+        if r.is_default():
+            continue
+        label = f"@{r.name}"
+        options.append(f'<option value="{label}"></option>')
+        mapping[label] = str(r.id)
+
+    return f"""
+    <datalist id="role-datalist">{''.join(options)}</datalist>
+    <script>
+      const ROLE_MAP = {json.dumps(mapping)};
+      function syncRoleId(inputEl) {{
+        const hidden = inputEl.parentElement.querySelector('input[type=hidden]');
+        if (hidden) hidden.value = ROLE_MAP[inputEl.value] || '';
+      }}
+    </script>
+    """
+
+
+def _role_search_field(label="Role", field_name="role_id", guild=None, current_id=None):
+    """A type-to-search role picker. Pair with one _role_search_assets() call
+    anywhere earlier in the same page's body. Pass guild+current_id to pre-fill
+    an existing selection (e.g. on the settings page)."""
+    current_label = ""
+    current_value = ""
+    if guild is not None and current_id:
+        role = guild.get_role(current_id)
+        if role:
+            current_label = f"@{role.name}"
+            current_value = str(current_id)
+    return f"""
+    <div class="field">
+      <label>{label}</label>
+      <input type="text" list="role-datalist" value="{current_label}" placeholder="Type a role name..." autocomplete="off" oninput="syncRoleId(this)">
+      <input type="hidden" name="{field_name}" value="{current_value}">
+    </div>
+    """
+
+
+def _channel_search_assets(guild, channel_type="text"):
+    """Include ONCE per page. Builds a shared datalist of every channel, plus
+    the JS that resolves a typed name back to a Discord ID for any _channel_search_field()."""
+    channels = guild.text_channels if channel_type == "text" else guild.voice_channels
+    options = []
+    mapping = {}
+    for c in channels:
+        label = f"#{c.name}"
+        options.append(f'<option value="{label}"></option>')
+        mapping[label] = str(c.id)
+
+    return f"""
+    <datalist id="channel-datalist">{''.join(options)}</datalist>
+    <script>
+      const CHANNEL_MAP = {json.dumps(mapping)};
+      function syncChannelId(inputEl) {{
+        const hidden = inputEl.parentElement.querySelector('input[type=hidden]');
+        if (hidden) hidden.value = CHANNEL_MAP[inputEl.value] || '';
+      }}
+    </script>
+    """
+
+
+def _channel_search_field(label="Channel", field_name="channel_id", guild=None, current_id=None):
+    """A type-to-search channel picker. Pair with one _channel_search_assets()
+    call anywhere earlier in the same page's body."""
+    current_label = ""
+    current_value = ""
+    if guild is not None and current_id:
+        channel = guild.get_channel(current_id)
+        if channel:
+            current_label = f"#{channel.name}"
+            current_value = str(current_id)
+    return f"""
+    <div class="field">
+      <label>{label}</label>
+      <input type="text" list="channel-datalist" value="{current_label}" placeholder="Type a channel name..." autocomplete="off" oninput="syncChannelId(this)">
+      <input type="hidden" name="{field_name}" value="{current_value}">
+    </div>
+    """
+
+
 def _rank_options(guild, cfg):
     """Only the roles configured via /setranks, highest first — used for roster forms."""
     rank_ids = cfg.get("ranks", [])
@@ -537,6 +623,40 @@ def _rank_options(guild, cfg):
         if role:
             opts.append(f'<option value="{role.id}">@{role.name}</option>')
     return "".join(opts)
+
+
+def _rank_search_assets(guild, cfg):
+    """Include ONCE per page. Datalist limited to configured ranks only (not all roles)."""
+    rank_ids = cfg.get("ranks", [])
+    options = []
+    mapping = {}
+    for rid in rank_ids:
+        role = guild.get_role(rid)
+        if role:
+            label = f"@{role.name}"
+            options.append(f'<option value="{label}"></option>')
+            mapping[label] = str(role.id)
+
+    return f"""
+    <datalist id="rank-datalist">{''.join(options)}</datalist>
+    <script>
+      const RANK_MAP = {json.dumps(mapping)};
+      function syncRankId(inputEl) {{
+        const hidden = inputEl.parentElement.querySelector('input[type=hidden]');
+        if (hidden) hidden.value = RANK_MAP[inputEl.value] || '';
+      }}
+    </script>
+    """
+
+
+def _rank_search_field(label="Rank", field_name="rank_id"):
+    return f"""
+    <div class="field">
+      <label>{label}</label>
+      <input type="text" list="rank-datalist" placeholder="Type a rank name..." autocomplete="off" oninput="syncRankId(this)">
+      <input type="hidden" name="{field_name}">
+    </div>
+    """
 
 
 def _run_async(coro, timeout=15):
@@ -563,22 +683,21 @@ def dashboard(guild_id):
     rank_fields = ""
     for i in range(8):
         selected = ranks[i] if i < len(ranks) else None
-        rank_fields += f"""
-            <div class="field">
-              <label>Rank {i + 1} {'(highest)' if i == 0 else ''}</label>
-              <select name="rank{i}">{_role_options(guild, selected)}</select>
-            </div>
-        """
+        rank_fields += _role_search_field(f"Rank {i + 1} {'(highest)' if i == 0 else ''}", f"rank{i}", guild, selected)
 
     guild_icon_html = (
         f'<img src="{guild.icon.url}" style="width:32px;height:32px;border-radius:8px;vertical-align:middle;margin-right:10px;">'
         if guild.icon else ""
     )
+    role_assets = _role_search_assets(guild)
+    channel_assets = _channel_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/guilds">&larr; All servers</a></div>
     <h1 style="margin-top:18px;">{guild_icon_html}{guild.name}</h1>
     {flash_html}
+    {role_assets}
+    {channel_assets}
 
     <div class="card">
       <h2>⚡ Actions</h2>
@@ -613,41 +732,20 @@ def dashboard(guild_id):
       <div class="card" id="channels">
         <h2>📢 Channels</h2>
         <div class="grid-2">
-          <div class="field">
-            <label>Log channel</label>
-            <select name="log_channel">{_channel_options(guild, cfg.get('log_channel_id'))}</select>
-            <div class="hint">Role/roster actions get posted here.</div>
-          </div>
-          <div class="field">
-            <label>Live roster channel</label>
-            <select name="roster_channel">{_channel_options(guild, cfg.get('roster_channel_id'))}</select>
-          </div>
-          <div class="field">
-            <label>Live stats channel</label>
-            <select name="stats_channel">{_channel_options(guild, cfg.get('stats_channel_id'))}</select>
-          </div>
-          <div class="field">
-            <label>Birthday shoutout channel</label>
-            <select name="birthday_channel">{_channel_options(guild, cfg.get('birthday_channel_id'))}</select>
-          </div>
-          <div class="field">
-            <label>Role showcase channel</label>
-            <select name="showcase_channel">{_channel_options(guild, cfg.get('showcase_channel_id'))}</select>
-          </div>
+          {_channel_search_field("Log channel", "log_channel", guild, cfg.get('log_channel_id'))}
+          {_channel_search_field("Live roster channel", "roster_channel", guild, cfg.get('roster_channel_id'))}
+          {_channel_search_field("Live stats channel", "stats_channel", guild, cfg.get('stats_channel_id'))}
+          {_channel_search_field("Birthday shoutout channel", "birthday_channel", guild, cfg.get('birthday_channel_id'))}
+          {_channel_search_field("Role showcase channel", "showcase_channel", guild, cfg.get('showcase_channel_id'))}
         </div>
+        <div class="hint">Log channel: role/roster actions get posted here.</div>
       </div>
 
       <div class="card" id="roles">
         <h2>🎭 Roles</h2>
         <div class="grid-2">
-          <div class="field">
-            <label>Manager role (can use staff commands)</label>
-            <select name="manager_role">{_role_options(guild, cfg.get('manager_role_id'))}</select>
-          </div>
-          <div class="field">
-            <label>Birthday role</label>
-            <select name="birthday_role">{_role_options(guild, cfg.get('birthday_role_id'))}</select>
-          </div>
+          {_role_search_field("Manager role (can use staff commands)", "manager_role", guild, cfg.get('manager_role_id'))}
+          {_role_search_field("Birthday role", "birthday_role", guild, cfg.get('birthday_role_id'))}
         </div>
       </div>
 
@@ -736,25 +834,22 @@ def roles_page(guild_id):
     result = request.args.get("result", "")
     result_html = f'<div class="flash">{result}</div>' if result else ""
 
-    member_opts = _member_options(guild)
-    role_opts = _role_options(guild, None, allow_none=False)
     member_assets = _member_search_assets(guild)
+    role_assets = _role_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">🎭 Give / Remove Roles</h1>
     {result_html}
     {member_assets}
+    {role_assets}
 
     <div class="card">
       <h2>🟢 Give a role</h2>
       <form method="post" action="/dashboard/{guild_id}/roles/give">
         <div class="grid-2">
           {_member_search_field()}
-          <div class="field">
-            <label>Role</label>
-            <select name="role_id" required>{role_opts}</select>
-          </div>
+          {_role_search_field()}
         </div>
         <div class="field">
           <label>Reason</label>
@@ -769,10 +864,7 @@ def roles_page(guild_id):
       <form method="post" action="/dashboard/{guild_id}/roles/remove">
         <div class="grid-2">
           {_member_search_field()}
-          <div class="field">
-            <label>Role</label>
-            <select name="role_id" required>{role_opts}</select>
-          </div>
+          {_role_search_field()}
         </div>
         <div class="field">
           <label>Reason</label>
@@ -835,12 +927,14 @@ def roster_page(guild_id):
     rank_opts = _rank_options(guild, cfg)
     no_ranks_hint = "" if cfg.get("ranks") else '<div class="hint">No ranks configured yet — set them up in this server\'s settings first.</div>'
     member_assets = _member_search_assets(guild)
+    rank_assets = _rank_search_assets(guild, cfg)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">📋 Roster Actions</h1>
     {result_html}
     {member_assets}
+    {rank_assets}
 
     <div class="card">
       <h2>📋 Add / move on roster</h2>
@@ -848,7 +942,7 @@ def roster_page(guild_id):
       <form method="post" action="/dashboard/{guild_id}/roster/add">
         <div class="grid-2">
           {_member_search_field()}
-          <div class="field"><label>Rank</label><select name="rank_id" required>{rank_opts}</select></div>
+          {_rank_search_field()}
         </div>
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn" type="submit">Add / Move</button>
@@ -1205,20 +1299,20 @@ def mass_page(guild_id):
 
     result = request.args.get("result", "")
     result_html = f'<div class="flash">{result}</div>' if result else ""
-    role_opts = _role_options(guild, None, allow_none=False)
-    role_opts_optional = _role_options(guild, None, allow_none=True)
+    role_assets = _role_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">🧰 Mass Actions</h1>
     {result_html}
+    {role_assets}
 
     <div class="card">
       <h2>🟢 Give a role to many members</h2>
       <form method="post" action="/dashboard/{guild_id}/mass/addrole">
         <div class="grid-2">
-          <div class="field"><label>Role to give</label><select name="role_id" required>{role_opts}</select></div>
-          <div class="field"><label>Only members who have this role (optional)</label><select name="filter_role_id">{role_opts_optional}</select></div>
+          {_role_search_field("Role to give", "role_id")}
+          {_role_search_field("Only members who have this role (optional)", "filter_role_id")}
         </div>
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn" type="submit">Give to All Matching</button>
@@ -1229,8 +1323,8 @@ def mass_page(guild_id):
       <h2>🔴 Remove a role from many members</h2>
       <form method="post" action="/dashboard/{guild_id}/mass/removerole">
         <div class="grid-2">
-          <div class="field"><label>Role to remove</label><select name="role_id" required>{role_opts}</select></div>
-          <div class="field"><label>Only members who also have this role (optional)</label><select name="filter_role_id">{role_opts_optional}</select></div>
+          {_role_search_field("Role to remove", "role_id")}
+          {_role_search_field("Only members who also have this role (optional)", "filter_role_id")}
         </div>
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn btn-secondary" type="submit">Remove from All Matching</button>
@@ -1244,7 +1338,7 @@ def mass_page(guild_id):
           <div class="field"><label>Prefix (optional)</label><input type="text" name="prefix" placeholder="[Staff] "></div>
           <div class="field"><label>Suffix (optional)</label><input type="text" name="suffix" placeholder=" | Verified"></div>
         </div>
-        <div class="field"><label>Only members with this role (optional)</label><select name="filter_role_id">{role_opts_optional}</select></div>
+        {_role_search_field("Only members with this role (optional)", "filter_role_id")}
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn btn-secondary" type="submit">Rename All Matching</button>
       </form>
@@ -1309,17 +1403,18 @@ def announce_page(guild_id):
 
     result = request.args.get("result", "")
     result_html = f'<div class="flash">{result}</div>' if result else ""
-    channel_opts = _channel_options(guild, None)
+    channel_assets = _channel_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">📣 Announcements</h1>
     {result_html}
+    {channel_assets}
 
     <div class="card">
       <h2>📢 Post to one channel</h2>
       <form method="post" action="/dashboard/{guild_id}/announce/single">
-        <div class="field"><label>Channel</label><select name="channel_id" required>{channel_opts}</select></div>
+        {_channel_search_field()}
         <div class="field"><label>Title</label><input type="text" name="title" value="Announcement" required></div>
         <div class="field"><label>Message</label><input type="text" name="message" placeholder="What's the announcement?" required></div>
         <div class="field"><label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:14px;">
@@ -1410,12 +1505,13 @@ def showcase_page(guild_id):
     else:
         current_rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No roles in the showcase yet.</td></tr>'
 
-    role_opts = _role_options(guild, None, allow_none=False)
+    role_assets = _role_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">🎭 Role Showcase</h1>
     {result_html}
+    {role_assets}
 
     <div class="card">
       <h2>Current showcase ({len(entries)}/25)</h2>
@@ -1428,7 +1524,7 @@ def showcase_page(guild_id):
     <div class="card">
       <h2>➕ Add or update a role</h2>
       <form method="post" action="/dashboard/{guild_id}/showcase/add">
-        <div class="field"><label>Role</label><select name="role_id" required>{role_opts}</select></div>
+        {_role_search_field()}
         <div class="field"><label>Description</label><input type="text" name="description" placeholder="What this role is for / how to earn it" required></div>
         <button class="btn" type="submit">Add / Update</button>
       </form>
@@ -1502,12 +1598,13 @@ def crosspost_page(guild_id):
     else:
         rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No mirrors set up yet.</td></tr>'
 
-    channel_opts = _channel_options(guild, None)
+    channel_assets = _channel_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">🔀 Cross-Posting</h1>
     {result_html}
+    {channel_assets}
 
     <div class="card">
       <h2>Current mirrors</h2>
@@ -1520,7 +1617,7 @@ def crosspost_page(guild_id):
     <div class="card">
       <h2>➕ Add a mirror</h2>
       <form method="post" action="/dashboard/{guild_id}/crosspost/add">
-        <div class="field"><label>Source channel (in this server)</label><select name="source_channel_id" required>{channel_opts}</select></div>
+        {_channel_search_field("Source channel (in this server)", "source_channel_id")}
         <div class="field">
           <label>Destination channel ID (in another server, bot must be there too)</label>
           <input type="text" name="dest_channel_id" placeholder="123456789012345678" required>
@@ -1762,19 +1859,20 @@ def tickets_page(guild_id):
     else:
         rows = '<tr><td colspan="5" class="hint" style="padding:16px;">No tickets yet.</td></tr>'
 
-    channel_opts = _channel_options(guild, cfg.get("ticket_channel_id"))
     member_assets = _member_search_assets(guild)
+    channel_assets = _channel_search_assets(guild)
 
     body = f"""
     <h1>🎫 Tickets</h1>
     {result_html}
     {member_assets}
+    {channel_assets}
 
     <div class="card">
       <h2>📌 Ticket panel channel</h2>
       <div class="hint" style="margin-bottom:12px;">Posts a button in this channel that lets any member open their own ticket instantly.</div>
       <form method="post" action="/dashboard/{guild_id}/tickets/setchannel">
-        <div class="field"><label>Channel</label><select name="channel_id" required>{channel_opts}</select></div>
+        {_channel_search_field("Channel", "channel_id", guild, cfg.get("ticket_channel_id"))}
         <button class="btn" type="submit">Post Ticket Panel</button>
       </form>
     </div>
