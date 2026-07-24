@@ -244,6 +244,19 @@ BASE_STYLE = """
     .sidenav { width:100%; position:static; flex-direction:row; flex-wrap:wrap; }
     .sidenav .sidenav-label { display:none; }
   }
+  .search-wrap { position:relative; }
+  .search-dropdown {
+    display:none; position:absolute; top:calc(100% + 4px); left:0; right:0; z-index:1000;
+    max-height:260px; overflow-y:auto;
+    background:rgba(8,9,18,0.97); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+    border:1px solid var(--neon-cyan); box-shadow:0 8px 32px rgba(0,0,0,0.6), 0 0 20px rgba(45,226,255,0.25);
+  }
+  .search-option {
+    padding:9px 14px; font-family:'Rajdhani',sans-serif; font-size:14px; font-weight:600; color:#d6e2ef;
+    cursor:pointer; border-bottom:1px solid rgba(45,226,255,0.08); transition:background 0.1s ease;
+  }
+  .search-option:last-child { border-bottom:none; }
+  .search-option:hover { background:rgba(45,226,255,0.15); color:#eaf6ff; }
 </style>
 """
 
@@ -274,6 +287,50 @@ SIDENAV_SECTIONS = [
 ]
 
 
+SEARCH_JS = """
+<script>
+  let SEARCH_MAPS = {};
+
+  function onSearchFocus(inputEl) {
+    renderSearchOptions(inputEl, inputEl.value);
+  }
+  function onSearchInput(inputEl) {
+    renderSearchOptions(inputEl, inputEl.value);
+  }
+  function renderSearchOptions(inputEl, query) {
+    const map = SEARCH_MAPS[inputEl.dataset.map] || {};
+    const q = query.toLowerCase();
+    const keys = Object.keys(map).filter(k => k.toLowerCase().includes(q)).slice(0, 60);
+    const dropdown = inputEl.parentElement.querySelector('.search-dropdown');
+    if (!dropdown) return;
+    if (keys.length === 0) {
+      dropdown.innerHTML = '<div class="search-option" style="opacity:.5;cursor:default;">No matches</div>';
+    } else {
+      dropdown.innerHTML = keys.map(k =>
+        `<div class="search-option" onmousedown="selectSearchOption(this, ${JSON.stringify(k)})">${k}</div>`
+      ).join('');
+    }
+    dropdown.style.display = 'block';
+  }
+  function selectSearchOption(optEl, label) {
+    const wrap = optEl.closest('.search-wrap');
+    const field = optEl.closest('.field');
+    const input = wrap.querySelector('input[type=text]');
+    const hidden = field.querySelector('input[type=hidden]');
+    const map = SEARCH_MAPS[input.dataset.map] || {};
+    input.value = label;
+    hidden.value = map[label] || '';
+    wrap.querySelector('.search-dropdown').style.display = 'none';
+  }
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('.search-wrap')) {
+      document.querySelectorAll('.search-dropdown').forEach(d => d.style.display = 'none');
+    }
+  });
+</script>
+"""
+
+
 def render_page(title: str, body: str, show_logout: bool = True, guild_id: int = None) -> str:
     logout_link = '<a href="/logout">Log out</a>' if show_logout and "user_id" in session else ""
 
@@ -281,7 +338,7 @@ def render_page(title: str, body: str, show_logout: bool = True, guild_id: int =
         return render_template_string(
             f"""
             <!doctype html><html><head><meta charset="utf-8">
-            <title>{{{{ title }}}}</title>{BASE_STYLE}</head>
+            <title>{{{{ title }}}}</title>{BASE_STYLE}{SEARCH_JS}</head>
             <body><div class="wrap">
             <div class="topbar"><h1>🤖 Bot Dashboard</h1>{logout_link}</div>
             {{{{ body|safe }}}}
@@ -303,7 +360,7 @@ def render_page(title: str, body: str, show_logout: bool = True, guild_id: int =
     return render_template_string(
         f"""
         <!doctype html><html><head><meta charset="utf-8">
-        <title>{{{{ title }}}}</title>{BASE_STYLE}</head>
+        <title>{{{{ title }}}}</title>{BASE_STYLE}{SEARCH_JS}</head>
         <body><div class="wrap" style="max-width:1040px;">
         <div class="topbar"><h1>🤖 Bot Dashboard</h1>{logout_link}</div>
         <div class="page-layout">
@@ -493,69 +550,44 @@ def _member_options(guild):
 
 
 def _member_search_assets(guild):
-    """Include ONCE per page (anywhere in the body). Builds a single shared
-    datalist of every member, plus the JS that resolves a typed name back to
-    a Discord ID for any _member_search_field() on the same page."""
-    options = []
+    """Include ONCE per page (anywhere in the body). Feeds SEARCH_MAPS.member
+    for any _member_search_field() on the same page."""
     mapping = {}
     members = sorted((m for m in guild.members if not m.bot), key=lambda m: m.display_name.lower())
     for m in members:
-        label = f"{m.display_name} ({m})"
-        options.append(f'<option value="{label}"></option>')
-        mapping[label] = str(m.id)
-
-    return f"""
-    <datalist id="member-datalist">{''.join(options)}</datalist>
-    <script>
-      const MEMBER_MAP = {json.dumps(mapping)};
-      function syncMemberId(inputEl) {{
-        const hidden = inputEl.parentElement.querySelector('input[type=hidden]');
-        if (hidden) hidden.value = MEMBER_MAP[inputEl.value] || '';
-      }}
-    </script>
-    """
+        mapping[f"{m.display_name} ({m})"] = str(m.id)
+    return f"<script>SEARCH_MAPS.member = {json.dumps(mapping)};</script>"
 
 
 def _member_search_field(label="Member", field_name="user_id"):
-    """A type-to-search member picker. Pair with one _member_search_assets()
-    call anywhere earlier in the same page's body."""
+    """A type-to-search member picker with a custom, fully-styled dropdown.
+    Pair with one _member_search_assets() call anywhere earlier in the page."""
     return f"""
     <div class="field">
       <label>{label}</label>
-      <input type="text" list="member-datalist" placeholder="Type a name..." autocomplete="off" oninput="syncMemberId(this)">
+      <div class="search-wrap">
+        <input type="text" data-map="member" placeholder="Type or click to browse..." autocomplete="off"
+               oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
+        <div class="search-dropdown"></div>
+      </div>
       <input type="hidden" name="{field_name}">
     </div>
     """
 
 
 def _role_search_assets(guild):
-    """Include ONCE per page. Builds a shared datalist of every role, plus the
-    JS that resolves a typed name back to a Discord ID for any _role_search_field()."""
-    options = []
+    """Include ONCE per page. Feeds SEARCH_MAPS.role for any _role_search_field()."""
     mapping = {}
     for r in sorted(guild.roles, key=lambda r: r.position, reverse=True):
         if r.is_default():
             continue
-        label = f"@{r.name}"
-        options.append(f'<option value="{label}"></option>')
-        mapping[label] = str(r.id)
-
-    return f"""
-    <datalist id="role-datalist">{''.join(options)}</datalist>
-    <script>
-      const ROLE_MAP = {json.dumps(mapping)};
-      function syncRoleId(inputEl) {{
-        const hidden = inputEl.parentElement.querySelector('input[type=hidden]');
-        if (hidden) hidden.value = ROLE_MAP[inputEl.value] || '';
-      }}
-    </script>
-    """
+        mapping[f"@{r.name}"] = str(r.id)
+    return f"<script>SEARCH_MAPS.role = {json.dumps(mapping)};</script>"
 
 
 def _role_search_field(label="Role", field_name="role_id", guild=None, current_id=None):
-    """A type-to-search role picker. Pair with one _role_search_assets() call
-    anywhere earlier in the same page's body. Pass guild+current_id to pre-fill
-    an existing selection (e.g. on the settings page)."""
+    """A type-to-search role picker. Pass guild+current_id to pre-fill an
+    existing selection (e.g. on the settings page)."""
     current_label = ""
     current_value = ""
     if guild is not None and current_id:
@@ -566,33 +598,21 @@ def _role_search_field(label="Role", field_name="role_id", guild=None, current_i
     return f"""
     <div class="field">
       <label>{label}</label>
-      <input type="text" list="role-datalist" value="{current_label}" placeholder="Type a role name..." autocomplete="off" oninput="syncRoleId(this)">
+      <div class="search-wrap">
+        <input type="text" data-map="role" value="{current_label}" placeholder="Type or click to browse..." autocomplete="off"
+               oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
+        <div class="search-dropdown"></div>
+      </div>
       <input type="hidden" name="{field_name}" value="{current_value}">
     </div>
     """
 
 
 def _channel_search_assets(guild, channel_type="text"):
-    """Include ONCE per page. Builds a shared datalist of every channel, plus
-    the JS that resolves a typed name back to a Discord ID for any _channel_search_field()."""
+    """Include ONCE per page. Feeds SEARCH_MAPS.channel for any _channel_search_field()."""
     channels = guild.text_channels if channel_type == "text" else guild.voice_channels
-    options = []
-    mapping = {}
-    for c in channels:
-        label = f"#{c.name}"
-        options.append(f'<option value="{label}"></option>')
-        mapping[label] = str(c.id)
-
-    return f"""
-    <datalist id="channel-datalist">{''.join(options)}</datalist>
-    <script>
-      const CHANNEL_MAP = {json.dumps(mapping)};
-      function syncChannelId(inputEl) {{
-        const hidden = inputEl.parentElement.querySelector('input[type=hidden]');
-        if (hidden) hidden.value = CHANNEL_MAP[inputEl.value] || '';
-      }}
-    </script>
-    """
+    mapping = {f"#{c.name}": str(c.id) for c in channels}
+    return f"<script>SEARCH_MAPS.channel = {json.dumps(mapping)};</script>"
 
 
 def _channel_search_field(label="Channel", field_name="channel_id", guild=None, current_id=None):
@@ -608,7 +628,11 @@ def _channel_search_field(label="Channel", field_name="channel_id", guild=None, 
     return f"""
     <div class="field">
       <label>{label}</label>
-      <input type="text" list="channel-datalist" value="{current_label}" placeholder="Type a channel name..." autocomplete="off" oninput="syncChannelId(this)">
+      <div class="search-wrap">
+        <input type="text" data-map="channel" value="{current_label}" placeholder="Type or click to browse..." autocomplete="off"
+               oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
+        <div class="search-dropdown"></div>
+      </div>
       <input type="hidden" name="{field_name}" value="{current_value}">
     </div>
     """
@@ -626,34 +650,26 @@ def _rank_options(guild, cfg):
 
 
 def _rank_search_assets(guild, cfg):
-    """Include ONCE per page. Datalist limited to configured ranks only (not all roles)."""
+    """Include ONCE per page. Feeds SEARCH_MAPS.rank — limited to configured
+    ranks only (not every role in the server)."""
     rank_ids = cfg.get("ranks", [])
-    options = []
     mapping = {}
     for rid in rank_ids:
         role = guild.get_role(rid)
         if role:
-            label = f"@{role.name}"
-            options.append(f'<option value="{label}"></option>')
-            mapping[label] = str(role.id)
-
-    return f"""
-    <datalist id="rank-datalist">{''.join(options)}</datalist>
-    <script>
-      const RANK_MAP = {json.dumps(mapping)};
-      function syncRankId(inputEl) {{
-        const hidden = inputEl.parentElement.querySelector('input[type=hidden]');
-        if (hidden) hidden.value = RANK_MAP[inputEl.value] || '';
-      }}
-    </script>
-    """
+            mapping[f"@{role.name}"] = str(role.id)
+    return f"<script>SEARCH_MAPS.rank = {json.dumps(mapping)};</script>"
 
 
 def _rank_search_field(label="Rank", field_name="rank_id"):
     return f"""
     <div class="field">
       <label>{label}</label>
-      <input type="text" list="rank-datalist" placeholder="Type a rank name..." autocomplete="off" oninput="syncRankId(this)">
+      <div class="search-wrap">
+        <input type="text" data-map="rank" placeholder="Type or click to browse..." autocomplete="off"
+               oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
+        <div class="search-dropdown"></div>
+      </div>
       <input type="hidden" name="{field_name}">
     </div>
     """
