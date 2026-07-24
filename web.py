@@ -417,6 +417,42 @@ def _member_options(guild):
     return "".join(opts)
 
 
+def _member_search_assets(guild):
+    """Include ONCE per page (anywhere in the body). Builds a single shared
+    datalist of every member, plus the JS that resolves a typed name back to
+    a Discord ID for any _member_search_field() on the same page."""
+    options = []
+    mapping = {}
+    members = sorted((m for m in guild.members if not m.bot), key=lambda m: m.display_name.lower())
+    for m in members:
+        label = f"{m.display_name} ({m})"
+        options.append(f'<option value="{label}"></option>')
+        mapping[label] = str(m.id)
+
+    return f"""
+    <datalist id="member-datalist">{''.join(options)}</datalist>
+    <script>
+      const MEMBER_MAP = {json.dumps(mapping)};
+      function syncMemberId(inputEl) {{
+        const hidden = inputEl.parentElement.querySelector('input[type=hidden]');
+        if (hidden) hidden.value = MEMBER_MAP[inputEl.value] || '';
+      }}
+    </script>
+    """
+
+
+def _member_search_field(label="Member", field_name="user_id"):
+    """A type-to-search member picker. Pair with one _member_search_assets()
+    call anywhere earlier in the same page's body."""
+    return f"""
+    <div class="field">
+      <label>{label}</label>
+      <input type="text" list="member-datalist" placeholder="Type a name..." autocomplete="off" oninput="syncMemberId(this)">
+      <input type="hidden" name="{field_name}">
+    </div>
+    """
+
+
 def _rank_options(guild, cfg):
     """Only the roles configured via /setranks, highest first — used for roster forms."""
     rank_ids = cfg.get("ranks", [])
@@ -624,20 +660,19 @@ def roles_page(guild_id):
 
     member_opts = _member_options(guild)
     role_opts = _role_options(guild, None, allow_none=False)
+    member_assets = _member_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">🎭 Give / Remove Roles</h1>
     {result_html}
+    {member_assets}
 
     <div class="card">
       <h2>🟢 Give a role</h2>
       <form method="post" action="/dashboard/{guild_id}/roles/give">
         <div class="grid-2">
-          <div class="field">
-            <label>Member</label>
-            <select name="user_id" required>{member_opts}</select>
-          </div>
+          {_member_search_field()}
           <div class="field">
             <label>Role</label>
             <select name="role_id" required>{role_opts}</select>
@@ -655,10 +690,7 @@ def roles_page(guild_id):
       <h2>🔴 Remove a role</h2>
       <form method="post" action="/dashboard/{guild_id}/roles/remove">
         <div class="grid-2">
-          <div class="field">
-            <label>Member</label>
-            <select name="user_id" required>{member_opts}</select>
-          </div>
+          {_member_search_field()}
           <div class="field">
             <label>Role</label>
             <select name="role_id" required>{role_opts}</select>
@@ -724,18 +756,20 @@ def roster_page(guild_id):
     member_opts = _member_options(guild)
     rank_opts = _rank_options(guild, cfg)
     no_ranks_hint = "" if cfg.get("ranks") else '<div class="hint">No ranks configured yet — set them up in this server\'s settings first.</div>'
+    member_assets = _member_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">📋 Roster Actions</h1>
     {result_html}
+    {member_assets}
 
     <div class="card">
       <h2>📋 Add / move on roster</h2>
       {no_ranks_hint}
       <form method="post" action="/dashboard/{guild_id}/roster/add">
         <div class="grid-2">
-          <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+          {_member_search_field()}
           <div class="field"><label>Rank</label><select name="rank_id" required>{rank_opts}</select></div>
         </div>
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
@@ -746,7 +780,7 @@ def roster_page(guild_id):
     <div class="card">
       <h2>⬆️ Promote</h2>
       <form method="post" action="/dashboard/{guild_id}/roster/promote">
-        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        {_member_search_field()}
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn" type="submit">Promote</button>
       </form>
@@ -755,7 +789,7 @@ def roster_page(guild_id):
     <div class="card">
       <h2>⬇️ Demote</h2>
       <form method="post" action="/dashboard/{guild_id}/roster/demote">
-        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        {_member_search_field()}
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn btn-secondary" type="submit">Demote</button>
       </form>
@@ -764,7 +798,7 @@ def roster_page(guild_id):
     <div class="card">
       <h2>🗑️ Remove from roster</h2>
       <form method="post" action="/dashboard/{guild_id}/roster/remove">
-        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        {_member_search_field()}
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn btn-secondary" type="submit">Remove</button>
       </form>
@@ -840,17 +874,18 @@ def moderation_page(guild_id):
 
     result = request.args.get("result", "")
     result_html = f'<div class="flash">{result}</div>' if result else ""
-    member_opts = _member_options(guild)
+    member_assets = _member_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">🛡️ Moderation</h1>
     {result_html}
+    {member_assets}
 
     <div class="card">
       <h2>⚠️ Warn</h2>
       <form method="post" action="/dashboard/{guild_id}/moderation/warn">
-        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        {_member_search_field()}
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn" type="submit">Warn</button>
       </form>
@@ -860,7 +895,7 @@ def moderation_page(guild_id):
       <h2>🔇 Timeout</h2>
       <form method="post" action="/dashboard/{guild_id}/moderation/timeout">
         <div class="grid-2">
-          <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+          {_member_search_field()}
           <div class="field"><label>Minutes</label><input type="number" name="minutes" min="1" max="40320" value="60" required></div>
         </div>
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
@@ -871,7 +906,7 @@ def moderation_page(guild_id):
     <div class="card">
       <h2>👢 Kick</h2>
       <form method="post" action="/dashboard/{guild_id}/moderation/kick">
-        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        {_member_search_field()}
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn btn-secondary" type="submit">Kick</button>
       </form>
@@ -881,7 +916,7 @@ def moderation_page(guild_id):
       <h2>🔨 Ban</h2>
       <form method="post" action="/dashboard/{guild_id}/moderation/ban">
         <div class="grid-2">
-          <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+          {_member_search_field()}
           <div class="field"><label>Delete message history (days, 0-7)</label><input type="number" name="delete_days" min="0" max="7" value="0"></div>
         </div>
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
@@ -1493,12 +1528,13 @@ def greetings_page(guild_id):
     else:
         rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No VC greetings set up yet.</td></tr>'
 
-    member_opts = _member_options(guild)
+    member_assets = _member_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">🔊 VC Greetings</h1>
     {result_html}
+    {member_assets}
 
     <div class="card">
       <h2>Current greetings</h2>
@@ -1511,7 +1547,7 @@ def greetings_page(guild_id):
     <div class="card">
       <h2>➕ Add / update a greeting</h2>
       <form method="post" action="/dashboard/{guild_id}/greetings/add">
-        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        {_member_search_field()}
         <div class="field"><label>What the bot should say when they join a VC</label><input type="text" name="message" placeholder="The legend has arrived!" required></div>
         <button class="btn" type="submit">Save Greeting</button>
       </form>
@@ -1648,12 +1684,13 @@ def tickets_page(guild_id):
     else:
         rows = '<tr><td colspan="5" class="hint" style="padding:16px;">No tickets yet.</td></tr>'
 
-    member_opts = _member_options(guild)
     channel_opts = _channel_options(guild, cfg.get("ticket_channel_id"))
+    member_assets = _member_search_assets(guild)
 
     body = f"""
     <h1>🎫 Tickets</h1>
     {result_html}
+    {member_assets}
 
     <div class="card">
       <h2>📌 Ticket panel channel</h2>
@@ -1668,7 +1705,7 @@ def tickets_page(guild_id):
       <h2>➕ Open a ticket for someone</h2>
       <div class="hint" style="margin-bottom:12px;">Members can also open their own with /ticket in Discord, or a button if you've set one up with /setticketchannel.</div>
       <form method="post" action="/dashboard/{guild_id}/tickets/open">
-        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        {_member_search_field()}
         <button class="btn" type="submit">Open Ticket</button>
       </form>
     </div>
