@@ -56,6 +56,9 @@ _announce = None
 _massannounce = None
 _showcase_add = None
 _showcase_remove = None
+_open_ticket = None
+_close_ticket = None
+_set_ticket_channel = None
 
 
 # ---------- shared page chrome ----------
@@ -152,23 +155,91 @@ BASE_STYLE = """
   }
   .action-tile span { font-size:22px; }
   .action-tile:hover { border-color:#9b6bff; background:#241f36; text-decoration:none; transform:translateY(-2px); }
+  .page-layout { display:flex; gap:28px; align-items:flex-start; }
+  .sidenav { width:190px; flex-shrink:0; position:sticky; top:24px; display:flex; flex-direction:column; gap:2px; }
+  .sidenav a {
+    display:flex; align-items:center; gap:10px; padding:9px 12px; border-radius:8px; color:#b5bac1;
+    font-size:13px; font-weight:600; transition:all 0.12s ease;
+  }
+  .sidenav a:hover { background:#211d2e; color:#fff; text-decoration:none; }
+  .sidenav a.active { background:linear-gradient(135deg,#5865f2,#9b6bff); color:#fff; }
+  .sidenav .sidenav-label { font-size:10px; text-transform:uppercase; letter-spacing:0.5px; color:#6b6f76;
+    font-weight:700; margin:14px 0 4px 12px; }
+  .sidenav .sidenav-label:first-child { margin-top:0; }
+  .main-col { flex:1; min-width:0; }
+  @media (max-width:760px) {
+    .page-layout { flex-direction:column; }
+    .sidenav { width:100%; position:static; flex-direction:row; flex-wrap:wrap; }
+    .sidenav .sidenav-label { display:none; }
+  }
 </style>
 """
 
 
-def render_page(title: str, body: str, show_logout: bool = True) -> str:
+SIDENAV_SECTIONS = [
+    ("General", [
+        ("dashboard", "⚙️", "Settings"),
+        ("roles_page", "🎭", "Roles"),
+        ("roster_page", "📋", "Roster"),
+        ("moderation_page", "🛡️", "Moderation"),
+    ]),
+    ("Bulk & Broadcast", [
+        ("mass_page", "🧰", "Mass Actions"),
+        ("announce_page", "📣", "Announcements"),
+        ("showcase_page", "🎭", "Showcase"),
+        ("crosspost_page", "🔀", "Cross-Posting"),
+        ("greetings_page", "🔊", "VC Greetings"),
+        ("tickets_page", "🎫", "Tickets"),
+    ]),
+    ("Insight", [
+        ("logs_page", "🗂️", "Logs"),
+        ("activity_page", "📈", "Activity"),
+        ("backup_download", "💾", "Backup"),
+    ]),
+]
+
+
+def render_page(title: str, body: str, show_logout: bool = True, guild_id: int = None) -> str:
     logout_link = '<a href="/logout">Log out</a>' if show_logout and "user_id" in session else ""
+
+    if guild_id is None:
+        return render_template_string(
+            f"""
+            <!doctype html><html><head><meta charset="utf-8">
+            <title>{{{{ title }}}}</title>{BASE_STYLE}</head>
+            <body><div class="wrap">
+            <div class="topbar"><h1>🤖 Bot Dashboard</h1>{logout_link}</div>
+            {{{{ body|safe }}}}
+            </div></body></html>
+            """,
+            title=title,
+            body=body,
+        )
+
+    current_endpoint = request.endpoint
+    nav_html = ""
+    for section_label, links in SIDENAV_SECTIONS:
+        nav_html += f'<div class="sidenav-label">{section_label}</div>'
+        for endpoint, icon, label in links:
+            css_class = "active" if endpoint == current_endpoint else ""
+            href = url_for(endpoint, guild_id=guild_id)
+            nav_html += f'<a class="{css_class}" href="{href}">{icon} {label}</a>'
+
     return render_template_string(
         f"""
         <!doctype html><html><head><meta charset="utf-8">
         <title>{{{{ title }}}}</title>{BASE_STYLE}</head>
-        <body><div class="wrap">
+        <body><div class="wrap" style="max-width:1040px;">
         <div class="topbar"><h1>🤖 Bot Dashboard</h1>{logout_link}</div>
-        {{{{ body|safe }}}}
+        <div class="page-layout">
+          <div class="sidenav">{{{{ nav|safe }}}}</div>
+          <div class="main-col">{{{{ body|safe }}}}</div>
+        </div>
         </div></body></html>
         """,
         title=title,
         body=body,
+        nav=nav_html,
     )
 
 
@@ -409,6 +480,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/showcase"><span>🎭</span>Showcase</a>
         <a class="action-tile" href="/dashboard/{guild_id}/crosspost"><span>🔀</span>Cross-Posting</a>
         <a class="action-tile" href="/dashboard/{guild_id}/greetings"><span>🔊</span>VC Greetings</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/tickets"><span>🎫</span>Tickets</a>
         <a class="action-tile" href="/dashboard/{guild_id}/logs"><span>🗂️</span>Logs</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
@@ -492,7 +564,7 @@ def dashboard(guild_id):
       </div>
     </form>
     """
-    return render_page(f"{guild.name} — Dashboard", body)
+    return render_page(f"{guild.name} — Dashboard", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/save", methods=["POST"])
@@ -600,7 +672,7 @@ def roles_page(guild_id):
       </form>
     </div>
     """
-    return render_page(f"{guild.name} — Roles", body)
+    return render_page(f"{guild.name} — Roles", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/roles/give", methods=["POST"])
@@ -698,7 +770,7 @@ def roster_page(guild_id):
       </form>
     </div>
     """
-    return render_page(f"{guild.name} — Roster", body)
+    return render_page(f"{guild.name} — Roster", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/roster/add", methods=["POST"])
@@ -817,7 +889,7 @@ def moderation_page(guild_id):
       </form>
     </div>
     """
-    return render_page(f"{guild.name} — Moderation", body)
+    return render_page(f"{guild.name} — Moderation", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/moderation/kick", methods=["POST"])
@@ -1007,7 +1079,7 @@ def logs_page(guild_id):
       </div>
     </div>
     """
-    return render_page(f"{guild.name} — Logs", body)
+    return render_page(f"{guild.name} — Logs", body, guild_id=guild_id)
 
 
 # ---------- mass actions ----------
@@ -1066,7 +1138,7 @@ def mass_page(guild_id):
       <div class="hint">The server owner and anyone above the bot's own role are automatically skipped.</div>
     </div>
     """
-    return render_page(f"{guild.name} — Mass Actions", body)
+    return render_page(f"{guild.name} — Mass Actions", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/mass/addrole", methods=["POST"])
@@ -1157,7 +1229,7 @@ def announce_page(guild_id):
       </form>
     </div>
     """
-    return render_page(f"{guild.name} — Announcements", body)
+    return render_page(f"{guild.name} — Announcements", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/announce/single", methods=["POST"])
@@ -1250,7 +1322,7 @@ def showcase_page(guild_id):
       <div class="hint">Set a showcase channel from the main settings page for members to see this with clickable "get role" buttons.</div>
     </div>
     """
-    return render_page(f"{guild.name} — Showcase", body)
+    return render_page(f"{guild.name} — Showcase", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/showcase/add", methods=["POST"])
@@ -1345,7 +1417,7 @@ def crosspost_page(guild_id):
       <div class="hint">To get a channel ID: enable Developer Mode in Discord (User Settings → Advanced), then right-click the destination channel → Copy Channel ID.</div>
     </div>
     """
-    return render_page(f"{guild.name} — Cross-Posting", body)
+    return render_page(f"{guild.name} — Cross-Posting", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/crosspost/add", methods=["POST"])
@@ -1445,7 +1517,7 @@ def greetings_page(guild_id):
       </form>
     </div>
     """
-    return render_page(f"{guild.name} — VC Greetings", body)
+    return render_page(f"{guild.name} — VC Greetings", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/greetings/add", methods=["POST"])
@@ -1521,7 +1593,134 @@ def activity_page(guild_id):
       </table></div>
     </div>
     """
-    return render_page(f"{guild.name} — Activity", body)
+    return render_page(f"{guild.name} — Activity", body, guild_id=guild_id)
+
+
+# ---------- tickets ----------
+
+@app.route("/dashboard/<int:guild_id>/tickets")
+def tickets_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    tickets = cfg.get("tickets", {})
+    all_tickets = sorted(tickets.values(), key=lambda t: t.get("id", 0), reverse=True)
+
+    rows = ""
+    if all_tickets:
+        for t in all_tickets:
+            owner = guild.get_member(t["user_id"])
+            owner_name = owner.display_name if owner else f"Unknown ({t['user_id']})"
+            status = t.get("status", "open")
+            status_color = "#5ee0a0" if status == "open" else "#80848e"
+            status_pill = f'<span class="pill" style="background:{status_color}22; border-color:{status_color}55; color:{status_color};">{status}</span>'
+
+            action_cell = ""
+            if status == "open":
+                channel = guild.get_channel(t.get("channel_id"))
+                link = f'<a href="https://discord.com/channels/{guild_id}/{t["channel_id"]}" target="_blank">Open in Discord</a>' if channel else ""
+                action_cell = f"""
+                {link}
+                <form method="post" action="/dashboard/{guild_id}/tickets/close" style="display:inline; margin-left:8px;">
+                  <input type="hidden" name="ticket_id" value="{t['id']}">
+                  <button class="btn btn-secondary" type="submit" style="padding:6px 12px; font-size:12px;">Close</button>
+                </form>
+                """
+            else:
+                closer = guild.get_member(t.get("closed_by"))
+                closer_name = closer.display_name if closer else "—"
+                action_cell = f'<span class="hint">Closed by {closer_name}</span>'
+
+            rows += f"""
+            <tr>
+              <td>#{t['id']}</td>
+              <td>{owner_name}</td>
+              <td>{status_pill}</td>
+              <td class="hint" style="white-space:nowrap;">{_format_ts(t.get('created_at'))}</td>
+              <td>{action_cell}</td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="5" class="hint" style="padding:16px;">No tickets yet.</td></tr>'
+
+    member_opts = _member_options(guild)
+    channel_opts = _channel_options(guild, cfg.get("ticket_channel_id"))
+
+    body = f"""
+    <h1>🎫 Tickets</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>📌 Ticket panel channel</h2>
+      <div class="hint" style="margin-bottom:12px;">Posts a button in this channel that lets any member open their own ticket instantly.</div>
+      <form method="post" action="/dashboard/{guild_id}/tickets/setchannel">
+        <div class="field"><label>Channel</label><select name="channel_id" required>{channel_opts}</select></div>
+        <button class="btn" type="submit">Post Ticket Panel</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>➕ Open a ticket for someone</h2>
+      <div class="hint" style="margin-bottom:12px;">Members can also open their own with /ticket in Discord, or a button if you've set one up with /setticketchannel.</div>
+      <form method="post" action="/dashboard/{guild_id}/tickets/open">
+        <div class="field"><label>Member</label><select name="user_id" required>{member_opts}</select></div>
+        <button class="btn" type="submit">Open Ticket</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>All tickets</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>#</th><th>Member</th><th>Status</th><th>Opened</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Tickets", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/tickets/open", methods=["POST"])
+def tickets_open_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Pick a member."))
+    result = _run_async(_open_ticket(guild_id, user_id))
+    return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tickets/close", methods=["POST"])
+def tickets_close_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        ticket_id = int(request.form["ticket_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Invalid ticket."))
+    result = _run_async(_close_ticket(guild_id, ticket_id, session["user_id"]))
+    return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tickets/setchannel", methods=["POST"])
+def tickets_setchannel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        channel_id = int(request.form["channel_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Pick a channel."))
+    result = _run_async(_set_ticket_channel(guild_id, channel_id, session["user_id"]))
+    return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
 
 
 # ---------- backup download ----------
@@ -1554,13 +1753,14 @@ def start_web_app(
     mass_add_role, mass_remove_role, mass_rename,
     announce, massannounce,
     showcase_add, showcase_remove,
+    open_ticket, close_ticket, set_ticket_channel,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
     global _bot, _config, _save_config, _get_guild_cfg, _give_role, _remove_role
     global _roster_add, _roster_remove, _promote, _demote, _kick, _ban, _timeout, _warn
     global _mass_add_role, _mass_remove_role, _mass_rename, _announce, _massannounce
-    global _showcase_add, _showcase_remove
+    global _showcase_add, _showcase_remove, _open_ticket, _close_ticket, _set_ticket_channel
     _bot = bot
     _config = config
     _save_config = save_config
@@ -1582,6 +1782,9 @@ def start_web_app(
     _massannounce = massannounce
     _showcase_add = showcase_add
     _showcase_remove = showcase_remove
+    _open_ticket = open_ticket
+    _close_ticket = close_ticket
+    _set_ticket_channel = set_ticket_channel
 
     port = int(os.environ.get("PORT", 8080))
     thread = threading.Thread(target=_run, args=(port,), daemon=True)

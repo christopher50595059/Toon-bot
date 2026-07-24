@@ -60,6 +60,8 @@ Commands:
   /showcase remove role:<role>            - remove a role from the showcase
   /showcase setchannel channel:<channel>  - (admin only) post the live showcase here
   /showcase list                          - show the current showcase
+  /setticketchannel channel:<channel>     - (admin only) post an Open Ticket button in this channel
+  /ticket                                 - open a private support ticket with staff
   /evaluate [user]                        - show message activity for the current week (leaderboard or one person); auto-resets weekly
   /setbirthday month:<1-12> day:<1-31>    - set your own birthday
   /removebirthday                         - remove your saved birthday
@@ -1176,6 +1178,182 @@ async def refresh_showcase_message(guild: discord.Guild):
         save_config(config)
     except discord.Forbidden:
         pass
+
+
+# ---------- tickets ----------
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self, guild_id: int, ticket_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.ticket_id = ticket_id
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒")
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("🔒 Closing this ticket in a few seconds...")
+        await close_ticket(self.guild_id, self.ticket_id, interaction.user.id)
+
+
+class TicketOpenView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Open Ticket", style=discord.ButtonStyle.primary, emoji="🎫")
+    async def open(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        result = await open_ticket(self.guild_id, interaction.user.id)
+        await interaction.followup.send(result, ephemeral=True)
+
+
+async def open_ticket(guild_id: int, user_id: int) -> str:
+    """Create a private ticket channel for this member. Used by both the
+    Discord button and the web dashboard, so behavior is identical either way."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    if member is None:
+        return "❌ Couldn't find that member in this server."
+
+    cfg = get_guild_cfg(guild_id)
+    tickets = cfg.setdefault("tickets", {})
+
+    existing = next(
+        (t for t in tickets.values() if t["user_id"] == user_id and t["status"] == "open"), None
+    )
+    if existing:
+        channel = guild.get_channel(existing["channel_id"])
+        if channel:
+            return f"ℹ️ You already have an open ticket: {channel.mention}"
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+    }
+    manager_role_id = cfg.get("manager_role_id")
+    if manager_role_id:
+        manager_role = guild.get_role(manager_role_id)
+        if manager_role:
+            overwrites[manager_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+    category = None
+    category_id = cfg.get("ticket_category_id")
+    if category_id:
+        maybe_category = guild.get_channel(category_id)
+        if isinstance(maybe_category, discord.CategoryChannel):
+            category = maybe_category
+
+    safe_name = "".join(c for c in member.name.lower() if c.isalnum() or c == "-")[:20] or "ticket"
+    try:
+        channel = await guild.create_text_channel(
+            name=f"ticket-{safe_name}", category=category, overwrites=overwrites,
+            reason=f"Ticket opened by {member}",
+        )
+    except discord.Forbidden:
+        return "❌ I don't have permission to create channels here."
+
+    next_id = cfg.get("ticket_next_id", 1)
+    cfg["ticket_next_id"] = next_id + 1
+    tickets[str(next_id)] = {
+        "id": next_id, "user_id": user_id, "channel_id": channel.id, "status": "open",
+        "created_at": datetime.now(timezone.utc).isoformat(), "closed_at": None, "closed_by": None,
+    }
+    save_config(config)
+
+    embed = discord.Embed(
+        title=f"🎫 Ticket #{next_id}",
+        description=f"Hey {member.mention}! Staff will be with you shortly. Explain what you need help with below.",
+        color=discord.Color.blurple(),
+    )
+    await channel.send(embed=embed, view=TicketCloseView(guild_id, next_id))
+
+    return f"✅ Ticket created: {channel.mention}"
+
+
+async def close_ticket(guild_id: int, ticket_id: int, closed_by_id: int) -> str:
+    """Close and delete a ticket channel. Used by both the Discord button and web dashboard."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+
+    cfg = get_guild_cfg(guild_id)
+    tickets = cfg.setdefault("tickets", {})
+    ticket = tickets.get(str(ticket_id))
+    if ticket is None:
+        return "❌ Ticket not found."
+    if ticket["status"] == "closed":
+        return "ℹ️ That ticket is already closed."
+
+    ticket["status"] = "closed"
+    ticket["closed_at"] = datetime.now(timezone.utc).isoformat()
+    ticket["closed_by"] = closed_by_id
+    save_config(config)
+
+    channel = guild.get_channel(ticket["channel_id"])
+    if channel:
+        try:
+            await asyncio.sleep(3)
+            await channel.delete(reason=f"Ticket #{ticket_id} closed")
+        except discord.Forbidden:
+            return f"⚠️ Ticket #{ticket_id} marked closed, but I couldn't delete the channel (missing permission)."
+
+    return f"✅ Ticket #{ticket_id} closed."
+
+
+async def web_set_ticket_channel(guild_id: int, channel_id: int, actor_id: int) -> str:
+    """Mirrors /setticketchannel — posts the Open Ticket panel and stores the channel."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return "❌ Couldn't find that channel."
+
+    cfg = get_guild_cfg(guild_id)
+    cfg["ticket_channel_id"] = channel_id
+    save_config(config)
+
+    embed = discord.Embed(
+        title="🎫 Need help?",
+        description="Click the button below to open a private ticket with staff.",
+        color=discord.Color.blurple(),
+    )
+    try:
+        await channel.send(embed=embed, view=TicketOpenView(guild_id))
+    except discord.Forbidden:
+        return f"❌ I don't have permission to post in #{channel.name}."
+    return f"✅ Ticket panel posted in #{channel.name}."
+
+
+@bot.tree.command(name="setticketchannel", description="Post a button here that lets members open a support ticket.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="The channel to post the 'Open Ticket' button in")
+async def setticketchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    cfg = get_guild_cfg(interaction.guild_id)
+    cfg["ticket_channel_id"] = channel.id
+    save_config(config)
+
+    embed = discord.Embed(
+        title="🎫 Need help?",
+        description="Click the button below to open a private ticket with staff.",
+        color=discord.Color.blurple(),
+    )
+    try:
+        await channel.send(embed=embed, view=TicketOpenView(interaction.guild_id))
+    except discord.Forbidden:
+        await interaction.response.send_message(f"❌ I don't have permission to post in {channel.mention}.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"✅ Ticket panel posted in {channel.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="ticket", description="Open a private support ticket with staff.")
+async def ticket_command(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    result = await open_ticket(interaction.guild_id, interaction.user.id)
+    await interaction.followup.send(result, ephemeral=True)
 
 
 def build_roster_embed(guild: discord.Guild) -> discord.Embed:
@@ -3671,6 +3849,7 @@ HELP_CATEGORIES = {
         ("/setbirthday / mybirthday / removebirthday", "Set your birthday"),
         ("/setbirthdayrole / _channel", "(admin) Auto-role + shoutout on birthdays"),
         ("/showcase add / remove / setchannel / list", "Self-assignable role showcase with a live channel"),
+        ("/setticketchannel / /ticket", "Support ticket system — private channel per member"),
     ],
 }
 
@@ -3936,6 +4115,7 @@ bot.tree.add_command(showcase_group)
 @backup.error
 @setbirthdayrole.error
 @setbirthdaychannel.error
+@setticketchannel.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -3958,5 +4138,6 @@ if __name__ == "__main__":
         web_mass_add_role, web_mass_remove_role, web_mass_rename,
         web_announce, web_massannounce,
         web_showcase_add, web_showcase_remove,
+        open_ticket, close_ticket, web_set_ticket_channel,
     )
     bot.run(TOKEN)
