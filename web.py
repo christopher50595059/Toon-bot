@@ -303,12 +303,25 @@ SEARCH_JS = """
     const keys = Object.keys(map).filter(k => k.toLowerCase().includes(q)).slice(0, 60);
     const dropdown = inputEl.parentElement.querySelector('.search-dropdown');
     if (!dropdown) return;
+    dropdown.innerHTML = '';
     if (keys.length === 0) {
-      dropdown.innerHTML = '<div class="search-option" style="opacity:.5;cursor:default;">No matches</div>';
+      const empty = document.createElement('div');
+      empty.className = 'search-option';
+      empty.style.opacity = '0.5';
+      empty.style.cursor = 'default';
+      empty.textContent = 'No matches';
+      dropdown.appendChild(empty);
     } else {
-      dropdown.innerHTML = keys.map(k =>
-        `<div class="search-option" onmousedown="selectSearchOption(this, ${JSON.stringify(k)})">${k}</div>`
-      ).join('');
+      keys.forEach(function(k) {
+        const opt = document.createElement('div');
+        opt.className = 'search-option';
+        opt.textContent = k;
+        opt.addEventListener('mousedown', function(e) {
+          e.preventDefault();
+          selectSearchOption(opt, k);
+        });
+        dropdown.appendChild(opt);
+      });
     }
     dropdown.style.display = 'block';
   }
