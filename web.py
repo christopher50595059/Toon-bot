@@ -245,11 +245,11 @@ BASE_STYLE = """
     .sidenav .sidenav-label { display:none; }
   }
   .search-wrap { position:relative; }
-  .search-dropdown {
-    display:none; position:absolute; top:calc(100% + 4px); left:0; right:0; z-index:1000;
-    max-height:260px; overflow-y:auto;
-    background:rgba(8,9,18,0.97); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
-    border:1px solid var(--neon-cyan); box-shadow:0 8px 32px rgba(0,0,0,0.6), 0 0 20px rgba(45,226,255,0.25);
+  .search-dropdown-floating {
+    display:none; position:absolute; z-index:5000;
+    max-height:280px; overflow-y:auto;
+    background:rgba(8,9,18,0.98); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+    border:1px solid var(--neon-cyan); box-shadow:0 8px 32px rgba(0,0,0,0.7), 0 0 24px rgba(45,226,255,0.3);
   }
   .search-option {
     padding:9px 14px; font-family:'Rajdhani',sans-serif; font-size:14px; font-weight:600; color:#d6e2ef;
@@ -290,6 +290,17 @@ SIDENAV_SECTIONS = [
 SEARCH_JS = """
 <script>
   let SEARCH_MAPS = {};
+  let _activeSearchInput = null;
+  let _dropdownEl = null;
+
+  function getDropdownEl() {
+    if (!_dropdownEl) {
+      _dropdownEl = document.createElement('div');
+      _dropdownEl.className = 'search-dropdown-floating';
+      document.body.appendChild(_dropdownEl);
+    }
+    return _dropdownEl;
+  }
 
   function onSearchFocus(inputEl) {
     renderSearchOptions(inputEl, inputEl.value);
@@ -298,11 +309,11 @@ SEARCH_JS = """
     renderSearchOptions(inputEl, inputEl.value);
   }
   function renderSearchOptions(inputEl, query) {
+    _activeSearchInput = inputEl;
     const map = SEARCH_MAPS[inputEl.dataset.map] || {};
     const q = query.toLowerCase();
     const keys = Object.keys(map).filter(k => k.toLowerCase().includes(q)).slice(0, 60);
-    const dropdown = inputEl.parentElement.querySelector('.search-dropdown');
-    if (!dropdown) return;
+    const dropdown = getDropdownEl();
     dropdown.innerHTML = '';
     if (keys.length === 0) {
       const empty = document.createElement('div');
@@ -318,28 +329,36 @@ SEARCH_JS = """
         opt.textContent = k;
         opt.addEventListener('mousedown', function(e) {
           e.preventDefault();
-          selectSearchOption(opt, k);
+          selectSearchOption(k);
         });
         dropdown.appendChild(opt);
       });
     }
+    const rect = inputEl.getBoundingClientRect();
+    dropdown.style.left = (rect.left + window.scrollX) + 'px';
+    dropdown.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+    dropdown.style.width = rect.width + 'px';
     dropdown.style.display = 'block';
   }
-  function selectSearchOption(optEl, label) {
-    const wrap = optEl.closest('.search-wrap');
-    const field = optEl.closest('.field');
-    const input = wrap.querySelector('input[type=text]');
+  function selectSearchOption(label) {
+    if (!_activeSearchInput) return;
+    const field = _activeSearchInput.closest('.field');
     const hidden = field.querySelector('input[type=hidden]');
-    const map = SEARCH_MAPS[input.dataset.map] || {};
-    input.value = label;
+    const map = SEARCH_MAPS[_activeSearchInput.dataset.map] || {};
+    _activeSearchInput.value = label;
     hidden.value = map[label] || '';
-    wrap.querySelector('.search-dropdown').style.display = 'none';
+    getDropdownEl().style.display = 'none';
   }
   document.addEventListener('click', function(e) {
-    if (!e.target.closest('.search-wrap')) {
-      document.querySelectorAll('.search-dropdown').forEach(d => d.style.display = 'none');
+    if (!e.target.closest('.search-wrap') && !e.target.closest('.search-dropdown-floating')) {
+      if (_dropdownEl) _dropdownEl.style.display = 'none';
     }
   });
+  window.addEventListener('scroll', function() {
+    if (_dropdownEl && _dropdownEl.style.display === 'block' && _activeSearchInput) {
+      renderSearchOptions(_activeSearchInput, _activeSearchInput.value);
+    }
+  }, true);
 </script>
 """
 
@@ -581,20 +600,35 @@ def _member_search_field(label="Member", field_name="user_id"):
       <div class="search-wrap">
         <input type="text" data-map="member" placeholder="Type or click to browse..." autocomplete="off"
                oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
-        <div class="search-dropdown"></div>
       </div>
       <input type="hidden" name="{field_name}">
     </div>
     """
 
 
+def _unique_labels(items, name_fn, id_fn, prefix):
+    """Build a {label: id} map where duplicate names get a short ID suffix
+    appended so they don't silently collide/overwrite each other."""
+    names = [name_fn(item) for item in items]
+    counts = {}
+    for n in names:
+        counts[n] = counts.get(n, 0) + 1
+
+    mapping = {}
+    for item in items:
+        name = name_fn(item)
+        item_id = id_fn(item)
+        label = f"{prefix}{name}"
+        if counts[name] > 1:
+            label = f"{prefix}{name} (…{str(item_id)[-4:]})"
+        mapping[label] = str(item_id)
+    return mapping
+
+
 def _role_search_assets(guild):
     """Include ONCE per page. Feeds SEARCH_MAPS.role for any _role_search_field()."""
-    mapping = {}
-    for r in sorted(guild.roles, key=lambda r: r.position, reverse=True):
-        if r.is_default():
-            continue
-        mapping[f"@{r.name}"] = str(r.id)
+    roles = [r for r in sorted(guild.roles, key=lambda r: r.position, reverse=True) if not r.is_default()]
+    mapping = _unique_labels(roles, lambda r: r.name, lambda r: r.id, "@")
     return f"<script>SEARCH_MAPS.role = {json.dumps(mapping)};</script>"
 
 
@@ -606,7 +640,8 @@ def _role_search_field(label="Role", field_name="role_id", guild=None, current_i
     if guild is not None and current_id:
         role = guild.get_role(current_id)
         if role:
-            current_label = f"@{role.name}"
+            dupes = sum(1 for r in guild.roles if r.name == role.name)
+            current_label = f"@{role.name}" if dupes <= 1 else f"@{role.name} (…{str(current_id)[-4:]})"
             current_value = str(current_id)
     return f"""
     <div class="field">
@@ -614,7 +649,6 @@ def _role_search_field(label="Role", field_name="role_id", guild=None, current_i
       <div class="search-wrap">
         <input type="text" data-map="role" value="{current_label}" placeholder="Type or click to browse..." autocomplete="off"
                oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
-        <div class="search-dropdown"></div>
       </div>
       <input type="hidden" name="{field_name}" value="{current_value}">
     </div>
@@ -624,7 +658,7 @@ def _role_search_field(label="Role", field_name="role_id", guild=None, current_i
 def _channel_search_assets(guild, channel_type="text"):
     """Include ONCE per page. Feeds SEARCH_MAPS.channel for any _channel_search_field()."""
     channels = guild.text_channels if channel_type == "text" else guild.voice_channels
-    mapping = {f"#{c.name}": str(c.id) for c in channels}
+    mapping = _unique_labels(channels, lambda c: c.name, lambda c: c.id, "#")
     return f"<script>SEARCH_MAPS.channel = {json.dumps(mapping)};</script>"
 
 
@@ -636,7 +670,8 @@ def _channel_search_field(label="Channel", field_name="channel_id", guild=None, 
     if guild is not None and current_id:
         channel = guild.get_channel(current_id)
         if channel:
-            current_label = f"#{channel.name}"
+            dupes = sum(1 for c in guild.text_channels if c.name == channel.name)
+            current_label = f"#{channel.name}" if dupes <= 1 else f"#{channel.name} (…{str(current_id)[-4:]})"
             current_value = str(current_id)
     return f"""
     <div class="field">
@@ -644,7 +679,6 @@ def _channel_search_field(label="Channel", field_name="channel_id", guild=None, 
       <div class="search-wrap">
         <input type="text" data-map="channel" value="{current_label}" placeholder="Type or click to browse..." autocomplete="off"
                oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
-        <div class="search-dropdown"></div>
       </div>
       <input type="hidden" name="{field_name}" value="{current_value}">
     </div>
@@ -666,11 +700,9 @@ def _rank_search_assets(guild, cfg):
     """Include ONCE per page. Feeds SEARCH_MAPS.rank — limited to configured
     ranks only (not every role in the server)."""
     rank_ids = cfg.get("ranks", [])
-    mapping = {}
-    for rid in rank_ids:
-        role = guild.get_role(rid)
-        if role:
-            mapping[f"@{role.name}"] = str(role.id)
+    roles = [guild.get_role(rid) for rid in rank_ids]
+    roles = [r for r in roles if r is not None]
+    mapping = _unique_labels(roles, lambda r: r.name, lambda r: r.id, "@")
     return f"<script>SEARCH_MAPS.rank = {json.dumps(mapping)};</script>"
 
 
@@ -681,7 +713,6 @@ def _rank_search_field(label="Rank", field_name="rank_id"):
       <div class="search-wrap">
         <input type="text" data-map="rank" placeholder="Type or click to browse..." autocomplete="off"
                oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
-        <div class="search-dropdown"></div>
       </div>
       <input type="hidden" name="{field_name}">
     </div>
