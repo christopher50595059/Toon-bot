@@ -811,7 +811,7 @@ async def web_send_dm(guild_id: int, user_id: int, message: str, actor_id: int) 
     return f"✅ Message sent to {member.display_name}."
 
 
-
+async def web_mass_add_role(guild_id: int, role_id: int, filter_role_id: int, reason: str, actor_id: int) -> str:
     """Mirrors /massaddrole."""
     guild = bot.get_guild(guild_id)
     if guild is None:
