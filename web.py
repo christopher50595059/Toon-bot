@@ -78,6 +78,7 @@ _mvp_start = None
 _mvp_end = None
 _add_ticket_category = None
 _remove_ticket_category = None
+_set_ticket_questions = None
 
 
 # ---------- shared page chrome ----------
@@ -1983,10 +1984,14 @@ def tickets_page(guild_id):
     if ticket_types:
         for type_id, t in ticket_types.items():
             category = guild.get_channel(t.get("category_id"))
+            questions = t.get("questions", [])
+            questions_text = "|".join(questions)
+            q_summary = f"{len(questions)} question(s)" if questions else "no questions"
             type_rows += f"""
             <tr>
               <td>{t['name']}</td>
               <td>{category.name if category else '(deleted category)'}</td>
+              <td>{q_summary}</td>
               <td>
                 <form method="post" action="/dashboard/{guild_id}/tickets/removecategory" style="margin:0;">
                   <input type="hidden" name="type_id" value="{type_id}">
@@ -1994,9 +1999,21 @@ def tickets_page(guild_id):
                 </form>
               </td>
             </tr>
+            <tr>
+              <td colspan="4" style="padding-top:0;">
+                <form method="post" action="/dashboard/{guild_id}/tickets/setquestions" style="display:flex; gap:8px; align-items:flex-end;">
+                  <input type="hidden" name="type_id" value="{type_id}">
+                  <div class="field" style="flex:1; margin-bottom:0;">
+                    <label>Intake questions for {t['name']} (one per line, max 5, leave blank for none)</label>
+                    <input type="text" name="questions" value="{questions_text.replace('"', '&quot;')}" placeholder="e.g. What's your in-game name?|What happened?">
+                  </div>
+                  <button class="btn btn-secondary" type="submit" style="padding:10px 14px; font-size:12px;">Save Questions</button>
+                </form>
+              </td>
+            </tr>
             """
     else:
-        type_rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No ticket types yet — the panel just shows a plain "Open Ticket" button until you add some.</td></tr>'
+        type_rows = '<tr><td colspan="4" class="hint" style="padding:16px;">No ticket types yet — the panel just shows a plain "Open Ticket" button until you add some.</td></tr>'
 
     body = f"""
     <h1>🎫 Tickets</h1>
@@ -2016,14 +2033,15 @@ def tickets_page(guild_id):
 
     <div class="card">
       <h2>🗂️ Ticket categories</h2>
-      <div class="hint" style="margin-bottom:12px;">Add multiple ticket types (e.g. "Support", "Report Player", "Appeal") — each routes to its own Discord category. Members pick one from a dropdown when opening a ticket.</div>
+      <div class="hint" style="margin-bottom:12px;">Add multiple ticket types (e.g. "Support", "Report Player", "Appeal") — each routes to its own Discord category. Members pick one from a dropdown when opening a ticket. Add intake questions below each type and members fill out a short form before their channel is created.</div>
       <div class="log-wrap"><table class="log-table">
-        <tr><th>Type</th><th>Category</th><th></th></tr>
+        <tr><th>Type</th><th>Category</th><th>Questions</th><th></th></tr>
         {type_rows}
       </table></div>
       <form method="post" action="/dashboard/{guild_id}/tickets/addcategory" style="margin-top:14px;">
         <div class="field"><label>Type name</label><input type="text" name="name" placeholder="Report a Player" required></div>
         {_category_search_field()}
+        <div class="field"><label>Intake questions (optional, separate with | , max 5)</label><input type="text" name="questions" placeholder="What's your in-game name?|Who are you reporting?|What happened?"></div>
         <button class="btn" type="submit">Add Category</button>
       </form>
     </div>
@@ -2099,7 +2117,8 @@ def tickets_addcategory_route(guild_id):
         return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Pick a category."))
     if not name:
         return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Enter a type name."))
-    result = _run_async(_add_ticket_category(guild_id, name, category_id, session["user_id"]))
+    questions = [q.strip() for q in request.form.get("questions", "").split("|") if q.strip()][:5]
+    result = _run_async(_add_ticket_category(guild_id, name, category_id, questions, session["user_id"]))
     return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
 
 
@@ -2113,6 +2132,20 @@ def tickets_removecategory_route(guild_id):
     except (KeyError, ValueError):
         return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Invalid ticket type."))
     result = _run_async(_remove_ticket_category(guild_id, type_id, session["user_id"]))
+    return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tickets/setquestions", methods=["POST"])
+def tickets_setquestions_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        type_id = int(request.form["type_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Invalid ticket type."))
+    questions = [q.strip() for q in request.form.get("questions", "").split("|") if q.strip()][:5]
+    result = _run_async(_set_ticket_questions(guild_id, type_id, questions, session["user_id"]))
     return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
 
 
@@ -3101,7 +3134,7 @@ def start_web_app(
     tournament_create, tournament_start, tournament_report,
     gamenight_create, gamenight_cancel,
     mvp_start, mvp_end,
-    add_ticket_category, remove_ticket_category,
+    add_ticket_category, remove_ticket_category, set_ticket_questions,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -3116,7 +3149,7 @@ def start_web_app(
     global _tournament_create, _tournament_start, _tournament_report
     global _gamenight_create, _gamenight_cancel
     global _mvp_start, _mvp_end
-    global _add_ticket_category, _remove_ticket_category
+    global _add_ticket_category, _remove_ticket_category, _set_ticket_questions
     _bot = bot
     _config = config
     _save_config = save_config
@@ -3160,6 +3193,7 @@ def start_web_app(
     _mvp_end = mvp_end
     _add_ticket_category = add_ticket_category
     _remove_ticket_category = remove_ticket_category
+    _set_ticket_questions = set_ticket_questions
 
     port = int(os.environ.get("PORT", 8080))
     thread = threading.Thread(target=_run, args=(port,), daemon=True)

@@ -63,6 +63,7 @@ Commands:
   /setticketchannel channel:<channel>     - (admin only) post an Open Ticket button in this channel
   /addticketcategory name:<text> category:<category> - add a ticket type with its own Discord category
   /removeticketcategory index:<int>       - remove a ticket type
+  /setticketquestions index:<int> [q1..q5] - set intake questions asked before that ticket type opens
   /listticketcategories                   - show all configured ticket types
   /ticket                                 - open a private support ticket with staff
   /setrustserver host:<ip> query_port:<int> [rcon_port] [rcon_password] - (admin only) connect to your Rust server
@@ -1253,6 +1254,29 @@ class TicketCloseView(discord.ui.View):
         await close_ticket(self.guild_id, self.ticket_id, interaction.user.id)
 
 
+class TicketQuestionsModal(discord.ui.Modal):
+    """Shown before a ticket channel is created, when the chosen type has
+    intake questions configured. Discord modals cap at 5 fields."""
+
+    def __init__(self, guild_id: int, ticket_type_id: int, questions: list):
+        super().__init__(title="Open a Ticket")
+        self.guild_id = guild_id
+        self.ticket_type_id = ticket_type_id
+        self._pairs = []
+        for q in questions[:5]:
+            text_input = discord.ui.TextInput(
+                label=q[:45], style=discord.TextStyle.paragraph, required=True, max_length=1000
+            )
+            self._pairs.append((q, text_input))
+            self.add_item(text_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        answers = [(q, ti.value) for q, ti in self._pairs]
+        await interaction.response.defer(ephemeral=True)
+        result = await open_ticket(self.guild_id, interaction.user.id, self.ticket_type_id, answers)
+        await interaction.followup.send(result, ephemeral=True)
+
+
 class TicketTypeSelect(discord.ui.Select):
     def __init__(self, guild_id: int, ticket_types: dict):
         options = [
@@ -1263,8 +1287,17 @@ class TicketTypeSelect(discord.ui.Select):
         self.guild_id = guild_id
 
     async def callback(self, interaction: discord.Interaction):
+        type_id = int(self.values[0])
+        cfg = get_guild_cfg(self.guild_id)
+        type_data = cfg.get("ticket_types", {}).get(str(type_id), {})
+        questions = type_data.get("questions", [])
+
+        if questions:
+            await interaction.response.send_modal(TicketQuestionsModal(self.guild_id, type_id, questions))
+            return
+
         await interaction.response.defer(ephemeral=True)
-        result = await open_ticket(self.guild_id, interaction.user.id, int(self.values[0]))
+        result = await open_ticket(self.guild_id, interaction.user.id, type_id)
         await interaction.followup.send(result, ephemeral=True)
 
 
@@ -1290,7 +1323,7 @@ class TicketOpenView(discord.ui.View):
         await interaction.followup.send(result, ephemeral=True)
 
 
-async def open_ticket(guild_id: int, user_id: int, ticket_type_id: int = None) -> str:
+async def open_ticket(guild_id: int, user_id: int, ticket_type_id: int = None, answers: list = None) -> str:
     """Create a private ticket channel for this member. Used by both the
     Discord button/dropdown and the web dashboard, so behavior is identical
     either way. If ticket_type_id is given, uses that type's category;
@@ -1359,7 +1392,7 @@ async def open_ticket(guild_id: int, user_id: int, ticket_type_id: int = None) -
     cfg["ticket_next_id"] = next_id + 1
     tickets[str(next_id)] = {
         "id": next_id, "user_id": user_id, "channel_id": channel.id, "status": "open",
-        "type_id": ticket_type_id, "type_name": type_name,
+        "type_id": ticket_type_id, "type_name": type_name, "answers": answers or None,
         "created_at": datetime.now(timezone.utc).isoformat(), "closed_at": None, "closed_by": None,
     }
     save_config(config)
@@ -1370,6 +1403,12 @@ async def open_ticket(guild_id: int, user_id: int, ticket_type_id: int = None) -
         color=discord.Color.blurple(),
     )
     await channel.send(embed=embed, view=TicketCloseView(guild_id, next_id))
+
+    if answers:
+        qa_embed = discord.Embed(title="📋 Intake Form", color=discord.Color.blurple())
+        for question, answer in answers:
+            qa_embed.add_field(name=question[:256], value=(answer or "—")[:1024], inline=False)
+        await channel.send(embed=qa_embed)
 
     return f"✅ Ticket created: {channel.mention}"
 
@@ -1484,22 +1523,31 @@ async def refresh_ticket_panel(guild_id: int):
 
 
 @bot.tree.command(name="addticketcategory", description="Add a ticket type (e.g. 'Support', 'Report Player') with its own category.")
-@app_commands.describe(name="What this ticket type is called", category="The Discord category new ticket channels of this type go under")
-async def addticketcategory(interaction: discord.Interaction, name: str, category: discord.CategoryChannel):
+@app_commands.describe(
+    name="What this ticket type is called", category="The Discord category new ticket channels of this type go under",
+    q1="Optional intake question 1", q2="Optional intake question 2", q3="Optional intake question 3",
+    q4="Optional intake question 4", q5="Optional intake question 5",
+)
+async def addticketcategory(
+    interaction: discord.Interaction, name: str, category: discord.CategoryChannel,
+    q1: str = None, q2: str = None, q3: str = None, q4: str = None, q5: str = None,
+):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
 
+    questions = [q for q in [q1, q2, q3, q4, q5] if q]
     cfg = get_guild_cfg(interaction.guild_id)
     types = cfg.setdefault("ticket_types", {})
     next_id = cfg.get("ticket_type_next_id", 1)
     cfg["ticket_type_next_id"] = next_id + 1
-    types[str(next_id)] = {"id": next_id, "name": name, "category_id": category.id}
+    types[str(next_id)] = {"id": next_id, "name": name, "category_id": category.id, "questions": questions}
     save_config(config)
     await refresh_ticket_panel(interaction.guild_id)
 
+    note = f" They'll be asked {len(questions)} question(s) before the channel is created." if questions else ""
     await interaction.response.send_message(
-        f"✅ Added ticket type **{name}** → {category.name}. It'll show up as an option next time someone opens a ticket.",
+        f"✅ Added ticket type **{name}** → {category.name}. It'll show up as an option next time someone opens a ticket.{note}",
         ephemeral=True,
     )
 
@@ -1523,6 +1571,35 @@ async def removeticketcategory(interaction: discord.Interaction, index: int):
     await interaction.response.send_message(f"✅ Removed ticket type **{removed['name']}**.", ephemeral=True)
 
 
+@bot.tree.command(name="setticketquestions", description="Set or update the intake questions asked for a ticket type.")
+@app_commands.describe(
+    index="The number shown in /listticketcategories",
+    q1="Question 1 (leave all blank to remove questions)", q2="Question 2", q3="Question 3", q4="Question 4", q5="Question 5",
+)
+async def setticketquestions(
+    interaction: discord.Interaction, index: int,
+    q1: str = None, q2: str = None, q3: str = None, q4: str = None, q5: str = None,
+):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    types = cfg.get("ticket_types", {})
+    ids = list(types.keys())
+    if index < 1 or index > len(ids):
+        await interaction.response.send_message("❌ Invalid index — check `/listticketcategories`.", ephemeral=True)
+        return
+
+    questions = [q for q in [q1, q2, q3, q4, q5] if q]
+    type_data = types[ids[index - 1]]
+    type_data["questions"] = questions
+    save_config(config)
+
+    note = f"{len(questions)} question(s) set" if questions else "questions cleared"
+    await interaction.response.send_message(f"✅ **{type_data['name']}**: {note}.", ephemeral=True)
+
+
 @bot.tree.command(name="listticketcategories", description="Show all configured ticket types.")
 async def listticketcategories(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
@@ -1535,11 +1612,13 @@ async def listticketcategories(interaction: discord.Interaction):
     lines = []
     for i, t in enumerate(types.values(), start=1):
         category = interaction.guild.get_channel(t.get("category_id"))
-        lines.append(f"{i}. **{t['name']}** → {category.name if category else '(deleted category)'}")
+        q_count = len(t.get("questions", []))
+        q_note = f" ({q_count} question(s))" if q_count else ""
+        lines.append(f"{i}. **{t['name']}** → {category.name if category else '(deleted category)'}{q_note}")
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
-async def web_add_ticket_category(guild_id: int, name: str, category_id: int, actor_id: int) -> str:
+async def web_add_ticket_category(guild_id: int, name: str, category_id: int, questions: list, actor_id: int) -> str:
     """Mirrors /addticketcategory."""
     guild = bot.get_guild(guild_id)
     category = guild.get_channel(category_id) if guild else None
@@ -1550,10 +1629,23 @@ async def web_add_ticket_category(guild_id: int, name: str, category_id: int, ac
     types = cfg.setdefault("ticket_types", {})
     next_id = cfg.get("ticket_type_next_id", 1)
     cfg["ticket_type_next_id"] = next_id + 1
-    types[str(next_id)] = {"id": next_id, "name": name, "category_id": category_id}
+    types[str(next_id)] = {"id": next_id, "name": name, "category_id": category_id, "questions": questions[:5]}
     save_config(config)
     await refresh_ticket_panel(guild_id)
     return f"✅ Added ticket type **{name}** → {category.name}."
+
+
+async def web_set_ticket_questions(guild_id: int, type_id: int, questions: list, actor_id: int) -> str:
+    """Mirrors /setticketquestions."""
+    cfg = get_guild_cfg(guild_id)
+    types = cfg.get("ticket_types", {})
+    type_data = types.get(str(type_id))
+    if type_data is None:
+        return "❌ That ticket type wasn't found."
+    type_data["questions"] = questions[:5]
+    save_config(config)
+    note = f"{len(type_data['questions'])} question(s) set" if type_data["questions"] else "questions cleared"
+    return f"✅ **{type_data['name']}**: {note}."
 
 
 async def web_remove_ticket_category(guild_id: int, type_id: int, actor_id: int) -> str:
@@ -5377,6 +5469,6 @@ if __name__ == "__main__":
         web_tournament_create, web_tournament_start, web_tournament_report,
         web_gamenight_create, web_gamenight_cancel,
         web_mvp_start, web_mvp_end,
-        web_add_ticket_category, web_remove_ticket_category,
+        web_add_ticket_category, web_remove_ticket_category, web_set_ticket_questions,
     )
     bot.run(TOKEN)
