@@ -64,6 +64,20 @@ _set_rust_server = None
 _set_rust_status_channel = None
 _get_rust_status = None
 _rust_command = None
+_set_minecraft_server = None
+_set_minecraft_status_channel = None
+_get_minecraft_status = None
+_minecraft_command = None
+_relay_incoming_webhook = None
+_tournament_create = None
+_tournament_start = None
+_tournament_report = None
+_gamenight_create = None
+_gamenight_cancel = None
+_mvp_start = None
+_mvp_end = None
+_add_ticket_category = None
+_remove_ticket_category = None
 
 
 # ---------- shared page chrome ----------
@@ -275,6 +289,13 @@ SIDENAV_SECTIONS = [
     ]),
     ("Integrations", [
         ("rust_page", "🦀", "Rust Server"),
+        ("minecraft_page", "⛏️", "Minecraft Server"),
+        ("webhooks_page", "🔌", "Webhooks"),
+    ]),
+    ("Events", [
+        ("tournaments_page", "🏆", "Tournaments"),
+        ("gamenights_page", "🎮", "Game Nights"),
+        ("mvp_page", "⭐", "MVP Voting"),
     ]),
     ("Bulk & Broadcast", [
         ("mass_page", "🧰", "Mass Actions"),
@@ -692,6 +713,26 @@ def _channel_search_field(label="Channel", field_name="channel_id", guild=None, 
     """
 
 
+def _category_search_assets(guild):
+    """Include ONCE per page. Feeds SEARCH_MAPS.category for any _category_search_field()."""
+    mapping = _unique_labels(guild.categories, lambda c: c.name, lambda c: c.id, "📁 ")
+    return f"<script>SEARCH_MAPS.category = {json.dumps(mapping)};</script>"
+
+
+def _category_search_field(label="Category", field_name="category_id"):
+    """A type-to-search Discord category picker."""
+    return f"""
+    <div class="field">
+      <label>{label}</label>
+      <div class="search-wrap">
+        <input type="text" data-map="category" placeholder="Type or click to browse..." autocomplete="off"
+               oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
+      </div>
+      <input type="hidden" name="{field_name}">
+    </div>
+    """
+
+
 def _rank_options(guild, cfg):
     """Only the roles configured via /setranks, highest first — used for roster forms."""
     rank_ids = cfg.get("ranks", [])
@@ -774,6 +815,11 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/moderation"><span>🛡️</span>Moderation</a>
         <a class="action-tile" href="/dashboard/{guild_id}/warnings"><span>⚠️</span>Warnings</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust"><span>🦀</span>Rust Server</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/minecraft"><span>⛏️</span>Minecraft Server</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/webhooks"><span>🔌</span>Webhooks</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/tournaments"><span>🏆</span>Tournaments</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/gamenights"><span>🎮</span>Game Nights</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/mvp"><span>⭐</span>MVP Voting</a>
         <a class="action-tile" href="/dashboard/{guild_id}/mass"><span>🧰</span>Mass Actions</a>
         <a class="action-tile" href="/dashboard/{guild_id}/announce"><span>📣</span>Announcements</a>
         <a class="action-tile" href="/dashboard/{guild_id}/showcase"><span>🎭</span>Showcase</a>
@@ -1919,29 +1965,66 @@ def tickets_page(guild_id):
             <tr>
               <td>#{t['id']}</td>
               <td>{owner_name}</td>
+              <td>{t.get('type_name') or '—'}</td>
               <td>{status_pill}</td>
               <td class="hint" style="white-space:nowrap;">{_format_ts(t.get('created_at'))}</td>
               <td>{action_cell}</td>
             </tr>
             """
     else:
-        rows = '<tr><td colspan="5" class="hint" style="padding:16px;">No tickets yet.</td></tr>'
+        rows = '<tr><td colspan="6" class="hint" style="padding:16px;">No tickets yet.</td></tr>'
 
     member_assets = _member_search_assets(guild)
     channel_assets = _channel_search_assets(guild)
+    category_assets = _category_search_assets(guild)
+
+    ticket_types = cfg.get("ticket_types", {})
+    type_rows = ""
+    if ticket_types:
+        for type_id, t in ticket_types.items():
+            category = guild.get_channel(t.get("category_id"))
+            type_rows += f"""
+            <tr>
+              <td>{t['name']}</td>
+              <td>{category.name if category else '(deleted category)'}</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/tickets/removecategory" style="margin:0;">
+                  <input type="hidden" name="type_id" value="{type_id}">
+                  <button class="btn btn-secondary" type="submit" style="padding:6px 12px; font-size:12px;">Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        type_rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No ticket types yet — the panel just shows a plain "Open Ticket" button until you add some.</td></tr>'
 
     body = f"""
     <h1>🎫 Tickets</h1>
     {result_html}
     {member_assets}
     {channel_assets}
+    {category_assets}
 
     <div class="card">
       <h2>📌 Ticket panel channel</h2>
-      <div class="hint" style="margin-bottom:12px;">Posts a button in this channel that lets any member open their own ticket instantly.</div>
+      <div class="hint" style="margin-bottom:12px;">Posts a button (or a type dropdown, if you've added categories below) in this channel that lets any member open their own ticket instantly.</div>
       <form method="post" action="/dashboard/{guild_id}/tickets/setchannel">
         {_channel_search_field("Channel", "channel_id", guild, cfg.get("ticket_channel_id"))}
         <button class="btn" type="submit">Post Ticket Panel</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🗂️ Ticket categories</h2>
+      <div class="hint" style="margin-bottom:12px;">Add multiple ticket types (e.g. "Support", "Report Player", "Appeal") — each routes to its own Discord category. Members pick one from a dropdown when opening a ticket.</div>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Type</th><th>Category</th><th></th></tr>
+        {type_rows}
+      </table></div>
+      <form method="post" action="/dashboard/{guild_id}/tickets/addcategory" style="margin-top:14px;">
+        <div class="field"><label>Type name</label><input type="text" name="name" placeholder="Report a Player" required></div>
+        {_category_search_field()}
+        <button class="btn" type="submit">Add Category</button>
       </form>
     </div>
 
@@ -1957,7 +2040,7 @@ def tickets_page(guild_id):
     <div class="card">
       <h2>All tickets</h2>
       <div class="log-wrap"><table class="log-table">
-        <tr><th>#</th><th>Member</th><th>Status</th><th>Opened</th><th></th></tr>
+        <tr><th>#</th><th>Member</th><th>Type</th><th>Status</th><th>Opened</th><th></th></tr>
         {rows}
       </table></div>
     </div>
@@ -2001,6 +2084,35 @@ def tickets_setchannel_route(guild_id):
     except (KeyError, ValueError):
         return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Pick a channel."))
     result = _run_async(_set_ticket_channel(guild_id, channel_id, session["user_id"]))
+    return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tickets/addcategory", methods=["POST"])
+def tickets_addcategory_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    try:
+        category_id = int(request.form["category_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Pick a category."))
+    if not name:
+        return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Enter a type name."))
+    result = _run_async(_add_ticket_category(guild_id, name, category_id, session["user_id"]))
+    return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tickets/removecategory", methods=["POST"])
+def tickets_removecategory_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        type_id = int(request.form["type_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Invalid ticket type."))
+    result = _run_async(_remove_ticket_category(guild_id, type_id, session["user_id"]))
     return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
 
 
@@ -2392,6 +2504,565 @@ def rust_command_route(guild_id):
     return redirect(url_for("rust_page", guild_id=guild_id, result=f"📟 {result}"))
 
 
+# ---------- Minecraft server integration ----------
+
+@app.route("/dashboard/<int:guild_id>/minecraft")
+def minecraft_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    status = _run_async(_get_minecraft_status(guild_id))
+    if status.get("error"):
+        status_html = f'<div class="hint" style="color:#ff8080;">⚠️ {status["error"]}</div>'
+    else:
+        info = status["info"]
+        rcon_line = '<div class="field"><label>RCON</label><div>🟢 Configured</div></div>' if status.get("rcon_configured") else ""
+        status_html = f"""
+        <div class="grid-2">
+          <div class="field"><label>MOTD</label><div>{info['motd']}</div></div>
+          <div class="field"><label>Players</label><div>{info['online']} / {info['max']}</div></div>
+          <div class="field"><label>Version</label><div>{info['version']}</div></div>
+          {rcon_line}
+        </div>
+        """
+
+    channel_assets = _channel_search_assets(guild)
+
+    body = f"""
+    <h1>⛏️ Minecraft Server</h1>
+    {result_html}
+    {channel_assets}
+
+    <div class="card">
+      <h2>📡 Live Status</h2>
+      {status_html}
+    </div>
+
+    <div class="card">
+      <h2>🔗 Connection</h2>
+      <div class="hint" style="margin-bottom:12px;">Status works out of the box on any vanilla Java Edition server. RCON needs enable-rcon=true set in server.properties.</div>
+      <form method="post" action="/dashboard/{guild_id}/minecraft/connect">
+        <div class="grid-2">
+          <div class="field"><label>Host / IP</label><input type="text" name="host" value="{cfg.get('mc_host', '')}" placeholder="123.45.67.89" required></div>
+          <div class="field"><label>Port</label><input type="number" name="port" value="{cfg.get('mc_port', 25565)}" placeholder="25565" required></div>
+        </div>
+        <div class="grid-2">
+          <div class="field"><label>RCON Port (optional)</label><input type="number" name="rcon_port" value="{cfg.get('mc_rcon_port', '')}" placeholder="25575"></div>
+          <div class="field"><label>RCON Password (optional)</label><input type="password" name="rcon_password" placeholder="Leave blank to keep unchanged"></div>
+        </div>
+        <button class="btn" type="submit">Save & Connect</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>📌 Status Channel</h2>
+      <div class="hint" style="margin-bottom:12px;">Posts a live-updating status embed, refreshed automatically every 2 minutes.</div>
+      <form method="post" action="/dashboard/{guild_id}/minecraft/statuschannel">
+        {_channel_search_field("Channel", "channel_id", guild, cfg.get("mc_status_channel_id"))}
+        <button class="btn" type="submit">Set Status Channel</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>⌨️ RCON Console</h2>
+      <div class="hint" style="margin-bottom:12px;">Run a raw command on the server (without the leading /). Requires RCON to be set up.</div>
+      <form method="post" action="/dashboard/{guild_id}/minecraft/command">
+        <div class="field"><label>Command</label><input type="text" name="cmd" placeholder="list" required></div>
+        <button class="btn btn-secondary" type="submit">Run</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Minecraft Server", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/connect", methods=["POST"])
+def minecraft_connect_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    host = request.form.get("host", "").strip()
+    try:
+        port = int(request.form["port"])
+    except (KeyError, ValueError):
+        return redirect(url_for("minecraft_page", guild_id=guild_id, result="❌ Enter a valid port."))
+    if not host:
+        return redirect(url_for("minecraft_page", guild_id=guild_id, result="❌ Enter a host/IP."))
+
+    rcon_port = None
+    rcon_password = request.form.get("rcon_password", "").strip() or None
+    if request.form.get("rcon_port"):
+        try:
+            rcon_port = int(request.form["rcon_port"])
+        except ValueError:
+            rcon_port = None
+
+    cfg = _get_guild_cfg(guild_id)
+    if rcon_port and not rcon_password:
+        rcon_password = cfg.get("mc_rcon_password")
+
+    result = _run_async(_set_minecraft_server(guild_id, host, port, rcon_port, rcon_password, session["user_id"]))
+    return redirect(url_for("minecraft_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/statuschannel", methods=["POST"])
+def minecraft_statuschannel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw = request.form.get("channel_id", "")
+    channel_id = int(raw) if raw else None
+    result = _run_async(_set_minecraft_status_channel(guild_id, channel_id, session["user_id"]))
+    return redirect(url_for("minecraft_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/command", methods=["POST"])
+def minecraft_command_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    cmd = request.form.get("cmd", "").strip()
+    if not cmd:
+        return redirect(url_for("minecraft_page", guild_id=guild_id, result="❌ Enter a command."))
+    result = _run_async(_minecraft_command(guild_id, cmd, session["user_id"]))
+    return redirect(url_for("minecraft_page", guild_id=guild_id, result=f"📟 {result}"))
+
+
+# ---------- generic incoming webhooks ----------
+
+@app.route("/dashboard/<int:guild_id>/webhooks")
+def webhooks_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    token = cfg.get("webhook_token")
+    if token:
+        webhook_url = f"{DASHBOARD_URL}/webhook/{guild_id}/{token}"
+        url_html = f"""
+        <div class="field">
+          <label>Your webhook URL</label>
+          <input type="text" value="{webhook_url}" readonly onclick="this.select()">
+        </div>
+        <div class="hint">POST JSON to this URL from any external service (GitHub, UptimeRobot, Zapier, IFTTT, etc.). It looks for a "title" and "text"/"message" field — anything else gets posted as raw JSON.</div>
+        """
+    else:
+        url_html = '<div class="hint">No webhook URL generated yet — click below to create one.</div>'
+
+    channel_assets = _channel_search_assets(guild)
+
+    body = f"""
+    <h1>🔌 Incoming Webhooks</h1>
+    {result_html}
+    {channel_assets}
+
+    <div class="card">
+      <h2>Your webhook</h2>
+      {url_html}
+      <form method="post" action="/dashboard/{guild_id}/webhooks/regenerate" style="margin-top:14px;">
+        <button class="btn btn-secondary" type="submit">{"Regenerate URL" if token else "Generate Webhook URL"}</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>📌 Target channel</h2>
+      <form method="post" action="/dashboard/{guild_id}/webhooks/channel">
+        {_channel_search_field("Channel", "channel_id", guild, cfg.get("webhook_channel_id"))}
+        <button class="btn" type="submit">Set Channel</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Webhooks", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/webhooks/regenerate", methods=["POST"])
+def webhooks_regenerate_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    cfg = _get_guild_cfg(guild_id)
+    cfg["webhook_token"] = secrets.token_urlsafe(24)
+    _save_config(_config)
+    return redirect(url_for("webhooks_page", guild_id=guild_id, result="✅ New webhook URL generated — update it wherever the old one was used."))
+
+
+@app.route("/dashboard/<int:guild_id>/webhooks/channel", methods=["POST"])
+def webhooks_channel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw = request.form.get("channel_id", "")
+    cfg = _get_guild_cfg(guild_id)
+    if not raw:
+        cfg.pop("webhook_channel_id", None)
+        _save_config(_config)
+        return redirect(url_for("webhooks_page", guild_id=guild_id, result="✅ Webhook posting disabled."))
+    try:
+        channel_id = int(raw)
+    except ValueError:
+        return redirect(url_for("webhooks_page", guild_id=guild_id, result="❌ Pick a channel."))
+    cfg["webhook_channel_id"] = channel_id
+    _save_config(_config)
+    channel = guild.get_channel(channel_id)
+    name = f"#{channel.name}" if channel else "that channel"
+    return redirect(url_for("webhooks_page", guild_id=guild_id, result=f"✅ Webhooks will now post to {name}."))
+
+
+@app.route("/webhook/<int:guild_id>/<token>", methods=["POST"])
+def incoming_webhook(guild_id, token):
+    """Public endpoint — no login required, external services post here directly.
+    Protected only by the random token in the URL."""
+    cfg = _get_guild_cfg(guild_id)
+    stored_token = cfg.get("webhook_token")
+    if not stored_token or token != stored_token:
+        return {"error": "invalid token"}, 403
+
+    payload = request.get_json(silent=True) or {"text": request.get_data(as_text=True)}
+    ok = _run_async(_relay_incoming_webhook(guild_id, payload))
+    if ok:
+        return {"status": "ok"}, 200
+    return {"error": "no channel configured or send failed"}, 400
+
+
+# ---------- tournaments ----------
+
+@app.route("/dashboard/<int:guild_id>/tournaments")
+def tournaments_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    tournaments = cfg.get("tournaments", {})
+    rows = ""
+    if tournaments:
+        for name, data in tournaments.items():
+            status = data.get("status", "signup")
+            status_color = {"signup": "#5ee0a0", "in_progress": "#f5c15c", "complete": "#80848e"}.get(status, "#80848e")
+            status_pill = f'<span class="pill" style="background:{status_color}22; border-color:{status_color}55; color:{status_color};">{status}</span>'
+            extra = ""
+            if status == "complete":
+                champ = guild.get_member(data.get("champion"))
+                extra = f" — 🏆 {champ.display_name if champ else 'Unknown'}"
+            rows += f"<tr><td>{name}</td><td>{status_pill}{extra}</td><td>{len(data.get('players', []))}</td></tr>"
+    else:
+        rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No tournaments yet.</td></tr>'
+
+    member_assets = _member_search_assets(guild)
+    channel_assets = _channel_search_assets(guild)
+
+    body = f"""
+    <h1>🏆 Tournaments</h1>
+    {result_html}
+    {member_assets}
+    {channel_assets}
+
+    <div class="card">
+      <h2>Current tournaments</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Name</th><th>Status</th><th>Players</th></tr>
+        {rows}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>➕ Create a tournament</h2>
+      <div class="hint" style="margin-bottom:12px;">Posts a sign-up embed with Join/Leave buttons.</div>
+      <form method="post" action="/dashboard/{guild_id}/tournaments/create">
+        <div class="field"><label>Tournament name</label><input type="text" name="name" placeholder="Summer Scrims" required></div>
+        {_channel_search_field()}
+        <button class="btn" type="submit">Create</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>▶️ Start a tournament</h2>
+      <div class="hint" style="margin-bottom:12px;">Locks sign-ups and generates the first round.</div>
+      <form method="post" action="/dashboard/{guild_id}/tournaments/start">
+        <div class="field"><label>Tournament name</label><input type="text" name="name" required></div>
+        <button class="btn" type="submit">Start</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🏅 Report a match result</h2>
+      <form method="post" action="/dashboard/{guild_id}/tournaments/report">
+        <div class="grid-2">
+          <div class="field"><label>Tournament name</label><input type="text" name="name" required></div>
+          <div class="field"><label>Match number</label><input type="number" name="match" min="1" required></div>
+        </div>
+        {_member_search_field("Winner", "winner_id")}
+        <button class="btn btn-secondary" type="submit">Report Result</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Tournaments", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/tournaments/create", methods=["POST"])
+def tournaments_create_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    try:
+        channel_id = int(request.form["channel_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Fill in a name and pick a channel."))
+    if not name:
+        return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Enter a tournament name."))
+    result = _run_async(_tournament_create(guild_id, name, channel_id, session["user_id"]))
+    return redirect(url_for("tournaments_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tournaments/start", methods=["POST"])
+def tournaments_start_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    if not name:
+        return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Enter a tournament name."))
+    result = _run_async(_tournament_start(guild_id, name, session["user_id"]))
+    return redirect(url_for("tournaments_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tournaments/report", methods=["POST"])
+def tournaments_report_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    try:
+        match = int(request.form["match"])
+        winner_id = int(request.form["winner_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Fill in all fields correctly."))
+    if not name:
+        return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Enter a tournament name."))
+    result = _run_async(_tournament_report(guild_id, name, match, winner_id, session["user_id"]))
+    return redirect(url_for("tournaments_page", guild_id=guild_id, result=result))
+
+
+# ---------- game nights ----------
+
+@app.route("/dashboard/<int:guild_id>/gamenights")
+def gamenights_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    gamenights = cfg.get("gamenights", {})
+    now = datetime.now(timezone.utc)
+    upcoming = sorted(
+        (d for d in gamenights.values() if datetime.fromisoformat(d["when"]) > now),
+        key=lambda d: d["when"],
+    )
+    rows = ""
+    if upcoming:
+        for d in upcoming:
+            rows += f"""
+            <tr>
+              <td>#{d['id']}</td>
+              <td>{d['game']}</td>
+              <td class="hint" style="white-space:nowrap;">{_format_ts(d['when'])}</td>
+              <td>{len(d['going'])} going</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/gamenights/cancel" style="margin:0;">
+                  <input type="hidden" name="gamenight_id" value="{d['id']}">
+                  <button class="btn btn-secondary" type="submit" style="padding:6px 12px; font-size:12px;">Cancel</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="5" class="hint" style="padding:16px;">Nothing scheduled right now.</td></tr>'
+
+    channel_assets = _channel_search_assets(guild)
+
+    body = f"""
+    <h1>🎮 Game Nights</h1>
+    {result_html}
+    {channel_assets}
+
+    <div class="card">
+      <h2>Upcoming</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>#</th><th>Game</th><th>When</th><th>RSVPs</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>➕ Schedule a game night</h2>
+      <div class="hint" style="margin-bottom:12px;">Posts an RSVP embed with Going/Maybe/Can't Go buttons. Time is in UTC.</div>
+      <form method="post" action="/dashboard/{guild_id}/gamenights/create">
+        <div class="field"><label>Game</label><input type="text" name="game" placeholder="Valorant" required></div>
+        <div class="grid-2">
+          <div class="field"><label>Date</label><input type="date" name="date" required></div>
+          <div class="field"><label>Time (UTC, 24-hour)</label><input type="time" name="time" required></div>
+        </div>
+        {_channel_search_field()}
+        <button class="btn" type="submit">Schedule</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Game Nights", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/gamenights/create", methods=["POST"])
+def gamenights_create_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    game = request.form.get("game", "").strip()
+    date = request.form.get("date", "").strip()
+    time_str = request.form.get("time", "").strip()
+    try:
+        channel_id = int(request.form["channel_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("gamenights_page", guild_id=guild_id, result="❌ Pick a channel."))
+    if not game or not date or not time_str:
+        return redirect(url_for("gamenights_page", guild_id=guild_id, result="❌ Fill in the game, date, and time."))
+
+    when_iso = f"{date}T{time_str}:00+00:00"
+    result = _run_async(_gamenight_create(guild_id, game, when_iso, channel_id, session["user_id"]))
+    return redirect(url_for("gamenights_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/gamenights/cancel", methods=["POST"])
+def gamenights_cancel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        gamenight_id = int(request.form["gamenight_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("gamenights_page", guild_id=guild_id, result="❌ Invalid game night."))
+    result = _run_async(_gamenight_cancel(guild_id, gamenight_id, session["user_id"]))
+    return redirect(url_for("gamenights_page", guild_id=guild_id, result=result))
+
+
+# ---------- MVP voting ----------
+
+@app.route("/dashboard/<int:guild_id>/mvp")
+def mvp_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    poll = cfg.get("mvp_poll")
+    if poll:
+        tally = {}
+        for cid in poll["votes"].values():
+            tally[cid] = tally.get(cid, 0) + 1
+        rows = ""
+        for cid in poll["candidates"]:
+            m = guild.get_member(cid)
+            name = m.display_name if m else f"Unknown ({cid})"
+            rows += f"<tr><td>{name}</td><td>{tally.get(cid, 0)} vote(s)</td></tr>"
+        active_html = f"""
+        <div class="card">
+          <h2>⭐ Active vote: {poll['title']}</h2>
+          <div class="log-wrap"><table class="log-table">
+            <tr><th>Candidate</th><th>Votes</th></tr>
+            {rows}
+          </table></div>
+          <form method="post" action="/dashboard/{guild_id}/mvp/end" style="margin-top:14px;">
+            <button class="btn btn-secondary" type="submit">End Vote & Announce Winner</button>
+          </form>
+        </div>
+        """
+    else:
+        active_html = '<div class="card"><h2>No active vote</h2><div class="hint">Start one below.</div></div>'
+
+    member_assets = _member_search_assets(guild)
+    channel_assets = _channel_search_assets(guild)
+
+    new_vote_html = ""
+    if not poll:
+        new_vote_html = f"""
+        <div class="card">
+          <h2>➕ Start an MVP vote</h2>
+          <div class="hint" style="margin-bottom:12px;">Pick up to 5 candidates. Posts a vote embed with a button per candidate.</div>
+          <form method="post" action="/dashboard/{guild_id}/mvp/start">
+            <div class="field"><label>Title</label><input type="text" name="title" placeholder="Scrim vs Team X" required></div>
+            {_member_search_field("Candidate 1", "user1")}
+            {_member_search_field("Candidate 2 (optional)", "user2")}
+            {_member_search_field("Candidate 3 (optional)", "user3")}
+            {_member_search_field("Candidate 4 (optional)", "user4")}
+            {_member_search_field("Candidate 5 (optional)", "user5")}
+            {_channel_search_field()}
+            <button class="btn" type="submit">Start Vote</button>
+          </form>
+        </div>
+        """
+
+    body = f"""
+    <h1>⭐ MVP Voting</h1>
+    {result_html}
+    {member_assets}
+    {channel_assets}
+    {active_html}
+    {new_vote_html}
+    """
+    return render_page(f"{guild.name} — MVP Voting", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/mvp/start", methods=["POST"])
+def mvp_start_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    title = request.form.get("title", "").strip()
+    try:
+        channel_id = int(request.form["channel_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("mvp_page", guild_id=guild_id, result="❌ Pick a channel."))
+    if not title:
+        return redirect(url_for("mvp_page", guild_id=guild_id, result="❌ Enter a title."))
+
+    candidate_ids = []
+    for field in ("user1", "user2", "user3", "user4", "user5"):
+        raw = request.form.get(field, "")
+        if raw:
+            try:
+                candidate_ids.append(int(raw))
+            except ValueError:
+                pass
+
+    result = _run_async(_mvp_start(guild_id, title, candidate_ids, channel_id, session["user_id"]))
+    return redirect(url_for("mvp_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/mvp/end", methods=["POST"])
+def mvp_end_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    result = _run_async(_mvp_end(guild_id, session["user_id"]))
+    return redirect(url_for("mvp_page", guild_id=guild_id, result=result))
+
+
 # ---------- backup download ----------
 
 @app.route("/dashboard/<int:guild_id>/backup")
@@ -2425,6 +3096,12 @@ def start_web_app(
     open_ticket, close_ticket, set_ticket_channel,
     send_dm,
     set_rust_server, set_rust_status_channel, get_rust_status, rust_command,
+    set_minecraft_server, set_minecraft_status_channel, get_minecraft_status, minecraft_command,
+    relay_incoming_webhook,
+    tournament_create, tournament_start, tournament_report,
+    gamenight_create, gamenight_cancel,
+    mvp_start, mvp_end,
+    add_ticket_category, remove_ticket_category,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -2434,6 +3111,12 @@ def start_web_app(
     global _showcase_add, _showcase_remove, _open_ticket, _close_ticket, _set_ticket_channel
     global _send_dm
     global _set_rust_server, _set_rust_status_channel, _get_rust_status, _rust_command
+    global _set_minecraft_server, _set_minecraft_status_channel, _get_minecraft_status, _minecraft_command
+    global _relay_incoming_webhook
+    global _tournament_create, _tournament_start, _tournament_report
+    global _gamenight_create, _gamenight_cancel
+    global _mvp_start, _mvp_end
+    global _add_ticket_category, _remove_ticket_category
     _bot = bot
     _config = config
     _save_config = save_config
@@ -2463,6 +3146,20 @@ def start_web_app(
     _set_rust_status_channel = set_rust_status_channel
     _get_rust_status = get_rust_status
     _rust_command = rust_command
+    _set_minecraft_server = set_minecraft_server
+    _set_minecraft_status_channel = set_minecraft_status_channel
+    _get_minecraft_status = get_minecraft_status
+    _minecraft_command = minecraft_command
+    _relay_incoming_webhook = relay_incoming_webhook
+    _tournament_create = tournament_create
+    _tournament_start = tournament_start
+    _tournament_report = tournament_report
+    _gamenight_create = gamenight_create
+    _gamenight_cancel = gamenight_cancel
+    _mvp_start = mvp_start
+    _mvp_end = mvp_end
+    _add_ticket_category = add_ticket_category
+    _remove_ticket_category = remove_ticket_category
 
     port = int(os.environ.get("PORT", 8080))
     thread = threading.Thread(target=_run, args=(port,), daemon=True)

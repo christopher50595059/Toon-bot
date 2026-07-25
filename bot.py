@@ -61,12 +61,19 @@ Commands:
   /showcase setchannel channel:<channel>  - (admin only) post the live showcase here
   /showcase list                          - show the current showcase
   /setticketchannel channel:<channel>     - (admin only) post an Open Ticket button in this channel
+  /addticketcategory name:<text> category:<category> - add a ticket type with its own Discord category
+  /removeticketcategory index:<int>       - remove a ticket type
+  /listticketcategories                   - show all configured ticket types
   /ticket                                 - open a private support ticket with staff
   /setrustserver host:<ip> query_port:<int> [rcon_port] [rcon_password] - (admin only) connect to your Rust server
   /setrustchatchannel [channel]           - (admin only) bridge Discord chat with in-game chat (needs RCON)
   /setruststatuschannel [channel]         - (admin only) post a live Rust server status embed
   /ruststatus                             - show current Rust server status
   /rustcommand cmd:<text>                 - run an RCON command on the Rust server
+  /setminecraftserver host:<ip> [port] [rcon_port] [rcon_password] - (admin only) connect to your Minecraft server
+  /setminecraftstatuschannel [channel]    - (admin only) post a live Minecraft server status embed
+  /minecraftstatus                        - show current Minecraft server status
+  /minecraftcommand cmd:<text>            - run an RCON command on the Minecraft server
   /evaluate [user]                        - show message activity for the current week (leaderboard or one person); auto-resets weekly
   /setbirthday month:<1-12> day:<1-31>    - set your own birthday
   /removebirthday                         - remove your saved birthday
@@ -199,6 +206,8 @@ async def on_ready():
         birthday_check_loop.start()
     if not rust_status_loop.is_running():
         rust_status_loop.start()
+    if not minecraft_status_loop.is_running():
+        minecraft_status_loop.start()
 
     # Reconnect any Rust RCON connections that were configured before a restart.
     for guild_id_str, cfg in config.items():
@@ -1244,21 +1253,48 @@ class TicketCloseView(discord.ui.View):
         await close_ticket(self.guild_id, self.ticket_id, interaction.user.id)
 
 
+class TicketTypeSelect(discord.ui.Select):
+    def __init__(self, guild_id: int, ticket_types: dict):
+        options = [
+            discord.SelectOption(label=t["name"][:100], value=str(t["id"]))
+            for t in ticket_types.values()
+        ][:25]
+        super().__init__(placeholder="Choose a ticket type...", options=options)
+        self.guild_id = guild_id
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        result = await open_ticket(self.guild_id, interaction.user.id, int(self.values[0]))
+        await interaction.followup.send(result, ephemeral=True)
+
+
 class TicketOpenView(discord.ui.View):
+    """Shows a type-picker dropdown if ticket categories are configured,
+    otherwise falls back to a single plain "Open Ticket" button."""
+
     def __init__(self, guild_id: int):
         super().__init__(timeout=None)
         self.guild_id = guild_id
+        cfg = get_guild_cfg(guild_id)
+        ticket_types = cfg.get("ticket_types", {})
+        if ticket_types:
+            self.add_item(TicketTypeSelect(guild_id, ticket_types))
+        else:
+            button = discord.ui.Button(label="Open Ticket", style=discord.ButtonStyle.primary, emoji="🎫")
+            button.callback = self._open_simple
+            self.add_item(button)
 
-    @discord.ui.button(label="Open Ticket", style=discord.ButtonStyle.primary, emoji="🎫")
-    async def open(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _open_simple(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         result = await open_ticket(self.guild_id, interaction.user.id)
         await interaction.followup.send(result, ephemeral=True)
 
 
-async def open_ticket(guild_id: int, user_id: int) -> str:
+async def open_ticket(guild_id: int, user_id: int, ticket_type_id: int = None) -> str:
     """Create a private ticket channel for this member. Used by both the
-    Discord button and the web dashboard, so behavior is identical either way."""
+    Discord button/dropdown and the web dashboard, so behavior is identical
+    either way. If ticket_type_id is given, uses that type's category;
+    otherwise falls back to the single default ticket_category_id (if set)."""
     guild = bot.get_guild(guild_id)
     if guild is None:
         return "❌ Server not found."
@@ -1288,18 +1324,33 @@ async def open_ticket(guild_id: int, user_id: int) -> str:
         if manager_role:
             overwrites[manager_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
+    type_name = None
+    category_id = None
+    if ticket_type_id is not None:
+        type_data = cfg.get("ticket_types", {}).get(str(ticket_type_id))
+        if type_data is None:
+            return "❌ That ticket type no longer exists."
+        type_name = type_data["name"]
+        category_id = type_data.get("category_id")
+    else:
+        category_id = cfg.get("ticket_category_id")
+
     category = None
-    category_id = cfg.get("ticket_category_id")
     if category_id:
         maybe_category = guild.get_channel(category_id)
         if isinstance(maybe_category, discord.CategoryChannel):
             category = maybe_category
 
     safe_name = "".join(c for c in member.name.lower() if c.isalnum() or c == "-")[:20] or "ticket"
+    channel_name = f"ticket-{safe_name}"
+    if type_name:
+        type_slug = "".join(c for c in type_name.lower() if c.isalnum() or c == "-")[:15] or "ticket"
+        channel_name = f"{type_slug}-{safe_name}"[:100]
+
     try:
         channel = await guild.create_text_channel(
-            name=f"ticket-{safe_name}", category=category, overwrites=overwrites,
-            reason=f"Ticket opened by {member}",
+            name=channel_name, category=category, overwrites=overwrites,
+            reason=f"Ticket opened by {member}" + (f" ({type_name})" if type_name else ""),
         )
     except discord.Forbidden:
         return "❌ I don't have permission to create channels here."
@@ -1308,12 +1359,13 @@ async def open_ticket(guild_id: int, user_id: int) -> str:
     cfg["ticket_next_id"] = next_id + 1
     tickets[str(next_id)] = {
         "id": next_id, "user_id": user_id, "channel_id": channel.id, "status": "open",
+        "type_id": ticket_type_id, "type_name": type_name,
         "created_at": datetime.now(timezone.utc).isoformat(), "closed_at": None, "closed_by": None,
     }
     save_config(config)
 
     embed = discord.Embed(
-        title=f"🎫 Ticket #{next_id}",
+        title=f"🎫 Ticket #{next_id}" + (f" — {type_name}" if type_name else ""),
         description=f"Hey {member.mention}! Staff will be with you shortly. Explain what you need help with below.",
         color=discord.Color.blurple(),
     )
@@ -1371,7 +1423,9 @@ async def web_set_ticket_channel(guild_id: int, channel_id: int, actor_id: int) 
         color=discord.Color.blurple(),
     )
     try:
-        await channel.send(embed=embed, view=TicketOpenView(guild_id))
+        message = await channel.send(embed=embed, view=TicketOpenView(guild_id))
+        cfg["ticket_panel_message_id"] = message.id
+        save_config(config)
     except discord.Forbidden:
         return f"❌ I don't have permission to post in #{channel.name}."
     return f"✅ Ticket panel posted in #{channel.name}."
@@ -1391,7 +1445,9 @@ async def setticketchannel(interaction: discord.Interaction, channel: discord.Te
         color=discord.Color.blurple(),
     )
     try:
-        await channel.send(embed=embed, view=TicketOpenView(interaction.guild_id))
+        message = await channel.send(embed=embed, view=TicketOpenView(interaction.guild_id))
+        cfg["ticket_panel_message_id"] = message.id
+        save_config(config)
     except discord.Forbidden:
         await interaction.response.send_message(f"❌ I don't have permission to post in {channel.mention}.", ephemeral=True)
         return
@@ -1404,6 +1460,112 @@ async def ticket_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     result = await open_ticket(interaction.guild_id, interaction.user.id)
     await interaction.followup.send(result, ephemeral=True)
+
+
+async def refresh_ticket_panel(guild_id: int):
+    """Re-posts the ticket panel's view so the type dropdown reflects the
+    current list of categories. Called whenever categories are added/removed."""
+    cfg = get_guild_cfg(guild_id)
+    channel_id = cfg.get("ticket_channel_id")
+    message_id = cfg.get("ticket_panel_message_id")
+    if not channel_id or not message_id:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+    try:
+        message = await channel.fetch_message(message_id)
+        await message.edit(view=TicketOpenView(guild_id))
+    except (discord.NotFound, discord.Forbidden):
+        pass
+
+
+@bot.tree.command(name="addticketcategory", description="Add a ticket type (e.g. 'Support', 'Report Player') with its own category.")
+@app_commands.describe(name="What this ticket type is called", category="The Discord category new ticket channels of this type go under")
+async def addticketcategory(interaction: discord.Interaction, name: str, category: discord.CategoryChannel):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    types = cfg.setdefault("ticket_types", {})
+    next_id = cfg.get("ticket_type_next_id", 1)
+    cfg["ticket_type_next_id"] = next_id + 1
+    types[str(next_id)] = {"id": next_id, "name": name, "category_id": category.id}
+    save_config(config)
+    await refresh_ticket_panel(interaction.guild_id)
+
+    await interaction.response.send_message(
+        f"✅ Added ticket type **{name}** → {category.name}. It'll show up as an option next time someone opens a ticket.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="removeticketcategory", description="Remove a ticket type.")
+@app_commands.describe(index="The number shown in /listticketcategories")
+async def removeticketcategory(interaction: discord.Interaction, index: int):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    types = cfg.get("ticket_types", {})
+    ids = list(types.keys())
+    if index < 1 or index > len(ids):
+        await interaction.response.send_message("❌ Invalid index — check `/listticketcategories`.", ephemeral=True)
+        return
+    removed = types.pop(ids[index - 1])
+    save_config(config)
+    await refresh_ticket_panel(interaction.guild_id)
+    await interaction.response.send_message(f"✅ Removed ticket type **{removed['name']}**.", ephemeral=True)
+
+
+@bot.tree.command(name="listticketcategories", description="Show all configured ticket types.")
+async def listticketcategories(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    types = cfg.get("ticket_types", {})
+    if not types:
+        await interaction.response.send_message(
+            "No ticket types configured yet — tickets currently just use the plain 'Open Ticket' button.", ephemeral=True
+        )
+        return
+    lines = []
+    for i, t in enumerate(types.values(), start=1):
+        category = interaction.guild.get_channel(t.get("category_id"))
+        lines.append(f"{i}. **{t['name']}** → {category.name if category else '(deleted category)'}")
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+async def web_add_ticket_category(guild_id: int, name: str, category_id: int, actor_id: int) -> str:
+    """Mirrors /addticketcategory."""
+    guild = bot.get_guild(guild_id)
+    category = guild.get_channel(category_id) if guild else None
+    if not isinstance(category, discord.CategoryChannel):
+        return "❌ Couldn't find that category."
+
+    cfg = get_guild_cfg(guild_id)
+    types = cfg.setdefault("ticket_types", {})
+    next_id = cfg.get("ticket_type_next_id", 1)
+    cfg["ticket_type_next_id"] = next_id + 1
+    types[str(next_id)] = {"id": next_id, "name": name, "category_id": category_id}
+    save_config(config)
+    await refresh_ticket_panel(guild_id)
+    return f"✅ Added ticket type **{name}** → {category.name}."
+
+
+async def web_remove_ticket_category(guild_id: int, type_id: int, actor_id: int) -> str:
+    """Mirrors /removeticketcategory."""
+    cfg = get_guild_cfg(guild_id)
+    types = cfg.get("ticket_types", {})
+    removed = types.pop(str(type_id), None)
+    if removed is None:
+        return "❌ That ticket type wasn't found."
+    save_config(config)
+    await refresh_ticket_panel(guild_id)
+    return f"✅ Removed ticket type **{removed['name']}**."
 
 
 # ---------- Rust server integration ----------
@@ -1739,6 +1901,392 @@ async def rustcommand(interaction: discord.Interaction, cmd: str):
     if len(display) > 1800:
         display = display[:1800] + "\n... (truncated)"
     await interaction.followup.send(f"```\n{display}\n```", ephemeral=True)
+
+
+# ---------- Minecraft server integration ----------
+#
+# Status uses the standard "Server List Ping" protocol every Java Edition
+# server supports out of the box (no config needed). RCON uses Minecraft's
+# built-in RCON (enable-rcon=true in server.properties) — same underlying
+# protocol as Source RCON, just framed slightly differently. Both are pure
+# socket implementations here, following the documented protocols.
+
+def _mc_pack_varint(value: int) -> bytes:
+    value &= 0xFFFFFFFF
+    out = bytearray()
+    while True:
+        b = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            break
+    return bytes(out)
+
+
+def _mc_pack_string(s: str) -> bytes:
+    data = s.encode("utf-8")
+    return _mc_pack_varint(len(data)) + data
+
+
+def _mc_recv_exact(sock, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("Connection closed unexpectedly.")
+        buf += chunk
+    return buf
+
+
+def _mc_read_varint_from_socket(sock) -> int:
+    value = 0
+    position = 0
+    while True:
+        byte = sock.recv(1)
+        if not byte:
+            raise ConnectionError("Connection closed while reading.")
+        b = byte[0]
+        value |= (b & 0x7F) << position
+        if not (b & 0x80):
+            break
+        position += 7
+    return value
+
+
+def _mc_read_varint_from_bytes(buf: bytes, offset: int):
+    value = 0
+    position = 0
+    while True:
+        b = buf[offset]
+        offset += 1
+        value |= (b & 0x7F) << position
+        if not (b & 0x80):
+            break
+        position += 7
+    return value, offset
+
+
+def _minecraft_status_sync(host: str, port: int, timeout: float = 5.0) -> dict:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+
+        handshake = bytearray()
+        handshake += b"\x00"
+        handshake += _mc_pack_varint(760)  # protocol version — servers ignore this for status
+        handshake += _mc_pack_string(host)
+        handshake += port.to_bytes(2, "big")
+        handshake += _mc_pack_varint(1)  # next state: status
+        sock.sendall(_mc_pack_varint(len(handshake)) + bytes(handshake))
+
+        sock.sendall(_mc_pack_varint(1) + b"\x00")  # status request, empty payload
+
+        length = _mc_read_varint_from_socket(sock)
+        data = _mc_recv_exact(sock, length)
+        _, idx = _mc_read_varint_from_bytes(data, 0)  # packet id
+        json_len, idx = _mc_read_varint_from_bytes(data, idx)
+        info = json.loads(data[idx:idx + json_len].decode("utf-8"))
+
+        players = info.get("players", {})
+        description = info.get("description", "")
+        if isinstance(description, dict):
+            description = description.get("text", "")
+        return {
+            "motd": str(description),
+            "online": players.get("online", 0),
+            "max": players.get("max", 0),
+            "version": info.get("version", {}).get("name", "unknown"),
+        }
+    finally:
+        sock.close()
+
+
+async def query_minecraft_server(host: str, port: int) -> dict:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _minecraft_status_sync, host, port)
+
+
+def _mc_rcon_send_packet(sock, packet_id: int, packet_type: int, payload: str):
+    import struct
+    body = struct.pack("<ii", packet_id, packet_type) + payload.encode("utf-8") + b"\x00\x00"
+    sock.sendall(struct.pack("<i", len(body)) + body)
+
+
+def _mc_rcon_read_packet(sock):
+    import struct
+    length = struct.unpack("<i", _mc_recv_exact(sock, 4))[0]
+    data = _mc_recv_exact(sock, length)
+    packet_id, packet_type = struct.unpack("<ii", data[:8])
+    payload = data[8:-2].decode("utf-8", errors="replace")
+    return packet_id, packet_type, payload
+
+
+def _minecraft_rcon_command_sync(host: str, port: int, password: str, command: str, timeout: float = 8.0) -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+        _mc_rcon_send_packet(sock, 1, 3, password)  # SERVERDATA_AUTH
+        packet_id, _, _ = _mc_rcon_read_packet(sock)
+        if packet_id == -1:
+            raise ValueError("RCON authentication failed — check the password.")
+
+        _mc_rcon_send_packet(sock, 2, 2, command)  # SERVERDATA_EXECCOMMAND
+        _, _, response = _mc_rcon_read_packet(sock)
+        return response
+    finally:
+        sock.close()
+
+
+async def minecraft_rcon_command(host: str, port: int, password: str, command: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _minecraft_rcon_command_sync, host, port, password, command)
+
+
+def build_minecraft_status_embed(host: str, info: dict = None, error: str = None) -> discord.Embed:
+    embed = discord.Embed(title=f"⛏️ {host}", color=discord.Color.green())
+    if error:
+        embed.description = f"⚠️ Couldn't reach the server: {error}"
+        return embed
+    embed.add_field(name="MOTD", value=info["motd"] or "—", inline=False)
+    embed.add_field(name="Players", value=f"{info['online']} / {info['max']}", inline=True)
+    embed.add_field(name="Version", value=info["version"], inline=True)
+    embed.timestamp = discord.utils.utcnow()
+    embed.set_footer(text="Last updated")
+    return embed
+
+
+async def refresh_minecraft_status_message(guild_id: int):
+    cfg = get_guild_cfg(guild_id)
+    channel_id = cfg.get("mc_status_channel_id")
+    host = cfg.get("mc_host")
+    port = cfg.get("mc_port")
+    if not channel_id or not host or not port:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+
+    try:
+        info = await query_minecraft_server(host, port)
+        embed = build_minecraft_status_embed(host, info=info)
+    except Exception as e:
+        embed = build_minecraft_status_embed(host, error=str(e))
+
+    message_id = cfg.get("mc_status_message_id")
+    if message_id:
+        try:
+            message = await channel.fetch_message(message_id)
+            await message.edit(embed=embed)
+            return
+        except (discord.NotFound, discord.Forbidden):
+            pass
+    try:
+        message = await channel.send(embed=embed)
+        cfg["mc_status_message_id"] = message.id
+        save_config(config)
+    except discord.Forbidden:
+        pass
+
+
+@tasks.loop(minutes=2)
+async def minecraft_status_loop():
+    for guild_id_str in list(config.keys()):
+        try:
+            guild_id = int(guild_id_str)
+        except ValueError:
+            continue
+        cfg = config.get(guild_id_str, {})
+        if cfg.get("mc_status_channel_id"):
+            await refresh_minecraft_status_message(guild_id)
+
+
+@bot.tree.command(name="setminecraftserver", description="Connect this server to your Minecraft server.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    host="Your Minecraft server's IP address or domain (no port)",
+    port="Server port (default 25565)",
+    rcon_port="RCON port (optional — needed to run commands)",
+    rcon_password="RCON password (optional — needed to run commands)",
+)
+async def setminecraftserver(
+    interaction: discord.Interaction,
+    host: str,
+    port: int = 25565,
+    rcon_port: int = None,
+    rcon_password: str = None,
+):
+    cfg = get_guild_cfg(interaction.guild_id)
+    cfg["mc_host"] = host
+    cfg["mc_port"] = port
+    if rcon_port and rcon_password:
+        cfg["mc_rcon_port"] = rcon_port
+        cfg["mc_rcon_password"] = rcon_password
+    save_config(config)
+    await interaction.response.send_message(f"✅ Minecraft server set: `{host}:{port}`.", ephemeral=True)
+
+
+@bot.tree.command(name="setminecraftstatuschannel", description="Post a live Minecraft server status embed in this channel.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="The channel to post live status in (omit to disable)")
+async def setminecraftstatuschannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if channel is None:
+        cfg.pop("mc_status_channel_id", None)
+        cfg.pop("mc_status_message_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Live status disabled.", ephemeral=True)
+        return
+    cfg["mc_status_channel_id"] = channel.id
+    cfg.pop("mc_status_message_id", None)
+    save_config(config)
+    await interaction.response.send_message(f"✅ Live server status will now be posted in {channel.mention}.", ephemeral=True)
+    await refresh_minecraft_status_message(interaction.guild_id)
+
+
+@bot.tree.command(name="minecraftstatus", description="Show the Minecraft server's current status.")
+async def minecraftstatus(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    host = cfg.get("mc_host")
+    port = cfg.get("mc_port")
+    if not host or not port:
+        await interaction.response.send_message("❌ No Minecraft server set up yet. Run `/setminecraftserver` first.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    try:
+        info = await query_minecraft_server(host, port)
+        embed = build_minecraft_status_embed(host, info=info)
+    except Exception as e:
+        embed = build_minecraft_status_embed(host, error=str(e))
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="minecraftcommand", description="Run a command on the Minecraft server via RCON.")
+@app_commands.describe(cmd="The command to run (without the leading /)")
+async def minecraftcommand(interaction: discord.Interaction, cmd: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    host = cfg.get("mc_host")
+    rcon_port = cfg.get("mc_rcon_port")
+    rcon_password = cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        await interaction.response.send_message(
+            "❌ RCON isn't set up. Run `/setminecraftserver` with an RCON port and password first.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        response = await minecraft_rcon_command(host, rcon_port, rcon_password, cmd)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Command failed: {e}", ephemeral=True)
+        return
+
+    display = response.strip() if response and response.strip() else "*(no output)*"
+    if len(display) > 1800:
+        display = display[:1800] + "\n... (truncated)"
+    await interaction.followup.send(f"```\n{display}\n```", ephemeral=True)
+
+
+async def web_set_minecraft_server(guild_id: int, host: str, port: int, rcon_port, rcon_password, actor_id: int) -> str:
+    """Mirrors /setminecraftserver."""
+    cfg = get_guild_cfg(guild_id)
+    cfg["mc_host"] = host
+    cfg["mc_port"] = port
+    if rcon_port and rcon_password:
+        cfg["mc_rcon_port"] = rcon_port
+        cfg["mc_rcon_password"] = rcon_password
+    save_config(config)
+    return f"✅ Minecraft server set: {host}:{port}."
+
+
+async def web_set_minecraft_status_channel(guild_id: int, channel_id, actor_id: int) -> str:
+    """Mirrors /setminecraftstatuschannel."""
+    cfg = get_guild_cfg(guild_id)
+    if channel_id is None:
+        cfg.pop("mc_status_channel_id", None)
+        cfg.pop("mc_status_message_id", None)
+        save_config(config)
+        return "✅ Live status disabled."
+    guild = bot.get_guild(guild_id)
+    channel = guild.get_channel(channel_id) if guild else None
+    if channel is None:
+        return "❌ Couldn't find that channel."
+    cfg["mc_status_channel_id"] = channel_id
+    cfg.pop("mc_status_message_id", None)
+    save_config(config)
+    await refresh_minecraft_status_message(guild_id)
+    return f"✅ Live server status will now be posted in #{channel.name}."
+
+
+async def web_get_minecraft_status(guild_id: int) -> dict:
+    cfg = get_guild_cfg(guild_id)
+    host = cfg.get("mc_host")
+    port = cfg.get("mc_port")
+    result = {"host": host, "port": port, "info": None, "error": None}
+    if not host or not port:
+        result["error"] = "No Minecraft server configured yet."
+        return result
+    try:
+        result["info"] = await query_minecraft_server(host, port)
+    except Exception as e:
+        result["error"] = str(e)
+    result["rcon_configured"] = bool(cfg.get("mc_rcon_port"))
+    return result
+
+
+async def web_minecraft_command(guild_id: int, cmd: str, actor_id: int) -> str:
+    """Mirrors /minecraftcommand."""
+    cfg = get_guild_cfg(guild_id)
+    host = cfg.get("mc_host")
+    rcon_port = cfg.get("mc_rcon_port")
+    rcon_password = cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        return "❌ RCON isn't set up yet. Set an RCON port and password first."
+    try:
+        response = await minecraft_rcon_command(host, rcon_port, rcon_password, cmd)
+    except Exception as e:
+        return f"❌ Command failed: {e}"
+    return response.strip() if response and response.strip() else "(no output)"
+
+
+# ---------- generic incoming webhooks ----------
+
+async def relay_incoming_webhook(guild_id: int, payload: dict) -> bool:
+    """Called by web.py when an external service posts to a guild's webhook
+    URL. Formats and relays the payload into the configured Discord channel."""
+    cfg = get_guild_cfg(guild_id)
+    channel_id = cfg.get("webhook_channel_id")
+    if not channel_id:
+        return False
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return False
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return False
+
+    title = str(payload.get("title") or payload.get("event") or "📩 Webhook received")
+    text = payload.get("text") or payload.get("message") or payload.get("content") or ""
+    if not text:
+        # Fall back to dumping the raw payload if nothing recognizable was found.
+        text = "```\n" + json.dumps(payload, indent=2)[:1500] + "\n```"
+
+    embed = discord.Embed(title=str(title)[:256], description=str(text)[:4000], color=discord.Color.dark_teal())
+    embed.timestamp = discord.utils.utcnow()
+    try:
+        await channel.send(embed=embed)
+        return True
+    except discord.Forbidden:
+        return False
 
 
 async def web_set_rust_server(guild_id: int, host: str, query_port: int, rcon_port, rcon_password, actor_id: int) -> str:
@@ -3465,6 +4013,217 @@ async def mvp_end(interaction: discord.Interaction):
     await interaction.response.send_message(result)
 
 
+async def web_tournament_create(guild_id: int, name: str, channel_id: int, actor_id: int) -> str:
+    """Mirrors /tournament_create."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return "❌ Couldn't find that channel."
+
+    cfg = get_guild_cfg(guild_id)
+    tournaments = cfg.setdefault("tournaments", {})
+    existing = tournaments.get(name)
+    if existing and existing["status"] != "complete":
+        return f"❌ A tournament named **{name}** is already in progress."
+
+    data = {"status": "signup", "players": [], "rounds": [], "channel_id": channel_id}
+    tournaments[name] = data
+    save_config(config)
+
+    view = TournamentJoinView(guild_id, name)
+    try:
+        msg = await channel.send(embed=build_tournament_signup_embed(name, data), view=view)
+        data["message_id"] = msg.id
+        save_config(config)
+    except discord.Forbidden:
+        return "❌ I don't have permission to post in that channel."
+    return f"✅ Tournament **{name}** created in #{channel.name} — members can join with the buttons there."
+
+
+async def web_tournament_start(guild_id: int, name: str, actor_id: int) -> str:
+    """Mirrors /tournament_start."""
+    guild = bot.get_guild(guild_id)
+    cfg = get_guild_cfg(guild_id)
+    data = cfg.get("tournaments", {}).get(name)
+    if not data or data["status"] != "signup":
+        return f"❌ No open sign-ups found for **{name}**."
+    if len(data["players"]) < 2:
+        return "❌ Need at least 2 players to start."
+
+    data["rounds"] = [make_tournament_pairings(data["players"], shuffle=True)]
+    data["status"] = "in_progress"
+    save_config(config)
+
+    channel = guild.get_channel(data["channel_id"]) if guild else None
+    if channel:
+        try:
+            await channel.send(embed=build_tournament_bracket_embed(name, data))
+        except discord.Forbidden:
+            pass
+    return f"✅ Tournament **{name}** started with {len(data['players'])} player(s)."
+
+
+async def web_tournament_report(guild_id: int, name: str, match: int, winner_id: int, actor_id: int) -> str:
+    """Mirrors /tournament_report."""
+    guild = bot.get_guild(guild_id)
+    cfg = get_guild_cfg(guild_id)
+    data = cfg.get("tournaments", {}).get(name)
+    if not data or data["status"] != "in_progress":
+        return f"❌ No in-progress tournament found named **{name}**."
+
+    current_round = data["rounds"][-1]
+    if match < 1 or match > len(current_round):
+        return f"❌ Match number must be between 1 and {len(current_round)}."
+
+    m = current_round[match - 1]
+    if winner_id not in (m["p1"], m["p2"]):
+        return "❌ That person isn't in this match."
+    m["winner"] = winner_id
+
+    if all(mm["winner"] is not None for mm in current_round):
+        winners = [mm["winner"] for mm in current_round]
+        if len(winners) == 1:
+            data["status"] = "complete"
+            data["champion"] = winners[0]
+        else:
+            data["rounds"].append(make_tournament_pairings(winners, shuffle=False))
+
+    save_config(config)
+    channel = guild.get_channel(data["channel_id"]) if guild else None
+    if channel:
+        try:
+            await channel.send(embed=build_tournament_bracket_embed(name, data))
+        except discord.Forbidden:
+            pass
+    return f"✅ Match {match} result recorded for **{name}**."
+
+
+async def web_gamenight_create(guild_id: int, game: str, when_iso: str, channel_id: int, actor_id: int) -> str:
+    """Mirrors /gamenight_create."""
+    guild = bot.get_guild(guild_id)
+    channel = guild.get_channel(channel_id) if guild else None
+    if channel is None:
+        return "❌ Couldn't find that channel."
+    try:
+        when = datetime.fromisoformat(when_iso)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "❌ Invalid date/time."
+    if when <= datetime.now(timezone.utc):
+        return "❌ That time is in the past."
+
+    cfg = get_guild_cfg(guild_id)
+    next_id = cfg.get("gamenight_next_id", 1)
+    cfg["gamenight_next_id"] = next_id + 1
+    data = {
+        "id": next_id, "game": game, "when": when.isoformat(),
+        "channel_id": channel_id, "going": [], "maybe": [], "cant": [], "reminded": False,
+    }
+    cfg.setdefault("gamenights", {})[str(next_id)] = data
+    save_config(config)
+
+    view = GameNightRSVPView(guild_id, str(next_id))
+    try:
+        msg = await channel.send(embed=build_gamenight_embed(data), view=view)
+        data["message_id"] = msg.id
+        save_config(config)
+    except discord.Forbidden:
+        return "❌ I don't have permission to post in that channel."
+    return f"✅ Game night #{next_id} scheduled in #{channel.name}."
+
+
+async def web_gamenight_cancel(guild_id: int, gamenight_id: int, actor_id: int) -> str:
+    """Mirrors /gamenight_cancel."""
+    guild = bot.get_guild(guild_id)
+    cfg = get_guild_cfg(guild_id)
+    gamenights = cfg.get("gamenights", {})
+    data = gamenights.pop(str(gamenight_id), None)
+    if not data:
+        return f"❌ No game night found with ID {gamenight_id}."
+    save_config(config)
+
+    channel = guild.get_channel(data["channel_id"]) if guild else None
+    if channel and data.get("message_id"):
+        try:
+            msg = await channel.fetch_message(data["message_id"])
+            await msg.edit(content="🚫 This game night was cancelled.", embed=None, view=None)
+        except (discord.NotFound, discord.Forbidden):
+            pass
+    return f"✅ Cancelled game night #{gamenight_id} ({data['game']})."
+
+
+async def web_mvp_start(guild_id: int, title: str, candidate_ids: list, channel_id: int, actor_id: int) -> str:
+    """Mirrors /mvp_start."""
+    guild = bot.get_guild(guild_id)
+    channel = guild.get_channel(channel_id) if guild else None
+    if channel is None:
+        return "❌ Couldn't find that channel."
+    cfg = get_guild_cfg(guild_id)
+    if cfg.get("mvp_poll"):
+        return "❌ There's already an active MVP vote. End it first."
+    if not candidate_ids:
+        return "❌ Pick at least one candidate."
+
+    poll = {"title": title, "candidates": candidate_ids[:5], "votes": {}, "channel_id": channel_id}
+    cfg["mvp_poll"] = poll
+    save_config(config)
+
+    view = MVPVoteView(guild, poll)
+    try:
+        msg = await channel.send(embed=build_mvp_embed(guild, poll), view=view)
+        poll["message_id"] = msg.id
+        save_config(config)
+    except discord.Forbidden:
+        return "❌ I don't have permission to post in that channel."
+    return f"✅ MVP vote started: **{title}**."
+
+
+async def web_mvp_end(guild_id: int, actor_id: int) -> str:
+    """Mirrors /mvp_end."""
+    guild = bot.get_guild(guild_id)
+    cfg = get_guild_cfg(guild_id)
+    poll = cfg.get("mvp_poll")
+    if not poll:
+        return "❌ There's no active MVP vote."
+
+    tally = {}
+    for cid in poll["votes"].values():
+        tally[cid] = tally.get(cid, 0) + 1
+
+    if not tally:
+        cfg["mvp_poll"] = None
+        save_config(config)
+        return "ℹ️ No votes were cast — nobody to announce."
+
+    top_votes = max(tally.values())
+    winners = [cid for cid, v in tally.items() if v == top_votes]
+    if len(winners) == 1:
+        result = f"🏆 **{poll['title']}** MVP: <@{winners[0]}> with {top_votes} vote(s)!"
+    else:
+        names = ", ".join(f"<@{w}>" for w in winners)
+        result = f"🏆 **{poll['title']}** ended in a tie between {names} with {top_votes} vote(s) each!"
+
+    channel = guild.get_channel(poll["channel_id"]) if guild else None
+    if channel and poll.get("message_id"):
+        try:
+            msg = await channel.fetch_message(poll["message_id"])
+            await msg.edit(embed=build_mvp_embed(guild, poll), view=None)
+        except (discord.NotFound, discord.Forbidden):
+            pass
+    if channel:
+        try:
+            await channel.send(result)
+        except discord.Forbidden:
+            pass
+
+    cfg["mvp_poll"] = None
+    save_config(config)
+    return f"✅ MVP vote ended. {result}"
+
+
 # ---------- cross-posting ----------
 
 @bot.tree.command(name="crosspost_add", description="Mirror messages from THIS channel to a channel in another server the bot is also in.")
@@ -4249,6 +5008,12 @@ HELP_CATEGORIES = {
         ("/ruststatus", "Show current server status"),
         ("/rustcommand", "Run an RCON command on the server"),
     ],
+    "⛏️ Minecraft Server": [
+        ("/setminecraftserver", "Connect to your Minecraft server (status + optional RCON)"),
+        ("/setminecraftstatuschannel", "Live server status embed"),
+        ("/minecraftstatus", "Show current server status"),
+        ("/minecraftcommand", "Run an RCON command on the server"),
+    ],
     "🎭 Roles": [
         ("/addrole", "Give a role to a member"),
         ("/removerole", "Remove a role from a member"),
@@ -4310,6 +5075,7 @@ HELP_CATEGORIES = {
         ("/setbirthdayrole / _channel", "(admin) Auto-role + shoutout on birthdays"),
         ("/showcase add / remove / setchannel / list", "Self-assignable role showcase with a live channel"),
         ("/setticketchannel / /ticket", "Support ticket system — private channel per member"),
+        ("/addticketcategory / _remove / _list", "Multiple ticket types, each with their own category"),
     ],
 }
 
@@ -4579,6 +5345,8 @@ bot.tree.add_command(showcase_group)
 @setrustserver.error
 @setrustchatchannel.error
 @setruststatuschannel.error
+@setminecraftserver.error
+@setminecraftstatuschannel.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -4604,5 +5372,11 @@ if __name__ == "__main__":
         open_ticket, close_ticket, web_set_ticket_channel,
         web_send_dm,
         web_set_rust_server, web_set_rust_status_channel, web_get_rust_status, web_rust_command,
+        web_set_minecraft_server, web_set_minecraft_status_channel, web_get_minecraft_status, web_minecraft_command,
+        relay_incoming_webhook,
+        web_tournament_create, web_tournament_start, web_tournament_report,
+        web_gamenight_create, web_gamenight_cancel,
+        web_mvp_start, web_mvp_end,
+        web_add_ticket_category, web_remove_ticket_category,
     )
     bot.run(TOKEN)
