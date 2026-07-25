@@ -15,6 +15,7 @@ one OAuth app (the bot's own) and avoids a second set of API calls.
 """
 
 import asyncio
+import html
 import json
 import os
 import secrets
@@ -79,6 +80,8 @@ _mvp_end = None
 _add_ticket_category = None
 _remove_ticket_category = None
 _set_ticket_questions = None
+_get_ticket_messages = None
+_send_ticket_message = None
 
 
 # ---------- shared page chrome ----------
@@ -1951,7 +1954,8 @@ def tickets_page(guild_id):
                 channel = guild.get_channel(t.get("channel_id"))
                 link = f'<a href="https://discord.com/channels/{guild_id}/{t["channel_id"]}" target="_blank">Open in Discord</a>' if channel else ""
                 action_cell = f"""
-                {link}
+                <a href="/dashboard/{guild_id}/tickets/{t['id']}">Reply</a>
+                {" &middot; " + link if link else ""}
                 <form method="post" action="/dashboard/{guild_id}/tickets/close" style="display:inline; margin-left:8px;">
                   <input type="hidden" name="ticket_id" value="{t['id']}">
                   <button class="btn btn-secondary" type="submit" style="padding:6px 12px; font-size:12px;">Close</button>
@@ -2147,6 +2151,87 @@ def tickets_setquestions_route(guild_id):
     questions = [q.strip() for q in request.form.get("questions", "").split("|") if q.strip()][:5]
     result = _run_async(_set_ticket_questions(guild_id, type_id, questions, session["user_id"]))
     return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tickets/<int:ticket_id>")
+def ticket_detail_page(guild_id, ticket_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    ticket = cfg.get("tickets", {}).get(str(ticket_id))
+    if ticket is None:
+        return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Ticket not found."))
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    owner = guild.get_member(ticket["user_id"])
+    owner_name = owner.display_name if owner else f"Unknown ({ticket['user_id']})"
+    status = ticket.get("status", "open")
+    type_name = ticket.get("type_name")
+
+    messages = _run_async(_get_ticket_messages(guild_id, ticket_id))
+    msg_html = ""
+    if messages:
+        for m in messages:
+            color = "#9b6bff" if m["is_bot"] else "#2de2ff"
+            safe_author = html.escape(m["author"])
+            safe_content = html.escape(m["content"]).replace("\n", "<br>")
+            msg_html += f"""
+            <div style="padding:10px 14px; border-bottom:1px solid rgba(255,255,255,0.05);">
+              <div style="font-size:12px; margin-bottom:4px;">
+                <span style="color:{color}; font-weight:700;">{safe_author}</span>
+                <span class="hint" style="margin-left:8px;">{_format_ts(m['timestamp'])}</span>
+              </div>
+              <div style="font-size:14px; line-height:1.5;">{safe_content}</div>
+            </div>
+            """
+    else:
+        msg_html = '<div class="hint" style="padding:16px;">No messages yet, or I couldn\'t read this channel\'s history.</div>'
+
+    reply_form = ""
+    if status == "open":
+        reply_form = f"""
+        <div class="card">
+          <h2>💬 Send a reply</h2>
+          <form method="post" action="/dashboard/{guild_id}/tickets/{ticket_id}/send">
+            <div class="field"><input type="text" name="message" placeholder="Type a message to send in this ticket..." required></div>
+            <button class="btn" type="submit">Send</button>
+          </form>
+        </div>
+        """
+    else:
+        reply_form = '<div class="hint">This ticket is closed — replies are disabled.</div>'
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}/tickets">&larr; All tickets</a></div>
+    <h1 style="margin-top:18px;">🎫 Ticket #{ticket_id}{f' — {type_name}' if type_name else ''}</h1>
+    <div class="hint" style="margin-bottom:18px;">Opened by {owner_name} &middot; Status: {status}</div>
+    {result_html}
+
+    <div class="card" style="padding:0;">
+      <div style="max-height:520px; overflow-y:auto;">
+        {msg_html}
+      </div>
+    </div>
+
+    {reply_form}
+    """
+    return render_page(f"{guild.name} — Ticket #{ticket_id}", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/tickets/<int:ticket_id>/send", methods=["POST"])
+def ticket_send_route(guild_id, ticket_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    message = request.form.get("message", "").strip()
+    if not message:
+        return redirect(url_for("ticket_detail_page", guild_id=guild_id, ticket_id=ticket_id, result="❌ Write a message."))
+    result = _run_async(_send_ticket_message(guild_id, ticket_id, session["user_id"], message))
+    return redirect(url_for("ticket_detail_page", guild_id=guild_id, ticket_id=ticket_id, result=result))
 
 
 # ---------- warnings management ----------
@@ -3135,6 +3220,7 @@ def start_web_app(
     gamenight_create, gamenight_cancel,
     mvp_start, mvp_end,
     add_ticket_category, remove_ticket_category, set_ticket_questions,
+    get_ticket_messages, send_ticket_message,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -3150,6 +3236,7 @@ def start_web_app(
     global _gamenight_create, _gamenight_cancel
     global _mvp_start, _mvp_end
     global _add_ticket_category, _remove_ticket_category, _set_ticket_questions
+    global _get_ticket_messages, _send_ticket_message
     _bot = bot
     _config = config
     _save_config = save_config
@@ -3194,6 +3281,8 @@ def start_web_app(
     _add_ticket_category = add_ticket_category
     _remove_ticket_category = remove_ticket_category
     _set_ticket_questions = set_ticket_questions
+    _get_ticket_messages = get_ticket_messages
+    _send_ticket_message = send_ticket_message
 
     port = int(os.environ.get("PORT", 8080))
     thread = threading.Thread(target=_run, args=(port,), daemon=True)

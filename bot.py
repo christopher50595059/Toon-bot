@@ -1443,6 +1443,70 @@ async def close_ticket(guild_id: int, ticket_id: int, closed_by_id: int) -> str:
     return f"✅ Ticket #{ticket_id} closed."
 
 
+async def web_get_ticket_messages(guild_id: int, ticket_id: int, limit: int = 100) -> list:
+    """Returns recent messages from a ticket's channel for display on the web dashboard."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return []
+    cfg = get_guild_cfg(guild_id)
+    ticket = cfg.get("tickets", {}).get(str(ticket_id))
+    if not ticket:
+        return []
+    channel = guild.get_channel(ticket.get("channel_id"))
+    if channel is None:
+        return []
+
+    messages = []
+    try:
+        async for msg in channel.history(limit=limit, oldest_first=True):
+            content = msg.content or ""
+            for e in msg.embeds:
+                parts = []
+                if e.title:
+                    parts.append(e.title)
+                if e.description:
+                    parts.append(e.description)
+                for f in e.fields:
+                    parts.append(f"{f.name}: {f.value}")
+                if parts:
+                    content += ("\n" if content else "") + "\n".join(parts)
+            if not content:
+                continue
+            messages.append({
+                "author": msg.author.display_name,
+                "is_bot": msg.author.bot,
+                "content": content,
+                "timestamp": msg.created_at.isoformat(),
+            })
+    except discord.Forbidden:
+        pass
+    return messages
+
+
+async def web_send_ticket_message(guild_id: int, ticket_id: int, actor_id: int, message: str) -> str:
+    """Sends a reply into a ticket's channel on behalf of staff, from the web dashboard."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    cfg = get_guild_cfg(guild_id)
+    ticket = cfg.get("tickets", {}).get(str(ticket_id))
+    if not ticket:
+        return "❌ Ticket not found."
+    if ticket.get("status") == "closed":
+        return "❌ This ticket is already closed."
+    channel = guild.get_channel(ticket.get("channel_id"))
+    if channel is None:
+        return "❌ That ticket's channel no longer exists."
+    actor = guild.get_member(actor_id)
+    actor_name = actor.display_name if actor else "Staff"
+
+    try:
+        await channel.send(f"**{actor_name}** (via dashboard):\n{message}")
+    except discord.Forbidden:
+        return "❌ I don't have permission to send messages in that channel."
+    return "✅ Message sent."
+
+
 async def web_set_ticket_channel(guild_id: int, channel_id: int, actor_id: int) -> str:
     """Mirrors /setticketchannel — posts the Open Ticket panel and stores the channel."""
     guild = bot.get_guild(guild_id)
@@ -5470,5 +5534,6 @@ if __name__ == "__main__":
         web_gamenight_create, web_gamenight_cancel,
         web_mvp_start, web_mvp_end,
         web_add_ticket_category, web_remove_ticket_category, web_set_ticket_questions,
+        web_get_ticket_messages, web_send_ticket_message,
     )
     bot.run(TOKEN)
