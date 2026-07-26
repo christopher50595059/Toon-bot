@@ -126,8 +126,9 @@ BASE_STYLE = """
       linear-gradient(90deg, rgba(45,226,255,0.055) 1px, transparent 1px),
       radial-gradient(circle at 12% -10%, rgba(155,107,255,0.24) 0%, transparent 42%),
       radial-gradient(circle at 92% 8%, rgba(45,226,255,0.16) 0%, transparent 40%),
-      radial-gradient(circle at 50% 110%, rgba(255,45,226,0.10) 0%, transparent 45%);
-    background-size: 42px 42px, 42px 42px, auto, auto, auto;
+      radial-gradient(circle at 50% 110%, rgba(255,45,226,0.10) 0%, transparent 45%),
+      radial-gradient(circle at 50% 50%, transparent 35%, rgba(0,0,0,0.4) 100%);
+    background-size: 42px 42px, 42px 42px, auto, auto, auto, auto;
     background-attachment: fixed;
     animation: gridDrift 14s linear infinite;
     color:#d6e2ef; font-family:'Rajdhani', -apple-system, sans-serif; font-size:15px; font-weight:600;
@@ -137,6 +138,11 @@ BASE_STYLE = """
     content:""; position:fixed; top:0; left:0; width:100%; height:3px;
     background:linear-gradient(90deg, transparent, var(--neon-cyan), transparent);
     box-shadow:0 0 12px 2px var(--neon-cyan); animation:scanline 7s linear infinite; opacity:0.5; pointer-events:none; z-index:9999;
+  }
+  body::after {
+    content:""; position:fixed; top:0; left:0; width:100%; height:100%;
+    background:radial-gradient(circle at 50% 35%, rgba(155,107,255,0.10) 0%, transparent 55%);
+    animation:pulseGlow 8s ease-in-out infinite; pointer-events:none; z-index:0;
   }
 
   .wrap { max-width:1200px; margin:0 auto; padding:22px 24px; position:relative; z-index:1; }
@@ -425,6 +431,18 @@ SEARCH_JS = """
       renderSearchOptions(_activeSearchInput, _activeSearchInput.value);
     }
   }, true);
+
+  function filterTable(inputEl, tableId) {
+    const q = inputEl.value.toLowerCase();
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    const rows = table.querySelectorAll('tbody tr, tr');
+    rows.forEach(function(row) {
+      if (row.querySelector('th')) return; // skip header row
+      const text = row.textContent.toLowerCase();
+      row.style.display = text.includes(q) ? '' : 'none';
+    });
+  }
 </script>
 """
 
@@ -876,12 +894,39 @@ def dashboard(guild_id):
     </div>
     """
 
+    recent_actions = list(reversed(cfg.get("dashboard_activity_log", [])))[:5]
+    if recent_actions:
+        recent_rows = ""
+        for entry in recent_actions:
+            actor = guild.get_member(entry.get("actor_id"))
+            actor_name = actor.display_name if actor else f"Unknown ({entry.get('actor_id')})"
+            recent_rows += f"""
+            <tr>
+              <td>{actor_name}</td>
+              <td class="hint">{html.escape(entry.get('path', ''))}</td>
+              <td class="hint" style="white-space:nowrap;">{_format_ts(entry.get('timestamp'))}</td>
+            </tr>
+            """
+        recent_activity_html = f"""
+        <div class="card">
+          <h2>🕒 Recent Activity</h2>
+          <div class="log-wrap" style="max-height:220px;"><table class="log-table">
+            <tr><th>Staff Member</th><th>Action</th><th>When</th></tr>
+            {recent_rows}
+          </table></div>
+          <div class="hint" style="margin-top:8px;"><a href="/dashboard/{guild_id}/activitylog">View full activity log →</a></div>
+        </div>
+        """
+    else:
+        recent_activity_html = ""
+
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/guilds">&larr; All servers</a></div>
     <h1 style="margin-top:18px;">{guild_icon_html}{guild.name}</h1>
     {stats_html}
     <div class="hint" style="margin-bottom:12px;">📡 Public status page (no login, safe to share with members): <a href="/status/{guild_id}" target="_blank">{DASHBOARD_URL}/status/{guild_id}</a></div>
     {flash_html}
+    {recent_activity_html}
     {role_assets}
     {channel_assets}
 
@@ -1390,6 +1435,10 @@ def _format_ts(iso_str):
         return iso_str or "—"
 
 
+def _table_search_box(table_id, placeholder="Type to filter..."):
+    return f'<input type="text" oninput="filterTable(this, \'{table_id}\')" placeholder="{placeholder}" style="margin-bottom:10px;">'
+
+
 @app.route("/dashboard/<int:guild_id>/logs")
 def logs_page(guild_id):
     guild, member = _check_access(guild_id)
@@ -1498,8 +1547,9 @@ def logs_page(guild_id):
 
     <div class="card">
       <h2>📋 Rank / Roster History</h2>
+      {_table_search_box("logs-table")}
       <div class="log-wrap">
-        <table class="log-table">
+        <table class="log-table" id="logs-table">
           <tr><th>Member</th><th>Action</th><th>Detail</th><th>By</th><th>Reason</th><th>When</th></tr>
           {rows}
         </table>
@@ -2018,7 +2068,8 @@ def activity_page(guild_id):
 
     <div class="card">
       <h2>Top {len(ranked)}</h2>
-      <div class="log-wrap"><table class="log-table">
+      {_table_search_box("activity-table")}
+      <div class="log-wrap"><table class="log-table" id="activity-table">
         <tr><th>Rank</th><th>Member</th><th>Messages</th></tr>
         {rows}
       </table></div>
@@ -2122,7 +2173,8 @@ def tickets_page(guild_id):
         type_rows = '<tr><td colspan="4" class="hint" style="padding:16px;">No ticket types yet — the panel just shows a plain "Open Ticket" button until you add some.</td></tr>'
 
     body = f"""
-    <h1>🎫 Tickets</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🎫 Tickets</h1>
     {result_html}
     {member_assets}
     {channel_assets}
@@ -2163,7 +2215,8 @@ def tickets_page(guild_id):
 
     <div class="card">
       <h2>All tickets</h2>
-      <div class="log-wrap"><table class="log-table">
+      {_table_search_box("all-tickets-table")}
+      <div class="log-wrap"><table class="log-table" id="all-tickets-table">
         <tr><th>#</th><th>Member</th><th>Type</th><th>Status</th><th>Opened</th><th></th></tr>
         {rows}
       </table></div>
@@ -2381,14 +2434,16 @@ def warnings_page(guild_id):
     member_assets = _member_search_assets(guild)
 
     body = f"""
-    <h1>⚠️ Warnings</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">⚠️ Warnings</h1>
     <div class="hint" style="margin-bottom:18px;"><a href="/dashboard/{guild_id}/export/warnings.csv">⬇️ Download warnings as CSV</a></div>
     {result_html}
     {member_assets}
 
     <div class="card">
       <h2>All warnings</h2>
-      <div class="log-wrap"><table class="log-table">
+      {_table_search_box("warnings-table")}
+      <div class="log-wrap"><table class="log-table" id="warnings-table">
         <tr><th>Member</th><th>Reason</th><th>By</th><th>When</th><th></th></tr>
         {rows}
       </table></div>
@@ -2485,7 +2540,8 @@ def afk_page(guild_id):
         rows = '<tr><td colspan="4" class="hint" style="padding:16px;">Nobody is currently AFK.</td></tr>'
 
     body = f"""
-    <h1>💤 AFK Status</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">💤 AFK Status</h1>
     {result_html}
 
     <div class="card">
@@ -2527,7 +2583,8 @@ def dm_page(guild_id):
     member_assets = _member_search_assets(guild)
 
     body = f"""
-    <h1>✉️ Direct Message</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">✉️ Direct Message</h1>
     <div class="hint" style="margin-bottom:18px;">Send a DM to any member on behalf of staff — a quick way to reach out without leaving the dashboard.</div>
     {result_html}
     {member_assets}
@@ -2595,7 +2652,8 @@ def rust_page(guild_id):
     channel_assets = _channel_search_assets(guild)
 
     body = f"""
-    <h1>🦀 Rust Server</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🦀 Rust Server</h1>
     {result_html}
     {channel_assets}
 
@@ -2924,7 +2982,8 @@ def rust_bans_page(guild_id):
                 </tr>
                 """
             bans_html = f"""
-            <div class="log-wrap"><table class="log-table">
+            {_table_search_box("rust-bans-table")}
+            <div class="log-wrap"><table class="log-table" id="rust-bans-table">
               <tr><th>Name</th><th>SteamID</th><th>Reason</th><th></th></tr>
               {rows}
             </table></div>
@@ -3010,7 +3069,8 @@ def minecraft_page(guild_id):
     channel_assets = _channel_search_assets(guild)
 
     body = f"""
-    <h1>⛏️ Minecraft Server</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">⛏️ Minecraft Server</h1>
     {result_html}
     {channel_assets}
 
@@ -3156,7 +3216,8 @@ def webhooks_page(guild_id):
     channel_assets = _channel_search_assets(guild)
 
     body = f"""
-    <h1>🔌 Incoming Webhooks</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🔌 Incoming Webhooks</h1>
     {result_html}
     {channel_assets}
 
@@ -3324,7 +3385,8 @@ def tournaments_page(guild_id):
     channel_assets = _channel_search_assets(guild)
 
     body = f"""
-    <h1>🏆 Tournaments</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🏆 Tournaments</h1>
     {result_html}
     {member_assets}
     {channel_assets}
@@ -3457,7 +3519,8 @@ def gamenights_page(guild_id):
     channel_assets = _channel_search_assets(guild)
 
     body = f"""
-    <h1>🎮 Game Nights</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🎮 Game Nights</h1>
     {result_html}
     {channel_assets}
 
@@ -3579,7 +3642,8 @@ def mvp_page(guild_id):
         """
 
     body = f"""
-    <h1>⭐ MVP Voting</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">⭐ MVP Voting</h1>
     {result_html}
     {member_assets}
     {channel_assets}
@@ -3731,7 +3795,8 @@ def lookup_page(guild_id):
         """
 
     body = f"""
-    <h1>🔎 Member Lookup</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🔎 Member Lookup</h1>
     <div class="hint" style="margin-bottom:18px;">Everything the bot knows about one person, in one place.</div>
     {member_assets}
 
@@ -3860,7 +3925,8 @@ def backups_page(guild_id):
     channel_assets = _channel_search_assets(guild)
 
     body = f"""
-    <h1>🗄️ Automatic Backups</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🗄️ Automatic Backups</h1>
     <div class="hint" style="margin-bottom:18px;">Posts a fresh config backup file to a channel on a schedule, so you never have to remember to click download.</div>
     {result_html}
     {channel_assets}
@@ -3979,11 +4045,13 @@ def activity_log_page(guild_id):
         rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No dashboard activity recorded yet — this fills in as staff use the dashboard.</td></tr>'
 
     body = f"""
-    <h1>🖱️ Dashboard Activity</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🖱️ Dashboard Activity</h1>
     <div class="hint" style="margin-bottom:18px;">Every settings change or action taken from this dashboard, by whom, and when. Keeps the most recent 200.</div>
 
     <div class="card">
-      <div class="log-wrap"><table class="log-table">
+      {_table_search_box("dashboard-activity-table")}
+      <div class="log-wrap"><table class="log-table" id="dashboard-activity-table">
         <tr><th>Staff Member</th><th>Action</th><th>When</th></tr>
         {rows}
       </table></div>
@@ -4016,11 +4084,13 @@ def login_history_page(guild_id):
         rows = '<tr><td colspan="2" class="hint" style="padding:16px;">No logins recorded yet.</td></tr>'
 
     body = f"""
-    <h1>🔑 Login History</h1>
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🔑 Login History</h1>
     <div class="hint" style="margin-bottom:18px;">Everyone who has logged into this server's dashboard, and when. Keeps the most recent 100.</div>
 
     <div class="card">
-      <div class="log-wrap"><table class="log-table">
+      {_table_search_box("login-history-table")}
+      <div class="log-wrap"><table class="log-table" id="login-history-table">
         <tr><th>Staff Member</th><th>Logged In</th></tr>
         {rows}
       </table></div>
