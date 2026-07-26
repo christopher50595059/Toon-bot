@@ -473,6 +473,73 @@ SEARCH_JS = """
       row.style.display = text.includes(q) ? '' : 'none';
     });
   }
+
+  // ---- AJAX form submission: swap page content without a full reload ----
+  function _showLoadingBar() {
+    let bar = document.getElementById('_ajaxBar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = '_ajaxBar';
+      bar.style.cssText = 'position:fixed;top:0;left:0;height:3px;width:0;background:linear-gradient(90deg,var(--neon-cyan,#2de2ff),var(--neon-violet,#9b6bff));z-index:99999;transition:width 0.25s ease;box-shadow:0 0 8px rgba(45,226,255,0.6);';
+      document.body.appendChild(bar);
+    }
+    bar.style.width = '0%';
+    requestAnimationFrame(function() { bar.style.width = '75%'; });
+  }
+  function _hideLoadingBar() {
+    const bar = document.getElementById('_ajaxBar');
+    if (!bar) return;
+    bar.style.width = '100%';
+    setTimeout(function() { bar.style.width = '0%'; }, 250);
+  }
+  function _reExecuteScripts(container) {
+    container.querySelectorAll('script').forEach(function(oldScript) {
+      const newScript = document.createElement('script');
+      for (const attr of oldScript.attributes) newScript.setAttribute(attr.name, attr.value);
+      newScript.textContent = oldScript.textContent;
+      oldScript.parentNode.replaceChild(newScript, oldScript);
+    });
+  }
+  function _swapPageContent(html, newUrl) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const newWrap = doc.querySelector('.wrap');
+    const curWrap = document.querySelector('.wrap');
+    if (!newWrap || !curWrap) { window.location.href = newUrl; return; }
+    curWrap.innerHTML = newWrap.innerHTML;
+    document.title = doc.title;
+    if (newUrl) history.pushState({ajax: true}, '', newUrl);
+    _reExecuteScripts(curWrap);
+    _hideLoadingBar();
+    window.scrollTo(0, 0);
+  }
+  async function submitFormAjax(form) {
+    const method = (form.getAttribute('method') || 'GET').toUpperCase();
+    const action = form.getAttribute('action') || window.location.href;
+    _showLoadingBar();
+    try {
+      let resp;
+      if (method === 'GET') {
+        const params = new URLSearchParams(new FormData(form));
+        const sep = action.includes('?') ? '&' : '?';
+        resp = await fetch(action + sep + params.toString(), {method: 'GET', credentials: 'same-origin'});
+      } else {
+        resp = await fetch(action, {method: 'POST', body: new FormData(form), credentials: 'same-origin'});
+      }
+      if (!resp.ok) throw new Error('status ' + resp.status);
+      const html = await resp.text();
+      _swapPageContent(html, resp.url);
+    } catch (err) {
+      _hideLoadingBar();
+      HTMLFormElement.prototype.submit.call(form); // fall back to a normal page load
+    }
+  }
+  document.addEventListener('submit', function(e) {
+    const form = e.target;
+    if (form.hasAttribute('data-no-ajax')) return;
+    e.preventDefault();
+    submitFormAjax(form);
+  });
+  window.addEventListener('popstate', function() { window.location.reload(); });
 </script>
 """
 
@@ -1627,7 +1694,7 @@ def logs_page(guild_id):
     <form method="get" class="filter-bar">
       <div class="field">
         <label>Filter to one member</label>
-        <select name="user" onchange="this.form.submit()">{member_opts}</select>
+        <select name="user" onchange="submitFormAjax(this.form)">{member_opts}</select>
       </div>
     </form>
 
