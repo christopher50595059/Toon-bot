@@ -510,7 +510,6 @@ SEARCH_JS = """
     if (newUrl) history.pushState({ajax: true}, '', newUrl);
     _reExecuteScripts(curWrap);
     _hideLoadingBar();
-    window.scrollTo(0, 0);
   }
   async function navigateAjax(url) {
     _showLoadingBar();
