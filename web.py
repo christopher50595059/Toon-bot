@@ -73,6 +73,8 @@ _rust_kick_player = None
 _rust_ban_player = None
 _rust_get_banlist = None
 _rust_unban_player = None
+_set_backup_settings = None
+_run_backup_now = None
 _set_minecraft_server = None
 _set_minecraft_status_channel = None
 _get_minecraft_status = None
@@ -342,6 +344,7 @@ SIDENAV_SECTIONS = [
         ("activity_page", "📈", "Activity"),
         ("afk_page", "💤", "AFK Status"),
         ("backup_download", "💾", "Backup"),
+        ("backups_page", "🗄️", "Auto Backups"),
     ]),
 ]
 
@@ -850,6 +853,7 @@ def dashboard(guild_id):
     <div class="topbar" style="margin-bottom:0;"><a href="/guilds">&larr; All servers</a></div>
     <h1 style="margin-top:18px;">{guild_icon_html}{guild.name}</h1>
     {stats_html}
+    <div class="hint" style="margin-bottom:12px;">📡 Public status page (no login, safe to share with members): <a href="/status/{guild_id}" target="_blank">{DASHBOARD_URL}/status/{guild_id}</a></div>
     {flash_html}
     {role_assets}
     {channel_assets}
@@ -881,6 +885,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/afk"><span>💤</span>AFK Status</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/backups"><span>🗄️</span>Auto Backups</a>
       </div>
     </div>
 
@@ -3154,6 +3159,71 @@ def incoming_webhook(guild_id, token):
     return {"error": "no channel configured or send failed"}, 400
 
 
+@app.route("/status/<int:guild_id>")
+def public_status_page(guild_id):
+    """Public endpoint — no login required. Shows bot + game server status
+    only; nothing sensitive (no channels, no member data, no settings)."""
+    guild = _bot.get_guild(guild_id)
+    if guild is None:
+        return render_page("Status", '<div class="card"><h2>Server not found</h2></div>', show_logout=False)
+
+    cfg = _get_guild_cfg(guild_id)
+    bot_online = _bot.is_ready()
+    bot_pill = '<span class="pill" style="background:#5ee0a022; border-color:#5ee0a055; color:#5ee0a0;">🟢 Online</span>' if bot_online else '<span class="pill" style="background:#ff808022; border-color:#ff808055; color:#ff8080;">🔴 Offline</span>'
+
+    sections = f"""
+    <div class="card">
+      <h2>🤖 Bot</h2>
+      <div>{bot_pill}</div>
+    </div>
+    """
+
+    if cfg.get("rust_host"):
+        rust_status = _run_async(_get_rust_status(guild_id))
+        if rust_status.get("error"):
+            rust_html = f'<div class="hint" style="color:#ff8080;">⚠️ {rust_status["error"]}</div>'
+        else:
+            info = rust_status["info"]
+            rust_html = f"""
+            <div class="grid-2">
+              <div class="field"><label>Map</label><div>{info['map']}</div></div>
+              <div class="field"><label>Players</label><div>{info['players']} / {info['max_players']}</div></div>
+            </div>
+            """
+        sections += f"""
+        <div class="card">
+          <h2>🦀 Rust Server</h2>
+          {rust_html}
+        </div>
+        """
+
+    if cfg.get("mc_host"):
+        mc_status = _run_async(_get_minecraft_status(guild_id))
+        if mc_status.get("error"):
+            mc_html = f'<div class="hint" style="color:#ff8080;">⚠️ {mc_status["error"]}</div>'
+        else:
+            info = mc_status["info"]
+            mc_html = f"""
+            <div class="grid-2">
+              <div class="field"><label>Players</label><div>{info['online']} / {info['max']}</div></div>
+              <div class="field"><label>Version</label><div>{info['version']}</div></div>
+            </div>
+            """
+        sections += f"""
+        <div class="card">
+          <h2>⛏️ Minecraft Server</h2>
+          {mc_html}
+        </div>
+        """
+
+    body = f"""
+    <h1>📡 {guild.name} — Status</h1>
+    <div class="hint" style="margin-bottom:18px;">Live status, no login required.</div>
+    {sections}
+    """
+    return render_page(f"{guild.name} — Status", body, show_logout=False)
+
+
 # ---------- tournaments ----------
 
 @app.route("/dashboard/<int:guild_id>/tournaments")
@@ -3690,6 +3760,93 @@ def backup_download(guild_id):
     )
 
 
+@app.route("/dashboard/<int:guild_id>/backups")
+def backups_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    channel_id = cfg.get("backup_channel_id")
+    interval_days = cfg.get("backup_interval_days")
+    last_backup = cfg.get("last_backup_at")
+
+    status_html = ""
+    if channel_id and interval_days:
+        channel = guild.get_channel(channel_id)
+        last_label = _format_ts(last_backup) if last_backup else "Never yet"
+        status_html = f"""
+        <div class="grid-2">
+          <div class="field"><label>Posting to</label><div>{'#' + channel.name if channel else '(deleted channel)'}</div></div>
+          <div class="field"><label>Every</label><div>{interval_days} day(s)</div></div>
+          <div class="field"><label>Last backup</label><div>{last_label}</div></div>
+        </div>
+        """
+    else:
+        status_html = '<div class="hint">Not set up yet — automatic backups are off.</div>'
+
+    channel_assets = _channel_search_assets(guild)
+
+    body = f"""
+    <h1>🗄️ Automatic Backups</h1>
+    <div class="hint" style="margin-bottom:18px;">Posts a fresh config backup file to a channel on a schedule, so you never have to remember to click download.</div>
+    {result_html}
+    {channel_assets}
+
+    <div class="card">
+      <h2>Current status</h2>
+      {status_html}
+    </div>
+
+    <div class="card">
+      <h2>⚙️ Settings</h2>
+      <form method="post" action="/dashboard/{guild_id}/backups/settings">
+        <div class="grid-2">
+          {_channel_search_field("Channel (leave blank to disable)", "channel_id", guild, channel_id)}
+          <div class="field"><label>Interval (days)</label><input type="number" name="interval_days" min="1" value="{interval_days or 7}"></div>
+        </div>
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>▶️ Run Now</h2>
+      <div class="hint" style="margin-bottom:12px;">Posts a backup immediately, without waiting for the schedule. Requires the channel above to be set first.</div>
+      <form method="post" action="/dashboard/{guild_id}/backups/run">
+        <button class="btn btn-secondary" type="submit">Run Backup Now</button>
+      </form>
+    </div>
+    """
+    return render_page(f"{guild.name} — Auto Backups", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/backups/settings", methods=["POST"])
+def backups_settings_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw_channel = request.form.get("channel_id", "")
+    channel_id = int(raw_channel) if raw_channel else None
+    try:
+        interval_days = int(request.form.get("interval_days", 7))
+    except ValueError:
+        interval_days = 7
+    result = _run_async(_set_backup_settings(guild_id, channel_id, interval_days, session["user_id"]))
+    return redirect(url_for("backups_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/backups/run", methods=["POST"])
+def backups_run_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    result = _run_async(_run_backup_now(guild_id, session["user_id"]))
+    return redirect(url_for("backups_page", guild_id=guild_id, result=result))
+
+
 # ---------- entrypoint ----------
 
 def _run(port: int):
@@ -3715,6 +3872,7 @@ def start_web_app(
     mvp_start, mvp_end,
     add_ticket_category, remove_ticket_category, set_ticket_questions,
     get_ticket_messages, send_ticket_message,
+    set_backup_settings, run_backup_now,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -3732,6 +3890,7 @@ def start_web_app(
     global _mvp_start, _mvp_end
     global _add_ticket_category, _remove_ticket_category, _set_ticket_questions
     global _get_ticket_messages, _send_ticket_message
+    global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
     _save_config = save_config
@@ -3784,6 +3943,8 @@ def start_web_app(
     _set_ticket_questions = set_ticket_questions
     _get_ticket_messages = get_ticket_messages
     _send_ticket_message = send_ticket_message
+    _set_backup_settings = set_backup_settings
+    _run_backup_now = run_backup_now
 
     port = int(os.environ.get("PORT", 8080))
     thread = threading.Thread(target=_run, args=(port,), daemon=True)

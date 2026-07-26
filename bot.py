@@ -210,6 +210,8 @@ async def on_ready():
         rust_status_loop.start()
     if not minecraft_status_loop.is_running():
         minecraft_status_loop.start()
+    if not backup_scheduler_loop.is_running():
+        backup_scheduler_loop.start()
 
     # Reconnect any Rust RCON connections that were configured before a restart.
     for guild_id_str, cfg in config.items():
@@ -2619,6 +2621,78 @@ async def rust_unban_player(guild_id: int, steam_id: str, actor_id: int) -> str:
     except Exception as e:
         return f"❌ Unban failed: {e}"
     return f"✅ Unbanned {steam_id}."
+
+
+# ---------- scheduled automatic backups ----------
+
+async def run_guild_backup(guild_id: int) -> str:
+    """Posts a config backup file to the guild's configured backup channel.
+    Shared by the scheduled task and the manual 'Run Backup Now' button."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    cfg = get_guild_cfg(guild_id)
+    channel_id = cfg.get("backup_channel_id")
+    if not channel_id:
+        return "❌ No backup channel set."
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return "❌ That backup channel no longer exists."
+
+    data = json.dumps(cfg, indent=2)
+    file_bytes = io.BytesIO(data.encode("utf-8"))
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    file = discord.File(file_bytes, filename=f"backup-{guild_id}-{stamp}.json")
+    try:
+        await channel.send(f"🗄️ Automatic backup — {stamp}", file=file)
+    except discord.Forbidden:
+        return "❌ I don't have permission to send files in that channel."
+
+    cfg["last_backup_at"] = datetime.now(timezone.utc).isoformat()
+    save_config(config)
+    return f"✅ Backup posted to #{channel.name}."
+
+
+@tasks.loop(hours=24)
+async def backup_scheduler_loop():
+    now = datetime.now(timezone.utc)
+    for guild_id_str in list(config.keys()):
+        cfg = config.get(guild_id_str, {})
+        channel_id = cfg.get("backup_channel_id")
+        interval_days = cfg.get("backup_interval_days")
+        if not channel_id or not interval_days:
+            continue
+        last_backup_str = cfg.get("last_backup_at")
+        if last_backup_str:
+            last_backup = datetime.fromisoformat(last_backup_str)
+            if (now - last_backup) < timedelta(days=interval_days):
+                continue
+        try:
+            guild_id = int(guild_id_str)
+        except ValueError:
+            continue
+        await run_guild_backup(guild_id)
+
+
+async def web_set_backup_settings(guild_id: int, channel_id, interval_days: int, actor_id: int) -> str:
+    cfg = get_guild_cfg(guild_id)
+    if channel_id is None:
+        cfg.pop("backup_channel_id", None)
+        cfg.pop("backup_interval_days", None)
+        save_config(config)
+        return "✅ Automatic backups disabled."
+    guild = bot.get_guild(guild_id)
+    channel = guild.get_channel(channel_id) if guild else None
+    if channel is None:
+        return "❌ Couldn't find that channel."
+    cfg["backup_channel_id"] = channel_id
+    cfg["backup_interval_days"] = max(1, interval_days)
+    save_config(config)
+    return f"✅ Automatic backups will post to #{channel.name} every {cfg['backup_interval_days']} day(s)."
+
+
+async def web_run_backup_now(guild_id: int, actor_id: int) -> str:
+    return await run_guild_backup(guild_id)
 
 
 def build_roster_embed(guild: discord.Guild) -> discord.Embed:
@@ -5667,6 +5741,7 @@ if __name__ == "__main__":
         web_send_dm,
         web_set_rust_server, web_set_rust_status_channel, web_get_rust_status, web_rust_command,
         rust_get_players, rust_kick_player, rust_ban_player, rust_get_banlist, rust_unban_player,
+        web_set_backup_settings, web_run_backup_now,
         web_set_minecraft_server, web_set_minecraft_status_channel, web_get_minecraft_status, web_minecraft_command,
         relay_incoming_webhook,
         web_tournament_create, web_tournament_start, web_tournament_report,
