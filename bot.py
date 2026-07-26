@@ -796,7 +796,6 @@ async def web_timeout(guild_id: int, user_id: int, minutes: int, reason: str, ac
         guild, member, title="🔇 You were timed out", color=discord.Color.dark_orange(),
         fields={"Duration": f"{minutes} minute(s)", "Reason": reason},
     )
-    await log_movement(guild, member=member, target=f"timed out ({minutes}m)", reason=reason, moderator=actor)
     note = "" if dm_sent else " (couldn't DM them)"
     return f"✅ Timed out {member.display_name} for {minutes} minute(s).{note}"
 
@@ -4617,9 +4616,6 @@ async def timeout(interaction: discord.Interaction, user: discord.Member, minute
     note = "\n\n*(couldn't DM them)*" if not dm_sent else ""
     await interaction.followup.send(
         f"✅ Timed out {user.mention} for {minutes} minute(s). Reason: {reason}{note}", ephemeral=True
-    )
-    await log_movement(
-        interaction.guild, member=user, target=f"timed out ({minutes}m)", reason=reason, moderator=interaction.user
     )
 
 
