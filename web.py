@@ -117,6 +117,8 @@ BASE_STYLE = """
 
   @keyframes gridDrift { 0% { background-position:0 0, 0 0; } 100% { background-position:60px 60px, 60px 60px; } }
   @keyframes pulseGlow { 0%,100% { opacity:0.55; } 50% { opacity:1; } }
+  @keyframes fadeInUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes shine { from { transform:translateX(-120%) skewX(-20deg); } to { transform:translateX(220%) skewX(-20deg); } }
 
   body {
     background-color: var(--bg-void);
@@ -141,14 +143,20 @@ BASE_STYLE = """
 
   .wrap { max-width:1200px; margin:0 auto; padding:22px 24px; position:relative; z-index:1; }
   h1 {
-    font-family:'Orbitron', 'Rajdhani', sans-serif; font-size:21px; margin:0 0 2px; font-weight:800; letter-spacing:0.5px;
-    background:linear-gradient(90deg, var(--neon-cyan), var(--neon-violet) 60%, var(--neon-magenta));
+    font-family:'Orbitron', 'Rajdhani', sans-serif; font-size:22px; margin:0 0 2px; font-weight:800; letter-spacing:0.5px;
+    background:linear-gradient(90deg, var(--neon-cyan), var(--neon-violet) 55%, var(--neon-magenta));
+    background-size:200% auto;
     -webkit-background-clip:text; background-clip:text; color:transparent;
-    text-shadow:0 0 24px rgba(45,226,255,0.25); text-transform:uppercase;
+    text-shadow:0 0 30px rgba(45,226,255,0.3); text-transform:uppercase;
+    animation:fadeInUp 0.4s ease;
   }
   h2 {
     font-family:'Orbitron', 'Rajdhani', sans-serif; font-size:13px; color:#eaf6ff; margin:0 0 12px; font-weight:700;
-    display:flex; align-items:center; gap:8px; text-transform:uppercase; letter-spacing:1px;
+    display:flex; align-items:center; gap:9px; text-transform:uppercase; letter-spacing:1px;
+  }
+  h2::before {
+    content:""; width:6px; height:6px; border-radius:50%; background:var(--neon-cyan);
+    box-shadow:0 0 8px 2px var(--neon-cyan); flex-shrink:0;
   }
   .card {
     background:linear-gradient(160deg, rgba(20,22,38,0.75), rgba(10,11,20,0.9));
@@ -158,9 +166,13 @@ BASE_STYLE = """
     clip-path:polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
     padding:16px 18px; margin-bottom:12px;
     box-shadow:0 4px 24px rgba(0,0,0,0.5), inset 0 0 40px rgba(45,226,255,0.03);
-    position:relative; transition:border-color 0.2s ease, box-shadow 0.2s ease;
+    position:relative; transition:border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+    animation:fadeInUp 0.35s ease backwards;
   }
-  .card:hover { border-color:rgba(45,226,255,0.4); box-shadow:0 4px 30px rgba(0,0,0,0.6), 0 0 0 1px rgba(45,226,255,0.12); }
+  .card:hover {
+    border-color:rgba(45,226,255,0.45); box-shadow:0 8px 34px rgba(0,0,0,0.6), 0 0 0 1px rgba(45,226,255,0.15);
+    transform:translateY(-2px);
+  }
   .card#roles { border-left-color:var(--neon-violet); }
   .card#ranks { border-left-color:#7c8cff; }
   .card#other { border-left-color:var(--neon-magenta); }
@@ -171,8 +183,14 @@ BASE_STYLE = """
     color:#04050a; padding:9px 18px; clip-path:polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
     border:none; font-family:'Orbitron','Rajdhani',sans-serif; font-size:12px; text-transform:uppercase; letter-spacing:1px;
     cursor:pointer; font-weight:700; transition:filter 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
-    box-shadow:0 0 18px rgba(45,226,255,0.35);
+    box-shadow:0 0 18px rgba(45,226,255,0.35); position:relative; overflow:hidden;
   }
+  .btn::after {
+    content:""; position:absolute; top:0; left:0; width:30%; height:100%;
+    background:linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent);
+    transform:translateX(-120%) skewX(-20deg); pointer-events:none;
+  }
+  .btn:hover::after { animation:shine 0.7s ease; }
   .btn:hover { filter:brightness(1.15); text-decoration:none; box-shadow:0 0 28px rgba(45,226,255,0.6); transform:translateY(-1px); }
   .btn:active { transform:translateY(0); }
   .btn-secondary { background:linear-gradient(135deg,#3a3d4d,#26283a); color:#d6e2ef; box-shadow:0 0 12px rgba(255,45,226,0.12); }
@@ -260,9 +278,12 @@ BASE_STYLE = """
   .stats-strip { display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:12px; margin:18px 0 24px; }
   .stat-tile {
     background:linear-gradient(160deg, rgba(20,22,38,0.8), rgba(8,9,16,0.9));
-    border:1px solid rgba(45,226,255,0.15); padding:16px; text-align:center;
+    border:1px solid rgba(45,226,255,0.15); border-top:2px solid var(--neon-cyan); padding:16px; text-align:center;
     clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+    transition:transform 0.2s ease, box-shadow 0.2s ease; animation:fadeInUp 0.4s ease backwards;
   }
+  .stat-tile:hover { transform:translateY(-3px); box-shadow:0 8px 20px rgba(0,0,0,0.4); }
+  .stat-tile .icon { font-size:20px; margin-bottom:2px; filter:drop-shadow(0 0 6px currentColor); }
   .stat-tile .num {
     font-family:'Orbitron',sans-serif; font-size:26px; font-weight:800; color:var(--neon-cyan);
     text-shadow:0 0 12px rgba(45,226,255,0.4);
@@ -271,6 +292,14 @@ BASE_STYLE = """
     font-family:'Share Tech Mono',monospace; font-size:10px; text-transform:uppercase;
     letter-spacing:1px; color:#8b93ab; margin-top:4px;
   }
+  .stat-tile.violet { border-top-color:var(--neon-violet); }
+  .stat-tile.violet .num { color:var(--neon-violet); text-shadow:0 0 12px rgba(155,107,255,0.4); }
+  .stat-tile.magenta { border-top-color:var(--neon-magenta); }
+  .stat-tile.magenta .num { color:var(--neon-magenta); text-shadow:0 0 12px rgba(255,45,226,0.4); }
+  .stat-tile.gold { border-top-color:#f5c15c; }
+  .stat-tile.gold .num { color:#f5c15c; text-shadow:0 0 12px rgba(245,193,92,0.4); }
+  .stat-tile.grey { border-top-color:#8b93ab; }
+  .stat-tile.grey .num { color:#8b93ab; text-shadow:none; }
   .page-layout { display:flex; gap:28px; align-items:flex-start; }
   .sidenav { width:190px; flex-shrink:0; position:sticky; top:24px; display:flex; flex-direction:column; gap:2px; }
   .sidenav a {
@@ -491,9 +520,11 @@ def render_page(title: str, body: str, show_logout: bool = True, guild_id: int =
 def home():
     if "user_id" not in session:
         return render_page("Dashboard", """
-            <div class="card">
-              <p>Manage this bot's settings from your browser.</p>
-              <a class="btn" href="/login">Login with Discord</a>
+            <div class="card" style="text-align:center; padding:48px 32px;">
+              <div style="font-size:48px; margin-bottom:8px; filter:drop-shadow(0 0 16px rgba(45,226,255,0.5));">🤖</div>
+              <h1 style="font-size:28px; margin-bottom:10px;">Bot Control Deck</h1>
+              <p class="hint" style="font-size:14px; margin-bottom:24px;">Manage roles, moderation, tickets, integrations, and more — all from your browser.</p>
+              <a class="btn" href="/login" style="padding:13px 32px; font-size:14px;">🔐 Login with Discord</a>
             </div>
         """, show_logout=False)
     return redirect(url_for("guild_picker"))
@@ -603,22 +634,23 @@ def guild_picker():
     items = ""
     for g in guilds:
         icon_html = (
-            f'<img src="{g.icon.url}" style="width:32px;height:32px;border-radius:8px;">'
+            f'<img src="{g.icon.url}" style="width:44px;height:44px;border-radius:10px;box-shadow:0 0 12px rgba(45,226,255,0.25);">'
             if g.icon else
-            '<div style="width:32px;height:32px;border-radius:8px;background:#5865f2;display:flex;'
-            'align-items:center;justify-content:center;font-weight:700;">' + g.name[0].upper() + '</div>'
+            '<div style="width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,var(--neon-cyan),var(--neon-violet));display:flex;'
+            'align-items:center;justify-content:center;font-weight:800;font-size:18px;color:#04050a;">' + g.name[0].upper() + '</div>'
         )
         items += f"""
-        <a href="/dashboard/{g.id}" style="display:flex;align-items:center;gap:12px;">
+        <a href="/dashboard/{g.id}" style="display:flex;align-items:center;gap:14px;">
           {icon_html}
           <div>
-            <div style="font-weight:600;">{g.name}</div>
-            <div class="hint" style="margin-top:0;">{g.member_count} member(s)</div>
+            <div style="font-weight:700; font-size:15px;">{g.name}</div>
+            <div class="hint" style="margin-top:2px;">👥 {g.member_count} member(s)</div>
           </div>
         </a>
         """
     body = f"""
-        <p>Pick a server to manage:</p>
+        <h1 style="margin-bottom:4px;">🗂️ Your Servers</h1>
+        <p class="hint" style="margin-bottom:18px;">Pick a server to manage.</p>
         <div class="guild-list">{items}</div>
     """
     return render_page("Your servers", body)
@@ -880,11 +912,11 @@ def dashboard(guild_id):
 
     stats_html = f"""
     <div class="stats-strip">
-      <div class="stat-tile"><div class="num">{guild.member_count}</div><div class="label">Members</div></div>
-      <div class="stat-tile"><div class="num">{roster_size}</div><div class="label">On Roster</div></div>
-      <div class="stat-tile"><div class="num">{open_tickets}</div><div class="label">Open Tickets</div></div>
-      <div class="stat-tile"><div class="num">{total_warnings}</div><div class="label">Warnings</div></div>
-      <div class="stat-tile"><div class="num">{afk_count}</div><div class="label">Currently AFK</div></div>
+      <div class="stat-tile"><div class="icon">👥</div><div class="num">{guild.member_count}</div><div class="label">Members</div></div>
+      <div class="stat-tile violet"><div class="icon">📋</div><div class="num">{roster_size}</div><div class="label">On Roster</div></div>
+      <div class="stat-tile magenta"><div class="icon">🎫</div><div class="num">{open_tickets}</div><div class="label">Open Tickets</div></div>
+      <div class="stat-tile gold"><div class="icon">⚠️</div><div class="num">{total_warnings}</div><div class="label">Warnings</div></div>
+      <div class="stat-tile grey"><div class="icon">💤</div><div class="num">{afk_count}</div><div class="label">Currently AFK</div></div>
     </div>
     """
 
