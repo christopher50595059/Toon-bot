@@ -117,7 +117,6 @@ BASE_STYLE = """
 
   @keyframes gridDrift { 0% { background-position:0 0, 0 0; } 100% { background-position:60px 60px, 60px 60px; } }
   @keyframes pulseGlow { 0%,100% { opacity:0.55; } 50% { opacity:1; } }
-  @keyframes scanline { 0% { transform:translateY(-100%); } 100% { transform:translateY(100vh); } }
 
   body {
     background-color: var(--bg-void);
@@ -133,11 +132,6 @@ BASE_STYLE = """
     animation: gridDrift 14s linear infinite;
     color:#d6e2ef; font-family:'Rajdhani', -apple-system, sans-serif; font-size:15px; font-weight:600;
     margin:0; padding:0 0 80px; line-height:1.45; min-height:100vh; position:relative; overflow-x:hidden;
-  }
-  body::before {
-    content:""; position:fixed; top:0; left:0; width:100%; height:3px;
-    background:linear-gradient(90deg, transparent, var(--neon-cyan), transparent);
-    box-shadow:0 0 12px 2px var(--neon-cyan); animation:scanline 7s linear infinite; opacity:0.5; pointer-events:none; z-index:9999;
   }
   body::after {
     content:""; position:fixed; top:0; left:0; width:100%; height:100%;
