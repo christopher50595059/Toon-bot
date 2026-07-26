@@ -512,6 +512,17 @@ SEARCH_JS = """
     _hideLoadingBar();
     window.scrollTo(0, 0);
   }
+  async function navigateAjax(url) {
+    _showLoadingBar();
+    try {
+      const resp = await fetch(url, {method: 'GET', credentials: 'same-origin'});
+      if (!resp.ok) throw new Error('status ' + resp.status);
+      const html = await resp.text();
+      _swapPageContent(html, resp.url);
+    } catch (err) {
+      window.location.href = url; // fall back to a normal page load
+    }
+  }
   async function submitFormAjax(form) {
     const method = (form.getAttribute('method') || 'GET').toUpperCase();
     const action = form.getAttribute('action') || window.location.href;
@@ -533,6 +544,15 @@ SEARCH_JS = """
       HTMLFormElement.prototype.submit.call(form); // fall back to a normal page load
     }
   }
+  document.addEventListener('click', function(e) {
+    const link = e.target.closest('.sidenav a, .action-tile, .quicknav a');
+    if (!link || !link.href) return;
+    if (link.hasAttribute('data-no-ajax') || link.target === '_blank') return;
+    const url = new URL(link.href, window.location.href);
+    if (url.origin !== window.location.origin) return; // never intercept external links
+    e.preventDefault();
+    navigateAjax(link.href);
+  });
   document.addEventListener('submit', function(e) {
     const form = e.target;
     if (form.hasAttribute('data-no-ajax')) return;
