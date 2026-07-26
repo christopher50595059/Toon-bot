@@ -75,6 +75,8 @@ _rust_get_banlist = None
 _rust_unban_player = None
 _set_backup_settings = None
 _run_backup_now = None
+_set_rust_alert_channel = None
+_set_minecraft_alert_channel = None
 _set_minecraft_server = None
 _set_minecraft_status_channel = None
 _get_minecraft_status = None
@@ -341,6 +343,7 @@ SIDENAV_SECTIONS = [
     ]),
     ("Insight", [
         ("logs_page", "🗂️", "Logs"),
+        ("activity_log_page", "🖱️", "Dashboard Activity"),
         ("activity_page", "📈", "Activity"),
         ("afk_page", "💤", "AFK Status"),
         ("backup_download", "💾", "Backup"),
@@ -613,6 +616,17 @@ def _check_access(guild_id: int):
     is_manager = manager_role_id and any(r.id == manager_role_id for r in member.roles)
     if not (member.guild_permissions.administrator or is_manager):
         return None, None
+
+    if request.method == "POST":
+        log = cfg.setdefault("dashboard_activity_log", [])
+        log.append({
+            "actor_id": member.id,
+            "path": request.path,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        cfg["dashboard_activity_log"] = log[-200:]  # keep it capped
+        _save_config(_config)
+
     return guild, member
 
 
@@ -882,6 +896,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/tickets"><span>🎫</span>Tickets</a>
         <a class="action-tile" href="/dashboard/{guild_id}/dm"><span>✉️</span>Direct Message</a>
         <a class="action-tile" href="/dashboard/{guild_id}/logs"><span>🗂️</span>Logs</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/activitylog"><span>🖱️</span>Dashboard Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/afk"><span>💤</span>AFK Status</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
@@ -2610,6 +2625,15 @@ def rust_page(guild_id):
     </div>
 
     <div class="card">
+      <h2>🚨 Downtime Alerts</h2>
+      <div class="hint" style="margin-bottom:12px;">Posts here whenever the server goes offline or comes back — separate from the status channel above, so alerts can go somewhere staff-only if you want.</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/alertchannel">
+        {_channel_search_field("Channel", "channel_id", guild, cfg.get("rust_alert_channel_id"))}
+        <button class="btn" type="submit">Set Alert Channel</button>
+      </form>
+    </div>
+
+    <div class="card">
       <h2>⌨️ RCON Console</h2>
       <div class="hint" style="margin-bottom:12px;">Run a raw command on the server. Requires RCON to be connected.</div>
       <form method="post" action="/dashboard/{guild_id}/rust/command">
@@ -2681,6 +2705,17 @@ def rust_statuschannel_route(guild_id):
     raw = request.form.get("channel_id", "")
     channel_id = int(raw) if raw else None
     result = _run_async(_set_rust_status_channel(guild_id, channel_id, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/alertchannel", methods=["POST"])
+def rust_alertchannel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw = request.form.get("channel_id", "")
+    channel_id = int(raw) if raw else None
+    result = _run_async(_set_rust_alert_channel(guild_id, channel_id, session["user_id"]))
     return redirect(url_for("rust_page", guild_id=guild_id, result=result))
 
 
@@ -2996,6 +3031,15 @@ def minecraft_page(guild_id):
     </div>
 
     <div class="card">
+      <h2>🚨 Downtime Alerts</h2>
+      <div class="hint" style="margin-bottom:12px;">Posts here whenever the server goes offline or comes back — separate from the status channel above.</div>
+      <form method="post" action="/dashboard/{guild_id}/minecraft/alertchannel">
+        {_channel_search_field("Channel", "channel_id", guild, cfg.get("mc_alert_channel_id"))}
+        <button class="btn" type="submit">Set Alert Channel</button>
+      </form>
+    </div>
+
+    <div class="card">
       <h2>⌨️ RCON Console</h2>
       <div class="hint" style="margin-bottom:12px;">Run a raw command on the server (without the leading /). Requires RCON to be set up.</div>
       <form method="post" action="/dashboard/{guild_id}/minecraft/command">
@@ -3044,6 +3088,17 @@ def minecraft_statuschannel_route(guild_id):
     raw = request.form.get("channel_id", "")
     channel_id = int(raw) if raw else None
     result = _run_async(_set_minecraft_status_channel(guild_id, channel_id, session["user_id"]))
+    return redirect(url_for("minecraft_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/alertchannel", methods=["POST"])
+def minecraft_alertchannel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw = request.form.get("channel_id", "")
+    channel_id = int(raw) if raw else None
+    result = _run_async(_set_minecraft_alert_channel(guild_id, channel_id, session["user_id"]))
     return redirect(url_for("minecraft_page", guild_id=guild_id, result=result))
 
 
@@ -3819,6 +3874,15 @@ def backups_page(guild_id):
         <button class="btn btn-secondary" type="submit">Run Backup Now</button>
       </form>
     </div>
+
+    <div class="card">
+      <h2>♻️ Restore from Backup</h2>
+      <div class="hint" style="margin-bottom:12px;">Upload a previously downloaded backup .json file to instantly restore this server's settings — ranks, channels, roster, tickets, everything. This completely replaces the current settings, so double check you have the right file first.</div>
+      <form method="post" action="/dashboard/{guild_id}/backups/restore" enctype="multipart/form-data">
+        <div class="field"><input type="file" name="backup_file" accept=".json" required></div>
+        <button class="btn btn-secondary" type="submit">Restore</button>
+      </form>
+    </div>
     """
     return render_page(f"{guild.name} — Auto Backups", body, guild_id=guild_id)
 
@@ -3847,6 +3911,73 @@ def backups_run_route(guild_id):
     return redirect(url_for("backups_page", guild_id=guild_id, result=result))
 
 
+@app.route("/dashboard/<int:guild_id>/backups/restore", methods=["POST"])
+def backups_restore_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    uploaded = request.files.get("backup_file")
+    if not uploaded or not uploaded.filename:
+        return redirect(url_for("backups_page", guild_id=guild_id, result="❌ Choose a backup file first."))
+
+    try:
+        raw = uploaded.read().decode("utf-8")
+        restored_cfg = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return redirect(url_for("backups_page", guild_id=guild_id, result="❌ That file isn't valid JSON — make sure it's an unmodified backup file."))
+
+    if not isinstance(restored_cfg, dict):
+        return redirect(url_for("backups_page", guild_id=guild_id, result="❌ That file doesn't look like a valid backup (expected a JSON object)."))
+
+    _config[str(guild_id)] = restored_cfg
+    _save_config(_config)
+    return redirect(url_for(
+        "backups_page", guild_id=guild_id,
+        result="✅ Settings restored from backup. Note: live embeds (roster, stats, showcase, ticket panel) may need to be re-posted if their channel settings changed.",
+    ))
+
+
+# ---------- dashboard activity log ----------
+
+@app.route("/dashboard/<int:guild_id>/activitylog")
+def activity_log_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    log = list(reversed(cfg.get("dashboard_activity_log", [])))
+
+    rows = ""
+    if log:
+        for entry in log[:200]:
+            actor = guild.get_member(entry.get("actor_id"))
+            actor_name = actor.display_name if actor else f"Unknown ({entry.get('actor_id')})"
+            rows += f"""
+            <tr>
+              <td>{actor_name}</td>
+              <td class="hint">{html.escape(entry.get('path', ''))}</td>
+              <td class="hint" style="white-space:nowrap;">{_format_ts(entry.get('timestamp'))}</td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No dashboard activity recorded yet — this fills in as staff use the dashboard.</td></tr>'
+
+    body = f"""
+    <h1>🖱️ Dashboard Activity</h1>
+    <div class="hint" style="margin-bottom:18px;">Every settings change or action taken from this dashboard, by whom, and when. Keeps the most recent 200.</div>
+
+    <div class="card">
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Staff Member</th><th>Action</th><th>When</th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Dashboard Activity", body, guild_id=guild_id)
+
+
 # ---------- entrypoint ----------
 
 def _run(port: int):
@@ -3865,7 +3996,9 @@ def start_web_app(
     send_dm,
     set_rust_server, set_rust_status_channel, get_rust_status, rust_command,
     rust_get_players, rust_kick_player, rust_ban_player, rust_get_banlist, rust_unban_player,
+    set_rust_alert_channel,
     set_minecraft_server, set_minecraft_status_channel, get_minecraft_status, minecraft_command,
+    set_minecraft_alert_channel,
     relay_incoming_webhook,
     tournament_create, tournament_start, tournament_report,
     gamenight_create, gamenight_cancel,
@@ -3881,9 +4014,9 @@ def start_web_app(
     global _mass_add_role, _mass_remove_role, _mass_rename, _announce, _massannounce
     global _showcase_add, _showcase_remove, _open_ticket, _close_ticket, _set_ticket_channel
     global _send_dm
-    global _set_rust_server, _set_rust_status_channel, _get_rust_status, _rust_command
+    global _set_rust_server, _set_rust_status_channel, _get_rust_status, _rust_command, _set_rust_alert_channel
     global _rust_get_players, _rust_kick_player, _rust_ban_player, _rust_get_banlist, _rust_unban_player
-    global _set_minecraft_server, _set_minecraft_status_channel, _get_minecraft_status, _minecraft_command
+    global _set_minecraft_server, _set_minecraft_status_channel, _get_minecraft_status, _minecraft_command, _set_minecraft_alert_channel
     global _relay_incoming_webhook
     global _tournament_create, _tournament_start, _tournament_report
     global _gamenight_create, _gamenight_cancel
@@ -3921,6 +4054,7 @@ def start_web_app(
     _set_rust_status_channel = set_rust_status_channel
     _get_rust_status = get_rust_status
     _rust_command = rust_command
+    _set_rust_alert_channel = set_rust_alert_channel
     _rust_get_players = rust_get_players
     _rust_kick_player = rust_kick_player
     _rust_ban_player = rust_ban_player
@@ -3930,6 +4064,7 @@ def start_web_app(
     _set_minecraft_status_channel = set_minecraft_status_channel
     _get_minecraft_status = get_minecraft_status
     _minecraft_command = minecraft_command
+    _set_minecraft_alert_channel = set_minecraft_alert_channel
     _relay_incoming_webhook = relay_incoming_webhook
     _tournament_create = tournament_create
     _tournament_start = tournament_start

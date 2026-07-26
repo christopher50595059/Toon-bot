@@ -1961,6 +1961,41 @@ async def refresh_rust_status_message(guild_id: int):
         pass
 
 
+async def check_rust_downtime(guild_id: int):
+    """Posts an alert when the Rust server's online/offline state changes.
+    Independent of the live status embed — uses its own alert channel."""
+    cfg = get_guild_cfg(guild_id)
+    alert_channel_id = cfg.get("rust_alert_channel_id")
+    host = cfg.get("rust_host")
+    query_port = cfg.get("rust_query_port")
+    if not alert_channel_id or not host or not query_port:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(alert_channel_id)
+    if channel is None:
+        return
+
+    was_online = cfg.get("rust_was_online", True)  # assume online on first check, avoids a false "back online" on startup
+    try:
+        await query_rust_server(host, query_port)
+        is_online = True
+    except Exception:
+        is_online = False
+
+    if is_online != was_online:
+        cfg["rust_was_online"] = is_online
+        save_config(config)
+        try:
+            if is_online:
+                await channel.send(f"🟢 **{host}** is back online.")
+            else:
+                await channel.send(f"🔴 **{host}** appears to be offline.")
+        except discord.Forbidden:
+            pass
+
+
 @tasks.loop(minutes=2)
 async def rust_status_loop():
     for guild_id_str in list(config.keys()):
@@ -1971,6 +2006,8 @@ async def rust_status_loop():
         cfg = config.get(guild_id_str, {})
         if cfg.get("rust_status_channel_id"):
             await refresh_rust_status_message(guild_id)
+        if cfg.get("rust_alert_channel_id"):
+            await check_rust_downtime(guild_id)
 
 
 @bot.tree.command(name="setrustserver", description="Connect this server to your Rust game server.")
@@ -2281,6 +2318,40 @@ async def refresh_minecraft_status_message(guild_id: int):
         pass
 
 
+async def check_minecraft_downtime(guild_id: int):
+    """Posts an alert when the Minecraft server's online/offline state changes."""
+    cfg = get_guild_cfg(guild_id)
+    alert_channel_id = cfg.get("mc_alert_channel_id")
+    host = cfg.get("mc_host")
+    port = cfg.get("mc_port")
+    if not alert_channel_id or not host or not port:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(alert_channel_id)
+    if channel is None:
+        return
+
+    was_online = cfg.get("mc_was_online", True)
+    try:
+        await query_minecraft_server(host, port)
+        is_online = True
+    except Exception:
+        is_online = False
+
+    if is_online != was_online:
+        cfg["mc_was_online"] = is_online
+        save_config(config)
+        try:
+            if is_online:
+                await channel.send(f"🟢 **{host}** is back online.")
+            else:
+                await channel.send(f"🔴 **{host}** appears to be offline.")
+        except discord.Forbidden:
+            pass
+
+
 @tasks.loop(minutes=2)
 async def minecraft_status_loop():
     for guild_id_str in list(config.keys()):
@@ -2291,6 +2362,8 @@ async def minecraft_status_loop():
         cfg = config.get(guild_id_str, {})
         if cfg.get("mc_status_channel_id"):
             await refresh_minecraft_status_message(guild_id)
+        if cfg.get("mc_alert_channel_id"):
+            await check_minecraft_downtime(guild_id)
 
 
 @bot.tree.command(name="setminecraftserver", description="Connect this server to your Minecraft server.")
@@ -2413,6 +2486,21 @@ async def web_set_minecraft_status_channel(guild_id: int, channel_id, actor_id: 
     return f"✅ Live server status will now be posted in #{channel.name}."
 
 
+async def web_set_minecraft_alert_channel(guild_id: int, channel_id, actor_id: int) -> str:
+    cfg = get_guild_cfg(guild_id)
+    if channel_id is None:
+        cfg.pop("mc_alert_channel_id", None)
+        save_config(config)
+        return "✅ Downtime alerts disabled."
+    guild = bot.get_guild(guild_id)
+    channel = guild.get_channel(channel_id) if guild else None
+    if channel is None:
+        return "❌ Couldn't find that channel."
+    cfg["mc_alert_channel_id"] = channel_id
+    save_config(config)
+    return f"✅ Downtime alerts will now post in #{channel.name}."
+
+
 async def web_get_minecraft_status(guild_id: int) -> dict:
     cfg = get_guild_cfg(guild_id)
     host = cfg.get("mc_host")
@@ -2509,6 +2597,21 @@ async def web_set_rust_status_channel(guild_id: int, channel_id, actor_id: int) 
     save_config(config)
     await refresh_rust_status_message(guild_id)
     return f"✅ Live server status will now be posted in #{channel.name}."
+
+
+async def web_set_rust_alert_channel(guild_id: int, channel_id, actor_id: int) -> str:
+    cfg = get_guild_cfg(guild_id)
+    if channel_id is None:
+        cfg.pop("rust_alert_channel_id", None)
+        save_config(config)
+        return "✅ Downtime alerts disabled."
+    guild = bot.get_guild(guild_id)
+    channel = guild.get_channel(channel_id) if guild else None
+    if channel is None:
+        return "❌ Couldn't find that channel."
+    cfg["rust_alert_channel_id"] = channel_id
+    save_config(config)
+    return f"✅ Downtime alerts will now post in #{channel.name}."
 
 
 async def web_get_rust_status(guild_id: int) -> dict:
@@ -5742,6 +5845,7 @@ if __name__ == "__main__":
         web_set_rust_server, web_set_rust_status_channel, web_get_rust_status, web_rust_command,
         rust_get_players, rust_kick_player, rust_ban_player, rust_get_banlist, rust_unban_player,
         web_set_backup_settings, web_run_backup_now,
+        web_set_rust_alert_channel, web_set_minecraft_alert_channel,
         web_set_minecraft_server, web_set_minecraft_status_channel, web_get_minecraft_status, web_minecraft_command,
         relay_incoming_webhook,
         web_tournament_create, web_tournament_start, web_tournament_report,
