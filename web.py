@@ -15,7 +15,9 @@ one OAuth app (the bot's own) and avoids a second set of API calls.
 """
 
 import asyncio
+import csv
 import html
+import io
 import json
 import os
 import secrets
@@ -244,6 +246,20 @@ BASE_STYLE = """
     border-color:var(--neon-cyan); background:linear-gradient(160deg, rgba(45,226,255,0.12), rgba(8,9,16,0.9));
     text-decoration:none; transform:translateY(-3px); box-shadow:0 6px 24px rgba(45,226,255,0.25);
   }
+  .stats-strip { display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:12px; margin:18px 0 24px; }
+  .stat-tile {
+    background:linear-gradient(160deg, rgba(20,22,38,0.8), rgba(8,9,16,0.9));
+    border:1px solid rgba(45,226,255,0.15); padding:16px; text-align:center;
+    clip-path:polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+  }
+  .stat-tile .num {
+    font-family:'Orbitron',sans-serif; font-size:26px; font-weight:800; color:var(--neon-cyan);
+    text-shadow:0 0 12px rgba(45,226,255,0.4);
+  }
+  .stat-tile .label {
+    font-family:'Share Tech Mono',monospace; font-size:10px; text-transform:uppercase;
+    letter-spacing:1px; color:#8b93ab; margin-top:4px;
+  }
   .page-layout { display:flex; gap:28px; align-items:flex-start; }
   .sidenav { width:190px; flex-shrink:0; position:sticky; top:24px; display:flex; flex-direction:column; gap:2px; }
   .sidenav a {
@@ -287,6 +303,7 @@ BASE_STYLE = """
 SIDENAV_SECTIONS = [
     ("General", [
         ("dashboard", "⚙️", "Settings"),
+        ("lookup_page", "🔎", "Member Lookup"),
         ("roles_page", "🎭", "Roles"),
         ("roster_page", "📋", "Roster"),
         ("moderation_page", "🛡️", "Moderation"),
@@ -805,9 +822,25 @@ def dashboard(guild_id):
     role_assets = _role_search_assets(guild)
     channel_assets = _channel_search_assets(guild)
 
+    roster_size = len(cfg.get("roster", []))
+    open_tickets = sum(1 for t in cfg.get("tickets", {}).values() if t.get("status") == "open")
+    total_warnings = sum(len(w) for w in cfg.get("warnings", {}).values())
+    afk_count = len(cfg.get("afk", {}))
+
+    stats_html = f"""
+    <div class="stats-strip">
+      <div class="stat-tile"><div class="num">{guild.member_count}</div><div class="label">Members</div></div>
+      <div class="stat-tile"><div class="num">{roster_size}</div><div class="label">On Roster</div></div>
+      <div class="stat-tile"><div class="num">{open_tickets}</div><div class="label">Open Tickets</div></div>
+      <div class="stat-tile"><div class="num">{total_warnings}</div><div class="label">Warnings</div></div>
+      <div class="stat-tile"><div class="num">{afk_count}</div><div class="label">Currently AFK</div></div>
+    </div>
+    """
+
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/guilds">&larr; All servers</a></div>
     <h1 style="margin-top:18px;">{guild_icon_html}{guild.name}</h1>
+    {stats_html}
     {flash_html}
     {role_assets}
     {channel_assets}
@@ -815,6 +848,7 @@ def dashboard(guild_id):
     <div class="card">
       <h2>⚡ Actions</h2>
       <div class="action-grid">
+        <a class="action-tile" href="/dashboard/{guild_id}/lookup"><span>🔎</span>Member Lookup</a>
         <a class="action-tile" href="/dashboard/{guild_id}/roles"><span>🎭</span>Roles</a>
         <a class="action-tile" href="/dashboard/{guild_id}/roster"><span>📋</span>Roster</a>
         <a class="action-tile" href="/dashboard/{guild_id}/moderation"><span>🛡️</span>Moderation</a>
@@ -1051,6 +1085,7 @@ def roster_page(guild_id):
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">📋 Roster Actions</h1>
+    <div class="hint" style="margin-bottom:18px;"><a href="/dashboard/{guild_id}/export/roster.csv">⬇️ Download roster as CSV</a></div>
     {result_html}
     {member_assets}
     {rank_assets}
@@ -1936,7 +1971,7 @@ def activity_page(guild_id):
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">📈 Message Activity</h1>
-    <div class="hint" style="margin-bottom:18px;">Counting since {since_label} — resets automatically every 7 days.</div>
+    <div class="hint" style="margin-bottom:18px;">Counting since {since_label} — resets automatically every 7 days. &middot; <a href="/dashboard/{guild_id}/export/activity.csv">⬇️ Download as CSV</a></div>
 
     <div class="card">
       <h2>Top {len(ranked)}</h2>
@@ -2304,6 +2339,7 @@ def warnings_page(guild_id):
 
     body = f"""
     <h1>⚠️ Warnings</h1>
+    <div class="hint" style="margin-bottom:18px;"><a href="/dashboard/{guild_id}/export/warnings.csv">⬇️ Download warnings as CSV</a></div>
     {result_html}
     {member_assets}
 
@@ -3203,6 +3239,195 @@ def mvp_end_route(guild_id):
         return redirect(url_for("guild_picker"))
     result = _run_async(_mvp_end(guild_id, session["user_id"]))
     return redirect(url_for("mvp_page", guild_id=guild_id, result=result))
+
+
+# ---------- member lookup ----------
+
+@app.route("/dashboard/<int:guild_id>/lookup")
+def lookup_page(guild_id):
+    guild, access_member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    member_assets = _member_search_assets(guild)
+
+    raw_user_id = request.args.get("user_id", "")
+    body_extra = ""
+
+    if raw_user_id:
+        try:
+            user_id = int(raw_user_id)
+        except ValueError:
+            user_id = None
+
+        target = guild.get_member(user_id) if user_id else None
+        name = target.display_name if target else f"Unknown ({raw_user_id})"
+        tag = str(target) if target else ""
+
+        # ---- roster / rank ----
+        roster_entry = next((r for r in cfg.get("roster", []) if r["user_id"] == user_id), None)
+        rank_role = guild.get_role(roster_entry["rank_role_id"]) if roster_entry else None
+        joined = _format_ts(target.joined_at.isoformat()) if target and target.joined_at else "—"
+
+        # ---- birthday / AFK ----
+        birthday = cfg.get("birthdays", {}).get(str(user_id), "Not set")
+        afk_entry = cfg.get("afk", {}).get(str(user_id))
+        afk_status = "😴 Currently AFK" + (f" — {afk_entry.get('reason','')}" if isinstance(afk_entry, dict) else "") if afk_entry else "Not AFK"
+
+        # ---- activity ----
+        msg_count = cfg.get("message_counts", {}).get(str(user_id), 0)
+
+        # ---- warnings ----
+        warnings = cfg.get("warnings", {}).get(str(user_id), [])
+        warning_rows = ""
+        for w in reversed(warnings):
+            mod = guild.get_member(w.get("moderator_id"))
+            warning_rows += f"<tr><td>{w.get('reason','')}</td><td>{mod.display_name if mod else '—'}</td><td class='hint'>{_format_ts(w.get('timestamp'))}</td></tr>"
+        if not warning_rows:
+            warning_rows = '<tr><td colspan="3" class="hint" style="padding:12px;">No warnings.</td></tr>'
+
+        # ---- history ----
+        history = cfg.get("history", {}).get(str(user_id), [])
+        history_rows = ""
+        for h in reversed(history[-25:]):
+            mod = guild.get_member(h.get("moderator_id"))
+            history_rows += f"<tr><td>{h.get('action','')}</td><td>{h.get('detail','')}</td><td>{mod.display_name if mod else '—'}</td><td class='hint'>{_format_ts(h.get('timestamp'))}</td></tr>"
+        if not history_rows:
+            history_rows = '<tr><td colspan="4" class="hint" style="padding:12px;">No history.</td></tr>'
+
+        # ---- tickets ----
+        tickets = [t for t in cfg.get("tickets", {}).values() if t.get("user_id") == user_id]
+        tickets.sort(key=lambda t: t.get("id", 0), reverse=True)
+        ticket_rows = ""
+        for t in tickets:
+            status = t.get("status", "open")
+            color = "#5ee0a0" if status == "open" else "#80848e"
+            pill = f'<span class="pill" style="background:{color}22; border-color:{color}55; color:{color};">{status}</span>'
+            link = f'<a href="/dashboard/{guild_id}/tickets/{t["id"]}">#{t["id"]}</a>' if status == "open" else f"#{t['id']}"
+            ticket_rows += f"<tr><td>{link}</td><td>{t.get('type_name') or '—'}</td><td>{pill}</td><td class='hint'>{_format_ts(t.get('created_at'))}</td></tr>"
+        if not ticket_rows:
+            ticket_rows = '<tr><td colspan="4" class="hint" style="padding:12px;">No tickets.</td></tr>'
+
+        body_extra = f"""
+        <div class="card">
+          <h2>👤 {name} {f'<span class="hint" style="font-weight:400;">({tag})</span>' if tag else ''}</h2>
+          <div class="grid-2">
+            <div class="field"><label>Rank</label><div>{('@' + rank_role.name) if rank_role else '— Not on roster —'}</div></div>
+            <div class="field"><label>Joined server</label><div>{joined}</div></div>
+            <div class="field"><label>Birthday</label><div>{birthday}</div></div>
+            <div class="field"><label>AFK status</label><div>{afk_status}</div></div>
+            <div class="field"><label>Messages this week</label><div>{msg_count}</div></div>
+            <div class="field"><label>Total warnings</label><div>{len(warnings)}</div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>⚠️ Warnings</h2>
+          <div class="log-wrap"><table class="log-table">
+            <tr><th>Reason</th><th>By</th><th>When</th></tr>
+            {warning_rows}
+          </table></div>
+        </div>
+
+        <div class="card">
+          <h2>🗂️ Rank / Roster History</h2>
+          <div class="log-wrap"><table class="log-table">
+            <tr><th>Action</th><th>Detail</th><th>By</th><th>When</th></tr>
+            {history_rows}
+          </table></div>
+        </div>
+
+        <div class="card">
+          <h2>🎫 Tickets</h2>
+          <div class="log-wrap"><table class="log-table">
+            <tr><th>#</th><th>Type</th><th>Status</th><th>Opened</th></tr>
+            {ticket_rows}
+          </table></div>
+        </div>
+        """
+
+    body = f"""
+    <h1>🔎 Member Lookup</h1>
+    <div class="hint" style="margin-bottom:18px;">Everything the bot knows about one person, in one place.</div>
+    {member_assets}
+
+    <div class="card">
+      <form method="get">
+        {_member_search_field("Search a member", "user_id")}
+        <button class="btn" type="submit">Look Up</button>
+      </form>
+    </div>
+
+    {body_extra}
+    """
+    return render_page(f"{guild.name} — Member Lookup", body, guild_id=guild_id)
+
+
+# ---------- CSV exports ----------
+
+def _csv_response(filename, header, rows):
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(header)
+    writer.writerows(rows)
+    return Response(
+        buf.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route("/dashboard/<int:guild_id>/export/roster.csv")
+def export_roster_csv(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    cfg = _get_guild_cfg(guild_id)
+
+    rows = []
+    for entry in cfg.get("roster", []):
+        m = guild.get_member(entry["user_id"])
+        role = guild.get_role(entry.get("rank_role_id"))
+        rows.append([
+            entry["user_id"],
+            m.display_name if m else "(left server)",
+            str(m) if m else "",
+            role.name if role else "",
+            entry.get("last_rank_change", ""),
+        ])
+    return _csv_response(f"roster-{guild_id}.csv", ["User ID", "Display Name", "Username", "Rank", "Last Rank Change"], rows)
+
+
+@app.route("/dashboard/<int:guild_id>/export/warnings.csv")
+def export_warnings_csv(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    cfg = _get_guild_cfg(guild_id)
+
+    rows = []
+    for uid_str, entries in cfg.get("warnings", {}).items():
+        m = guild.get_member(int(uid_str))
+        name = m.display_name if m else f"Unknown ({uid_str})"
+        for w in entries:
+            mod = guild.get_member(w.get("moderator_id"))
+            rows.append([uid_str, name, w.get("reason", ""), mod.display_name if mod else "", w.get("timestamp", "")])
+    return _csv_response(f"warnings-{guild_id}.csv", ["User ID", "Display Name", "Reason", "Moderator", "Timestamp"], rows)
+
+
+@app.route("/dashboard/<int:guild_id>/export/activity.csv")
+def export_activity_csv(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    cfg = _get_guild_cfg(guild_id)
+
+    rows = []
+    for uid_str, count in sorted(cfg.get("message_counts", {}).items(), key=lambda kv: kv[1], reverse=True):
+        m = guild.get_member(int(uid_str))
+        name = m.display_name if m else f"Unknown ({uid_str})"
+        rows.append([uid_str, name, count])
+    return _csv_response(f"activity-{guild_id}.csv", ["User ID", "Display Name", "Messages"], rows)
 
 
 # ---------- backup download ----------
