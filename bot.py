@@ -40,6 +40,7 @@ Commands:
   /kick user:<member> reason:<text>       - kick a member — asks for confirmation
   /ban user:<member> reason:<text> [delete_days] - ban a member — asks for confirmation
   /timeout user:<member> minutes:<int> reason:<text> - temporarily mute a member
+  /untimeout user:<member> [reason]       - remove a member's timeout early
   /warn user:<member> reason:<text>       - log a warning against a member
   /warnings [user]                        - show a member's warning history (defaults to you)
   /purge amount:<1-100>                   - bulk-delete recent messages in this channel
@@ -798,6 +799,34 @@ async def web_timeout(guild_id: int, user_id: int, minutes: int, reason: str, ac
     await log_movement(guild, member=member, target=f"timed out ({minutes}m)", reason=reason, moderator=actor)
     note = "" if dm_sent else " (couldn't DM them)"
     return f"✅ Timed out {member.display_name} for {minutes} minute(s).{note}"
+
+
+async def web_untimeout(guild_id: int, user_id: int, reason: str, actor_id: int) -> str:
+    """Mirrors /untimeout."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    actor = guild.get_member(actor_id)
+    if member is None or actor is None:
+        return "❌ Couldn't find that member or your account in this server."
+    if not guild.me.guild_permissions.moderate_members:
+        return "❌ I don't have permission to manage timeouts."
+    if member.timed_out_until is None:
+        return f"ℹ️ {member.display_name} isn't currently timed out."
+
+    try:
+        await member.timeout(None, reason=f"By {actor} via web dashboard: {reason}")
+    except discord.Forbidden:
+        return "❌ I don't have permission to remove that member's timeout."
+
+    dm_sent = await dm_notify(
+        guild, member, title="🔊 Your timeout was removed", color=discord.Color.green(),
+        fields={"Reason": reason},
+    )
+    await log_movement(guild, member=member, target="timeout removed", reason=reason, moderator=actor)
+    note = "" if dm_sent else " (couldn't DM them)"
+    return f"✅ Removed timeout from {member.display_name}.{note}"
 
 
 async def web_warn(guild_id: int, user_id: int, reason: str, actor_id: int) -> str:
@@ -4594,6 +4623,38 @@ async def timeout(interaction: discord.Interaction, user: discord.Member, minute
     )
 
 
+@bot.tree.command(name="untimeout", description="Remove a member's timeout early.")
+@app_commands.describe(user="The member to remove the timeout from", reason="Why you're removing it")
+async def untimeout(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason given"):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not interaction.guild.me.guild_permissions.moderate_members:
+        await interaction.response.send_message("❌ I don't have permission to manage timeouts.", ephemeral=True)
+        return
+    if user.timed_out_until is None:
+        await interaction.response.send_message(f"ℹ️ {user.mention} isn't currently timed out.", ephemeral=True)
+        return
+
+    try:
+        await user.timeout(None, reason=f"By {interaction.user} via /untimeout: {reason}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to remove that member's timeout.", ephemeral=True)
+        return
+
+    dm_sent = await dm_notify(
+        interaction.guild, user,
+        title="🔊 Your timeout was removed",
+        color=discord.Color.green(),
+        fields={"Reason": reason},
+    )
+    note = "" if dm_sent else " (couldn't DM them)"
+    await interaction.response.send_message(f"✅ Removed timeout from {user.mention}.{note}", ephemeral=True)
+    await log_movement(
+        interaction.guild, member=user, target="timeout removed", reason=reason, moderator=interaction.user
+    )
+
+
 @bot.tree.command(name="warn", description="Log a warning against a member.")
 @app_commands.describe(user="The member to warn", reason="Why you're warning them")
 async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
@@ -5211,6 +5272,7 @@ HELP_CATEGORIES = {
         ("/kick", "Kick a member (confirmation required)"),
         ("/ban", "Ban a member (confirmation required)"),
         ("/timeout", "Temporarily mute a member"),
+        ("/untimeout", "Remove a member's timeout early"),
         ("/warn", "Log a warning against a member"),
         ("/warnings", "Show a member's warning history"),
         ("/purge", "Bulk-delete recent messages"),
@@ -5521,7 +5583,7 @@ if __name__ == "__main__":
         bot, config, save_config, get_guild_cfg,
         web_give_role, web_remove_role,
         web_roster_add, web_roster_remove, web_promote, web_demote,
-        web_kick, web_ban, web_timeout, web_warn,
+        web_kick, web_ban, web_timeout, web_untimeout, web_warn,
         web_mass_add_role, web_mass_remove_role, web_mass_rename,
         web_announce, web_massannounce,
         web_showcase_add, web_showcase_remove,

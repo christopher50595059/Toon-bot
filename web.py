@@ -49,6 +49,7 @@ _demote = None
 _kick = None
 _ban = None
 _timeout = None
+_untimeout = None
 _warn = None
 _mass_add_role = None
 _mass_remove_role = None
@@ -1194,6 +1195,15 @@ def moderation_page(guild_id):
     </div>
 
     <div class="card">
+      <h2>🔊 Remove Timeout</h2>
+      <form method="post" action="/dashboard/{guild_id}/moderation/untimeout">
+        {_member_search_field()}
+        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" value="No reason given"></div>
+        <button class="btn btn-secondary" type="submit">Remove Timeout</button>
+      </form>
+    </div>
+
+    <div class="card">
       <h2>👢 Kick</h2>
       <form method="post" action="/dashboard/{guild_id}/moderation/kick">
         {_member_search_field()}
@@ -1261,6 +1271,20 @@ def moderation_timeout(guild_id):
         return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick a member and a valid duration."))
     reason = request.form.get("reason", "").strip() or "No reason given"
     result = _run_async(_timeout(guild_id, user_id, minutes, reason, session["user_id"]))
+    return redirect(url_for("moderation_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/moderation/untimeout", methods=["POST"])
+def moderation_untimeout(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        user_id = int(request.form["user_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick a member."))
+    reason = request.form.get("reason", "").strip() or "No reason given"
+    result = _run_async(_untimeout(guild_id, user_id, reason, session["user_id"]))
     return redirect(url_for("moderation_page", guild_id=guild_id, result=result))
 
 
@@ -3207,7 +3231,7 @@ def start_web_app(
     bot, config, save_config, get_guild_cfg,
     give_role, remove_role,
     roster_add, roster_remove, promote, demote,
-    kick, ban, timeout, warn,
+    kick, ban, timeout, untimeout, warn,
     mass_add_role, mass_remove_role, mass_rename,
     announce, massannounce,
     showcase_add, showcase_remove,
@@ -3225,7 +3249,7 @@ def start_web_app(
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
     global _bot, _config, _save_config, _get_guild_cfg, _give_role, _remove_role
-    global _roster_add, _roster_remove, _promote, _demote, _kick, _ban, _timeout, _warn
+    global _roster_add, _roster_remove, _promote, _demote, _kick, _ban, _timeout, _untimeout, _warn
     global _mass_add_role, _mass_remove_role, _mass_rename, _announce, _massannounce
     global _showcase_add, _showcase_remove, _open_ticket, _close_ticket, _set_ticket_channel
     global _send_dm
@@ -3250,6 +3274,7 @@ def start_web_app(
     _kick = kick
     _ban = ban
     _timeout = timeout
+    _untimeout = untimeout
     _warn = warn
     _mass_add_role = mass_add_role
     _mass_remove_role = mass_remove_role
