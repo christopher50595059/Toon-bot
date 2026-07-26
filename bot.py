@@ -82,6 +82,8 @@ Commands:
   /mybirthday                             - show your currently saved birthday
   /setbirthdayrole [role]                 - (admin only) role auto-given on someone's birthday (omit to disable)
   /setbirthdaychannel [channel]           - (admin only) channel for birthday shoutouts (omit to disable)
+  /weblogin                               - get a one-time code to log into the web dashboard without Discord OAuth
+  /setweblogincommandrole [role]          - (admin only) restrict who can run /weblogin (omit to allow everyone)
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -94,7 +96,9 @@ import io
 import json
 import os
 import random
+import secrets
 import socket
+import string
 import tempfile
 import threading
 from datetime import date, datetime, timedelta, timezone
@@ -2982,6 +2986,66 @@ def is_authorized(interaction: discord.Interaction) -> bool:
     return any(r.id == manager_role_id for r in member.roles)
 
 
+# ---------- web dashboard login codes (fallback when Discord OAuth doesn't work) ----------
+#
+# A one-time, short-lived code generated via a slash command, redeemable on
+# the dashboard's login page. Lets someone log in as themselves without
+# going through Discord's OAuth web flow at all — useful if that flow is
+# blocked (corporate firewall, browser cookie settings, etc.) while Discord
+# itself still works fine for them.
+
+web_login_codes: dict[str, dict] = {}  # code -> {"user_id": int, "expires_at": iso str}
+
+
+@bot.tree.command(name="weblogin", description="Get a one-time code to log into the web dashboard without Discord OAuth.")
+async def weblogin(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    weblogin_role_id = cfg.get("weblogin_role_id")
+    member = interaction.user
+    if weblogin_role_id and isinstance(member, discord.Member):
+        has_role = any(r.id == weblogin_role_id for r in member.roles)
+        if not (member.guild_permissions.administrator or has_role):
+            await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+            return
+
+    code = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    web_login_codes[code] = {"user_id": interaction.user.id, "expires_at": expires_at.isoformat()}
+
+    await interaction.response.send_message(
+        f"🔑 Your one-time login code: **{code}**\n"
+        f"Valid for 10 minutes. Go to the dashboard's login page and click \"Use a login code instead.\"",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="setweblogincommandrole", description="Restrict /weblogin to a specific role (admins can always use it).")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(role="Who can run /weblogin — omit to allow everyone")
+async def setweblogincommandrole(interaction: discord.Interaction, role: discord.Role = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if role is None:
+        cfg.pop("weblogin_role_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Anyone can now use /weblogin.", ephemeral=True)
+        return
+    cfg["weblogin_role_id"] = role.id
+    save_config(config)
+    await interaction.response.send_message(f"✅ Only Administrators and @{role.name} can now use /weblogin.", ephemeral=True)
+
+
+def redeem_web_login_code(code: str):
+    """Returns the Discord user ID if the code is valid and unexpired, else
+    None. One-time use — the code is removed either way once checked."""
+    entry = web_login_codes.pop(code.strip().upper(), None)
+    if entry is None:
+        return None
+    expires_at = datetime.fromisoformat(entry["expires_at"])
+    if datetime.now(timezone.utc) > expires_at:
+        return None
+    return entry["user_id"]
+
+
 class ConfirmView(discord.ui.View):
     """A Confirm/Cancel button pair for actions that deserve a second look
     (e.g. demotes, roster removals) before they take effect."""
@@ -5539,6 +5603,8 @@ HELP_CATEGORIES = {
     ],
     "🔧 Utility": [
         ("/afk", "Mark yourself AFK"),
+        ("/weblogin", "Get a one-time code to log into the web dashboard"),
+        ("/setweblogincommandrole", "(admin) Restrict who can run /weblogin"),
         ("/announce", "Post a formatted announcement to one channel"),
         ("/massannounce", "Post + speak an announcement everywhere (text + VC)"),
         ("/setvcgreeting / removevcgreeting", "Bot speaks a custom greeting when someone joins a VC"),
@@ -5818,6 +5884,7 @@ bot.tree.add_command(showcase_group)
 @setruststatuschannel.error
 @setminecraftserver.error
 @setminecraftstatuschannel.error
+@setweblogincommandrole.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -5847,5 +5914,6 @@ if __name__ == "__main__":
         web_tournament_report, web_gamenight_create, web_gamenight_cancel, web_mvp_start,
         web_mvp_end, web_add_ticket_category, web_remove_ticket_category, web_set_ticket_questions,
         web_get_ticket_messages, web_send_ticket_message, web_set_backup_settings, web_run_backup_now,
+        redeem_web_login_code,
     )
     bot.run(TOKEN)

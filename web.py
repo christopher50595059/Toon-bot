@@ -100,6 +100,7 @@ _remove_ticket_category = None
 _set_ticket_questions = None
 _get_ticket_messages = None
 _send_ticket_message = None
+_redeem_web_login_code = None
 
 
 # ---------- shared page chrome ----------
@@ -531,6 +532,7 @@ def home():
               <h1 style="font-size:28px; margin-bottom:10px;">Bot Control Deck</h1>
               <p class="hint" style="font-size:14px; margin-bottom:24px;">Manage roles, moderation, tickets, integrations, and more — all from your browser.</p>
               <a class="btn" href="/login" style="padding:13px 32px; font-size:14px;">🔐 Login with Discord</a>
+              <div class="hint" style="margin-top:18px;"><a href="/login/code">Having trouble? Use a login code instead →</a></div>
             </div>
         """, show_logout=False)
     return redirect(url_for("guild_picker"))
@@ -551,6 +553,58 @@ def login():
     }
     query = "&".join(f"{k}={requests.utils.quote(v)}" for k, v in params.items())
     return redirect(f"{DISCORD_API}/oauth2/authorize?{query}")
+
+
+# ---------- code-based login (fallback when Discord OAuth doesn't work) ----------
+
+@app.route("/login/code")
+def login_code_page():
+    error = request.args.get("error", "")
+    error_html = f'<div class="flash" style="background:linear-gradient(135deg,rgba(255,80,80,0.15),rgba(40,20,20,0.9)); border-color:rgba(255,80,80,0.4); color:#ffc8c8;">{error}</div>' if error else ""
+    return render_page("Login with code", f"""
+        <div class="card" style="text-align:center; padding:40px 32px;">
+          <div style="font-size:40px; margin-bottom:8px;">🔑</div>
+          <h1 style="font-size:24px; margin-bottom:10px;">Login with a code</h1>
+          <p class="hint" style="font-size:14px; margin-bottom:20px;">
+            In Discord, run <code>/weblogin</code> in any server the bot is in. It'll reply with a 6-character
+            one-time code, valid for 10 minutes. Enter it below.
+          </p>
+          {error_html}
+          <form method="post" action="/login/code" style="max-width:280px; margin:0 auto;">
+            <div class="field"><input type="text" name="code" placeholder="ABC123" maxlength="6" autocomplete="off" style="text-align:center; text-transform:uppercase; font-size:20px; letter-spacing:4px;" required></div>
+            <button class="btn" type="submit" style="width:100%;">Log In</button>
+          </form>
+          <div class="hint" style="margin-top:18px;"><a href="/login">← Back to Discord login</a></div>
+        </div>
+    """, show_logout=False)
+
+
+@app.route("/login/code", methods=["POST"])
+def login_code_submit():
+    code = request.form.get("code", "").strip()
+    if not code:
+        return redirect(url_for("login_code_page", error="Enter a code."))
+
+    user_id = _redeem_web_login_code(code)
+    if user_id is None:
+        return redirect(url_for("login_code_page", error="That code is invalid or has expired — run /weblogin again for a new one."))
+
+    user = _bot.get_user(user_id)
+    session["user_id"] = user_id
+    session["username"] = user.name if user else "there"
+
+    for guild in _admin_guilds_for(user_id):
+        cfg = _get_guild_cfg(guild.id)
+        logins = cfg.setdefault("dashboard_logins", [])
+        logins.append({
+            "user_id": user_id,
+            "username": session["username"],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        cfg["dashboard_logins"] = logins[-100:]
+    _save_config(_config)
+
+    return redirect(url_for("guild_picker"))
 
 
 @app.route("/callback")
@@ -1021,6 +1075,7 @@ def dashboard(guild_id):
         <div class="grid-2">
           {_role_search_field("Manager role (can use staff commands)", "manager_role", guild, cfg.get('manager_role_id'))}
           {_role_search_field("Birthday role", "birthday_role", guild, cfg.get('birthday_role_id'))}
+          {_role_search_field("Who can run /weblogin (blank = everyone)", "weblogin_role", guild, cfg.get('weblogin_role_id'))}
         </div>
       </div>
 
@@ -1077,6 +1132,7 @@ def dashboard_save(guild_id):
     set_or_clear("showcase_channel_id", "showcase_channel")
     set_or_clear("manager_role_id", "manager_role")
     set_or_clear("birthday_role_id", "birthday_role")
+    set_or_clear("weblogin_role_id", "weblogin_role")
 
     ranks = []
     for i in range(8):
@@ -4159,6 +4215,7 @@ def start_web_app(
     add_ticket_category, remove_ticket_category, set_ticket_questions,
     get_ticket_messages, send_ticket_message,
     set_backup_settings, run_backup_now,
+    redeem_web_login_code,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -4176,6 +4233,7 @@ def start_web_app(
     global _mvp_start, _mvp_end
     global _add_ticket_category, _remove_ticket_category, _set_ticket_questions
     global _get_ticket_messages, _send_ticket_message
+    global _redeem_web_login_code
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -4231,6 +4289,7 @@ def start_web_app(
     _set_ticket_questions = set_ticket_questions
     _get_ticket_messages = get_ticket_messages
     _send_ticket_message = send_ticket_message
+    _redeem_web_login_code = redeem_web_login_code
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 
