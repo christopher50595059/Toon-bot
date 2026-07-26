@@ -68,6 +68,11 @@ _set_rust_server = None
 _set_rust_status_channel = None
 _get_rust_status = None
 _rust_command = None
+_rust_get_players = None
+_rust_kick_player = None
+_rust_ban_player = None
+_rust_get_banlist = None
+_rust_unban_player = None
 _set_minecraft_server = None
 _set_minecraft_status_channel = None
 _get_minecraft_status = None
@@ -312,7 +317,9 @@ SIDENAV_SECTIONS = [
         ("warnings_page", "⚠️", "Warnings"),
     ]),
     ("Integrations", [
-        ("rust_page", "🦀", "Rust Server"),
+        ("rust_page", "🦀", "Rust: Overview"),
+        ("rust_players_page", "🎮", "Rust: Players"),
+        ("rust_bans_page", "🚫", "Rust: Bans"),
         ("minecraft_page", "⛏️", "Minecraft Server"),
         ("webhooks_page", "🔌", "Webhooks"),
     ]),
@@ -856,6 +863,8 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/moderation"><span>🛡️</span>Moderation</a>
         <a class="action-tile" href="/dashboard/{guild_id}/warnings"><span>⚠️</span>Warnings</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust"><span>🦀</span>Rust Server</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/rust/players"><span>🎮</span>Rust Players</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/rust/bans"><span>🚫</span>Rust Bans</a>
         <a class="action-tile" href="/dashboard/{guild_id}/minecraft"><span>⛏️</span>Minecraft Server</a>
         <a class="action-tile" href="/dashboard/{guild_id}/webhooks"><span>🔌</span>Webhooks</a>
         <a class="action-tile" href="/dashboard/{guild_id}/tournaments"><span>🏆</span>Tournaments</a>
@@ -2682,6 +2691,241 @@ def rust_command_route(guild_id):
     return redirect(url_for("rust_page", guild_id=guild_id, result=f"📟 {result}"))
 
 
+@app.route("/dashboard/<int:guild_id>/rust/players")
+def rust_players_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    data = _run_async(_rust_get_players(guild_id))
+    if data.get("error"):
+        players_html = f'<div class="hint" style="color:#ff8080; padding:12px;">⚠️ {data["error"]}</div>'
+    else:
+        players = data.get("players", [])
+        if not players:
+            players_html = '<div class="hint" style="padding:12px;">Nobody online right now.</div>'
+        else:
+            rows = ""
+            for p in players:
+                steam_id = str(p.get("SteamID", ""))
+                name = html.escape(str(p.get("DisplayName", "Unknown")))
+                ping = p.get("Ping", "—")
+                connected = p.get("ConnectedSeconds", 0)
+                mins = connected // 60 if isinstance(connected, int) else "—"
+                rows += f"""
+                <tr>
+                  <td>{name}</td>
+                  <td class="hint">{steam_id}</td>
+                  <td>{ping}</td>
+                  <td>{mins}m</td>
+                  <td style="white-space:nowrap;">
+                    <form method="post" action="/dashboard/{guild_id}/rust/players/kick" style="display:inline;">
+                      <input type="hidden" name="steam_id" value="{steam_id}">
+                      <input type="hidden" name="player_name" value="{name}">
+                      <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Kick</button>
+                    </form>
+                    <form method="post" action="/dashboard/{guild_id}/rust/players/ban" style="display:inline;">
+                      <input type="hidden" name="steam_id" value="{steam_id}">
+                      <input type="hidden" name="player_name" value="{name}">
+                      <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Ban</button>
+                    </form>
+                  </td>
+                </tr>
+                """
+            players_html = f"""
+            <div class="log-wrap"><table class="log-table">
+              <tr><th>Name</th><th>SteamID</th><th>Ping</th><th>Time</th><th></th></tr>
+              {rows}
+            </table></div>
+            """
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}/rust">&larr; Rust Overview</a></div>
+    <h1 style="margin-top:18px;">🎮 Rust Players</h1>
+    {result_html}
+
+    <div class="card-row">
+      <div class="card">
+        <h2>📣 Announce</h2>
+        <form method="post" action="/dashboard/{guild_id}/rust/quick/announce">
+          <div class="field"><input type="text" name="message" placeholder="Message to broadcast in-game" required></div>
+          <button class="btn" type="submit">Send</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>💾 Save & Time</h2>
+        <form method="post" action="/dashboard/{guild_id}/rust/quick/save" style="margin-bottom:10px;">
+          <button class="btn btn-secondary" type="submit">Force Save</button>
+        </form>
+        <form method="post" action="/dashboard/{guild_id}/rust/quick/settime" style="display:flex; gap:8px; align-items:flex-end;">
+          <div class="field" style="flex:1; margin-bottom:0;"><label>Time of day (0-24)</label><input type="number" name="hour" min="0" max="24" step="0.5" placeholder="12" required></div>
+          <button class="btn btn-secondary" type="submit" style="padding:8px 14px;">Set</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Online now ({data.get("players", []).__len__() if not data.get("error") else "?"})</h2>
+      {players_html}
+    </div>
+    """
+    return render_page(f"{guild.name} — Rust Players", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/rust/players/kick", methods=["POST"])
+def rust_players_kick_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    steam_id = request.form.get("steam_id", "").strip()
+    name = request.form.get("player_name", steam_id)
+    if not steam_id:
+        return redirect(url_for("rust_players_page", guild_id=guild_id, result="❌ Missing SteamID."))
+    result = _run_async(_rust_kick_player(guild_id, steam_id, f"Kicked by staff via dashboard ({name})", session["user_id"]))
+    return redirect(url_for("rust_players_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/players/ban", methods=["POST"])
+def rust_players_ban_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    steam_id = request.form.get("steam_id", "").strip()
+    name = request.form.get("player_name", steam_id)
+    if not steam_id:
+        return redirect(url_for("rust_players_page", guild_id=guild_id, result="❌ Missing SteamID."))
+    result = _run_async(_rust_ban_player(guild_id, steam_id, f"Banned by staff via dashboard ({name})", session["user_id"]))
+    return redirect(url_for("rust_players_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/quick/announce", methods=["POST"])
+def rust_quick_announce_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    message = request.form.get("message", "").strip()
+    if not message:
+        return redirect(url_for("rust_players_page", guild_id=guild_id, result="❌ Write a message."))
+    safe = message.replace('"', "'")
+    result = _run_async(_rust_command(guild_id, f'say "{safe}"', session["user_id"]))
+    return redirect(url_for("rust_players_page", guild_id=guild_id, result=f"📣 Announced. {result}"))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/quick/save", methods=["POST"])
+def rust_quick_save_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    result = _run_async(_rust_command(guild_id, "server.save", session["user_id"]))
+    return redirect(url_for("rust_players_page", guild_id=guild_id, result=f"💾 {result}"))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/quick/settime", methods=["POST"])
+def rust_quick_settime_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    hour = request.form.get("hour", "").strip()
+    try:
+        float(hour)
+    except ValueError:
+        return redirect(url_for("rust_players_page", guild_id=guild_id, result="❌ Enter a valid hour (0-24)."))
+    result = _run_async(_rust_command(guild_id, f"env.time {hour}", session["user_id"]))
+    return redirect(url_for("rust_players_page", guild_id=guild_id, result=f"🕐 {result}"))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/bans")
+def rust_bans_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    data = _run_async(_rust_get_banlist(guild_id))
+    if data.get("error"):
+        bans_html = f'<div class="hint" style="color:#ff8080; padding:12px;">⚠️ {data["error"]}</div>'
+    else:
+        bans = data.get("bans", [])
+        if not bans:
+            bans_html = '<div class="hint" style="padding:12px;">No bans on record (or none could be parsed — try the raw command on the Overview page if this looks wrong).</div>'
+        else:
+            rows = ""
+            for b in bans:
+                rows += f"""
+                <tr>
+                  <td>{html.escape(b.get('name',''))}</td>
+                  <td class="hint">{b.get('steam_id','')}</td>
+                  <td>{html.escape(b.get('reason',''))}</td>
+                  <td>
+                    <form method="post" action="/dashboard/{guild_id}/rust/bans/unban" style="margin:0;">
+                      <input type="hidden" name="steam_id" value="{b.get('steam_id','')}">
+                      <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Unban</button>
+                    </form>
+                  </td>
+                </tr>
+                """
+            bans_html = f"""
+            <div class="log-wrap"><table class="log-table">
+              <tr><th>Name</th><th>SteamID</th><th>Reason</th><th></th></tr>
+              {rows}
+            </table></div>
+            """
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}/rust">&larr; Rust Overview</a></div>
+    <h1 style="margin-top:18px;">🚫 Rust Bans</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>➕ Ban by SteamID</h2>
+      <div class="hint" style="margin-bottom:12px;">For banning someone who isn't currently online. For online players, use the Players page instead.</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/bans/add">
+        <div class="grid-2">
+          <div class="field"><label>SteamID</label><input type="text" name="steam_id" placeholder="76561198000000000" required></div>
+          <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        </div>
+        <button class="btn btn-secondary" type="submit">Ban</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Current bans</h2>
+      {bans_html}
+    </div>
+    """
+    return render_page(f"{guild.name} — Rust Bans", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/rust/bans/add", methods=["POST"])
+def rust_bans_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    steam_id = request.form.get("steam_id", "").strip()
+    reason = request.form.get("reason", "").strip()
+    if not steam_id or not reason:
+        return redirect(url_for("rust_bans_page", guild_id=guild_id, result="❌ Fill in both fields."))
+    result = _run_async(_rust_ban_player(guild_id, steam_id, reason, session["user_id"]))
+    return redirect(url_for("rust_bans_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/bans/unban", methods=["POST"])
+def rust_bans_unban_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    steam_id = request.form.get("steam_id", "").strip()
+    if not steam_id:
+        return redirect(url_for("rust_bans_page", guild_id=guild_id, result="❌ Missing SteamID."))
+    result = _run_async(_rust_unban_player(guild_id, steam_id, session["user_id"]))
+    return redirect(url_for("rust_bans_page", guild_id=guild_id, result=result))
+
+
 # ---------- Minecraft server integration ----------
 
 @app.route("/dashboard/<int:guild_id>/minecraft")
@@ -3463,6 +3707,7 @@ def start_web_app(
     open_ticket, close_ticket, set_ticket_channel,
     send_dm,
     set_rust_server, set_rust_status_channel, get_rust_status, rust_command,
+    rust_get_players, rust_kick_player, rust_ban_player, rust_get_banlist, rust_unban_player,
     set_minecraft_server, set_minecraft_status_channel, get_minecraft_status, minecraft_command,
     relay_incoming_webhook,
     tournament_create, tournament_start, tournament_report,
@@ -3479,6 +3724,7 @@ def start_web_app(
     global _showcase_add, _showcase_remove, _open_ticket, _close_ticket, _set_ticket_channel
     global _send_dm
     global _set_rust_server, _set_rust_status_channel, _get_rust_status, _rust_command
+    global _rust_get_players, _rust_kick_player, _rust_ban_player, _rust_get_banlist, _rust_unban_player
     global _set_minecraft_server, _set_minecraft_status_channel, _get_minecraft_status, _minecraft_command
     global _relay_incoming_webhook
     global _tournament_create, _tournament_start, _tournament_report
@@ -3516,6 +3762,11 @@ def start_web_app(
     _set_rust_status_channel = set_rust_status_channel
     _get_rust_status = get_rust_status
     _rust_command = rust_command
+    _rust_get_players = rust_get_players
+    _rust_kick_player = rust_kick_player
+    _rust_ban_player = rust_ban_player
+    _rust_get_banlist = rust_get_banlist
+    _rust_unban_player = rust_unban_player
     _set_minecraft_server = set_minecraft_server
     _set_minecraft_status_channel = set_minecraft_status_channel
     _get_minecraft_status = get_minecraft_status

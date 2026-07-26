@@ -2541,6 +2541,86 @@ async def web_rust_command(guild_id: int, cmd: str, actor_id: int) -> str:
     return response.strip() if response and response.strip() else "(no output)"
 
 
+async def rust_get_players(guild_id: int) -> dict:
+    """Returns {"players": [...]} or {"error": "..."}. Uses Rust's built-in
+    `playerlist` RCON command, which returns JSON on modern servers."""
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return {"error": "RCON isn't connected. Set up your RCON port and password first.", "players": []}
+    try:
+        raw = await conn.send_command("playerlist")
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return {"players": data, "error": None}
+        return {"players": [], "error": "Unexpected response format from playerlist."}
+    except json.JSONDecodeError:
+        return {"players": [], "error": "Couldn't parse the server's player list response."}
+    except Exception as e:
+        return {"players": [], "error": str(e)}
+
+
+async def rust_kick_player(guild_id: int, steam_id: str, reason: str, actor_id: int) -> str:
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return "❌ RCON isn't connected."
+    safe_reason = reason.replace('"', "'")
+    try:
+        await conn.send_command(f'kick {steam_id} "{safe_reason}"')
+    except Exception as e:
+        return f"❌ Kick failed: {e}"
+    return f"✅ Kicked {steam_id}."
+
+
+async def rust_ban_player(guild_id: int, steam_id: str, reason: str, actor_id: int) -> str:
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return "❌ RCON isn't connected."
+    safe_reason = reason.replace('"', "'")
+    try:
+        await conn.send_command(f'ban {steam_id} "{safe_reason}"')
+    except Exception as e:
+        return f"❌ Ban failed: {e}"
+    return f"✅ Banned {steam_id}."
+
+
+async def rust_get_banlist(guild_id: int) -> dict:
+    """Returns {"bans": [...]} or {"error": "..."}. Parses Rust's `banlistex`
+    output — best-effort, since exact formatting can vary slightly by
+    version. If this comes back empty/wrong, run the raw command via the
+    RCON console below and share the output so parsing can be adjusted."""
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return {"error": "RCON isn't connected. Set up your RCON port and password first.", "bans": []}
+    try:
+        raw = await conn.send_command("banlistex")
+        bans = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 2 and parts[0].isdigit():
+                bans.append({
+                    "steam_id": parts[0],
+                    "name": parts[1] if len(parts) > 1 else "",
+                    "reason": parts[2] if len(parts) > 2 else "",
+                })
+        return {"bans": bans, "error": None}
+    except Exception as e:
+        return {"bans": [], "error": str(e)}
+
+
+async def rust_unban_player(guild_id: int, steam_id: str, actor_id: int) -> str:
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return "❌ RCON isn't connected."
+    try:
+        await conn.send_command(f"unban {steam_id}")
+    except Exception as e:
+        return f"❌ Unban failed: {e}"
+    return f"✅ Unbanned {steam_id}."
+
+
 def build_roster_embed(guild: discord.Guild) -> discord.Embed:
     cfg = get_guild_cfg(guild.id)
     roster = cfg.get("roster", [])  # list of {"user_id": int, "rank_role_id": int}
@@ -5586,6 +5666,7 @@ if __name__ == "__main__":
         open_ticket, close_ticket, web_set_ticket_channel,
         web_send_dm,
         web_set_rust_server, web_set_rust_status_channel, web_get_rust_status, web_rust_command,
+        rust_get_players, rust_kick_player, rust_ban_player, rust_get_banlist, rust_unban_player,
         web_set_minecraft_server, web_set_minecraft_status_channel, web_get_minecraft_status, web_minecraft_command,
         relay_incoming_webhook,
         web_tournament_create, web_tournament_start, web_tournament_report,
