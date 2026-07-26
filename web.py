@@ -130,15 +130,15 @@ BASE_STYLE = """
     box-shadow:0 0 12px 2px var(--neon-cyan); animation:scanline 7s linear infinite; opacity:0.5; pointer-events:none; z-index:9999;
   }
 
-  .wrap { max-width:1040px; margin:0 auto; padding:36px 24px; position:relative; z-index:1; }
+  .wrap { max-width:1200px; margin:0 auto; padding:22px 24px; position:relative; z-index:1; }
   h1 {
-    font-family:'Orbitron', 'Rajdhani', sans-serif; font-size:26px; margin:0 0 4px; font-weight:800; letter-spacing:0.5px;
+    font-family:'Orbitron', 'Rajdhani', sans-serif; font-size:21px; margin:0 0 2px; font-weight:800; letter-spacing:0.5px;
     background:linear-gradient(90deg, var(--neon-cyan), var(--neon-violet) 60%, var(--neon-magenta));
     -webkit-background-clip:text; background-clip:text; color:transparent;
     text-shadow:0 0 24px rgba(45,226,255,0.25); text-transform:uppercase;
   }
   h2 {
-    font-family:'Orbitron', 'Rajdhani', sans-serif; font-size:14px; color:#eaf6ff; margin:0 0 18px; font-weight:700;
+    font-family:'Orbitron', 'Rajdhani', sans-serif; font-size:13px; color:#eaf6ff; margin:0 0 12px; font-weight:700;
     display:flex; align-items:center; gap:8px; text-transform:uppercase; letter-spacing:1px;
   }
   .card {
@@ -147,7 +147,7 @@ BASE_STYLE = """
     border:1px solid rgba(45,226,255,0.18);
     border-left:3px solid var(--neon-cyan);
     clip-path:polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
-    padding:24px 26px; margin-bottom:18px;
+    padding:16px 18px; margin-bottom:12px;
     box-shadow:0 4px 24px rgba(0,0,0,0.5), inset 0 0 40px rgba(45,226,255,0.03);
     position:relative; transition:border-color 0.2s ease, box-shadow 0.2s ease;
   }
@@ -159,8 +159,8 @@ BASE_STYLE = """
   a:hover { text-decoration:underline; color:#8ff2ff; }
   .btn {
     display:inline-block; background:linear-gradient(135deg, var(--neon-cyan), var(--neon-violet));
-    color:#04050a; padding:11px 22px; clip-path:polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
-    border:none; font-family:'Orbitron','Rajdhani',sans-serif; font-size:13px; text-transform:uppercase; letter-spacing:1px;
+    color:#04050a; padding:9px 18px; clip-path:polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+    border:none; font-family:'Orbitron','Rajdhani',sans-serif; font-size:12px; text-transform:uppercase; letter-spacing:1px;
     cursor:pointer; font-weight:700; transition:filter 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
     box-shadow:0 0 18px rgba(45,226,255,0.35);
   }
@@ -168,13 +168,13 @@ BASE_STYLE = """
   .btn:active { transform:translateY(0); }
   .btn-secondary { background:linear-gradient(135deg,#3a3d4d,#26283a); color:#d6e2ef; box-shadow:0 0 12px rgba(255,45,226,0.12); }
   .btn-secondary:hover { box-shadow:0 0 20px rgba(255,45,226,0.3); filter:none; }
-  .field { margin-bottom:18px; }
+  .field { margin-bottom:12px; }
   .field:last-child { margin-bottom:0; }
-  label { display:block; font-family:'Share Tech Mono', monospace; font-size:11px; text-transform:uppercase;
-          letter-spacing:1px; color:var(--neon-cyan); margin:0 0 6px; font-weight:400; opacity:0.85; }
+  label { display:block; font-family:'Share Tech Mono', monospace; font-size:10px; text-transform:uppercase;
+          letter-spacing:1px; color:var(--neon-cyan); margin:0 0 4px; font-weight:400; opacity:0.85; }
   select, input[type=number], input[type=text] {
     width:100%; background:rgba(8,9,16,0.8); border:1px solid rgba(45,226,255,0.22); color:#eaf6ff;
-    padding:10px 12px; border-radius:2px; font-family:'Rajdhani',sans-serif; font-size:14px; font-weight:600;
+    padding:8px 10px; border-radius:2px; font-family:'Rajdhani',sans-serif; font-size:14px; font-weight:600;
     transition:border-color 0.15s ease, box-shadow 0.15s ease;
   }
   select {
@@ -185,44 +185,46 @@ BASE_STYLE = """
   select:hover, input:hover { border-color:var(--neon-cyan); }
   select:focus, input:focus { outline:none; border-color:var(--neon-cyan); box-shadow:0 0 0 3px rgba(45,226,255,0.2), 0 0 16px rgba(45,226,255,0.25); }
   ::placeholder { color:#5c6478; }
-  .hint { color:#6d7690; font-size:12px; margin-top:6px; font-family:'Rajdhani',sans-serif; }
+  .hint { color:#6d7690; font-size:12px; margin-top:4px; font-family:'Rajdhani',sans-serif; }
   .flash {
     background:linear-gradient(135deg, rgba(45,255,150,0.15), rgba(20,40,30,0.9)); border:1px solid rgba(45,255,150,0.4);
-    color:#c8ffe0; padding:12px 16px; margin-bottom:18px; font-size:14px; font-weight:700;
+    color:#c8ffe0; padding:9px 14px; margin-bottom:12px; font-size:13px; font-weight:700;
     clip-path:polygon(8px 0, 100% 0, 100% 100%, 0 100%, 0 8px);
     box-shadow:0 0 16px rgba(45,255,150,0.15);
   }
   .guild-list a {
     display:flex; align-items:center; gap:12px;
     background:linear-gradient(135deg, rgba(45,226,255,0.06), rgba(10,11,20,0.9));
-    border:1px solid rgba(45,226,255,0.15); padding:14px 16px; margin-bottom:8px; color:#d6e2ef;
+    border:1px solid rgba(45,226,255,0.15); padding:11px 14px; margin-bottom:6px; color:#d6e2ef;
     clip-path:polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
     transition:all 0.15s ease;
   }
   .guild-list a:hover { border-color:var(--neon-cyan); box-shadow:0 0 20px rgba(45,226,255,0.25); text-decoration:none; transform:translateX(3px); }
-  .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+  .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; }
   .topbar a { color:#8b93ab; font-size:13px; font-family:'Share Tech Mono',monospace; }
   .topbar a:hover { color:var(--neon-cyan); }
   form { margin:0; }
-  .quicknav { display:flex; gap:8px; margin:20px 0 24px; flex-wrap:wrap; }
+  .quicknav { display:flex; gap:6px; margin:12px 0 16px; flex-wrap:wrap; }
   .quicknav a {
-    background:rgba(15,16,28,0.8); border:1px solid rgba(155,107,255,0.3); padding:9px 16px;
-    font-family:'Share Tech Mono',monospace; font-size:12px; font-weight:400; color:#d6e2ef; transition:all 0.15s ease;
+    background:rgba(15,16,28,0.8); border:1px solid rgba(155,107,255,0.3); padding:7px 14px;
+    font-family:'Share Tech Mono',monospace; font-size:11px; font-weight:400; color:#d6e2ef; transition:all 0.15s ease;
     clip-path:polygon(8px 0, 100% 0, 100% 100%, 0 100%, 0 8px);
   }
   .quicknav a:hover { background:linear-gradient(135deg, var(--neon-cyan), var(--neon-violet)); border-color:transparent; color:#04050a; text-decoration:none; box-shadow:0 0 16px rgba(45,226,255,0.4); }
-  .save-bar { position:sticky; bottom:20px; margin-top:12px; }
-  .save-bar .btn { width:100%; padding:16px; font-size:15px; box-shadow:0 0 30px rgba(45,226,255,0.5); clip-path:none; }
-  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .save-bar { position:sticky; bottom:14px; margin-top:8px; }
+  .save-bar .btn { width:100%; padding:13px; font-size:14px; box-shadow:0 0 30px rgba(45,226,255,0.5); clip-path:none; }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
   @media (max-width:520px) { .grid-2 { grid-template-columns:1fr; } }
-  .log-wrap { max-height:640px; overflow-y:auto; border:1px solid rgba(45,226,255,0.15); background:rgba(6,7,14,0.5); }
-  table.log-table { width:100%; border-collapse:collapse; font-size:13px; font-family:'Rajdhani',sans-serif; }
+  .card-row { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:12px; align-items:start; }
+  .card-row .card { margin-bottom:0; }
+  .log-wrap { max-height:520px; overflow-y:auto; border:1px solid rgba(45,226,255,0.15); background:rgba(6,7,14,0.5); }
+  table.log-table { width:100%; border-collapse:collapse; font-size:12.5px; font-family:'Rajdhani',sans-serif; }
   .log-table th {
-    position:sticky; top:0; background:#0c0d18; text-align:left; padding:10px 12px;
+    position:sticky; top:0; background:#0c0d18; text-align:left; padding:7px 10px;
     font-family:'Share Tech Mono',monospace; font-size:10px; text-transform:uppercase; letter-spacing:1px;
     color:var(--neon-cyan); border-bottom:1px solid rgba(45,226,255,0.2);
   }
-  .log-table td { padding:10px 12px; border-bottom:1px solid rgba(255,255,255,0.05); vertical-align:top; }
+  .log-table td { padding:7px 10px; border-bottom:1px solid rgba(255,255,255,0.05); vertical-align:top; }
   .log-table tr:hover td { background:rgba(45,226,255,0.05); }
   .log-table tr:last-child td { border-bottom:none; }
   .pill {
@@ -1208,55 +1210,53 @@ def moderation_page(guild_id):
     {result_html}
     {member_assets}
 
-    <div class="card">
-      <h2>⚠️ Warn</h2>
-      <form method="post" action="/dashboard/{guild_id}/moderation/warn">
-        {_member_search_field()}
-        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
-        <button class="btn" type="submit">Warn</button>
-      </form>
-    </div>
+    <div class="card-row">
+      <div class="card">
+        <h2>⚠️ Warn</h2>
+        <form method="post" action="/dashboard/{guild_id}/moderation/warn">
+          {_member_search_field()}
+          <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+          <button class="btn" type="submit">Warn</button>
+        </form>
+      </div>
 
-    <div class="card">
-      <h2>🔇 Timeout</h2>
-      <form method="post" action="/dashboard/{guild_id}/moderation/timeout">
-        <div class="grid-2">
+      <div class="card">
+        <h2>🔇 Timeout</h2>
+        <form method="post" action="/dashboard/{guild_id}/moderation/timeout">
           {_member_search_field()}
           <div class="field"><label>Minutes</label><input type="number" name="minutes" min="1" max="40320" value="60" required></div>
-        </div>
-        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
-        <button class="btn" type="submit">Time Out</button>
-      </form>
-    </div>
+          <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+          <button class="btn" type="submit">Time Out</button>
+        </form>
+      </div>
 
-    <div class="card">
-      <h2>🔊 Remove Timeout</h2>
-      <form method="post" action="/dashboard/{guild_id}/moderation/untimeout">
-        {_member_search_field()}
-        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" value="No reason given"></div>
-        <button class="btn btn-secondary" type="submit">Remove Timeout</button>
-      </form>
-    </div>
+      <div class="card">
+        <h2>🔊 Remove Timeout</h2>
+        <form method="post" action="/dashboard/{guild_id}/moderation/untimeout">
+          {_member_search_field()}
+          <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" value="No reason given"></div>
+          <button class="btn btn-secondary" type="submit">Remove Timeout</button>
+        </form>
+      </div>
 
-    <div class="card">
-      <h2>👢 Kick</h2>
-      <form method="post" action="/dashboard/{guild_id}/moderation/kick">
-        {_member_search_field()}
-        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
-        <button class="btn btn-secondary" type="submit">Kick</button>
-      </form>
-    </div>
+      <div class="card">
+        <h2>👢 Kick</h2>
+        <form method="post" action="/dashboard/{guild_id}/moderation/kick">
+          {_member_search_field()}
+          <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+          <button class="btn btn-secondary" type="submit">Kick</button>
+        </form>
+      </div>
 
-    <div class="card">
-      <h2>🔨 Ban</h2>
-      <form method="post" action="/dashboard/{guild_id}/moderation/ban">
-        <div class="grid-2">
+      <div class="card">
+        <h2>🔨 Ban</h2>
+        <form method="post" action="/dashboard/{guild_id}/moderation/ban">
           {_member_search_field()}
           <div class="field"><label>Delete message history (days, 0-7)</label><input type="number" name="delete_days" min="0" max="7" value="0"></div>
-        </div>
-        <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
-        <button class="btn btn-secondary" type="submit">Ban</button>
-      </form>
+          <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+          <button class="btn btn-secondary" type="submit">Ban</button>
+        </form>
+      </div>
     </div>
     """
     return render_page(f"{guild.name} — Moderation", body, guild_id=guild_id)
