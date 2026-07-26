@@ -344,6 +344,7 @@ SIDENAV_SECTIONS = [
     ("Insight", [
         ("logs_page", "🗂️", "Logs"),
         ("activity_log_page", "🖱️", "Dashboard Activity"),
+        ("login_history_page", "🔑", "Login History"),
         ("activity_page", "📈", "Activity"),
         ("afk_page", "💤", "AFK Status"),
         ("backup_download", "💾", "Backup"),
@@ -536,6 +537,18 @@ def callback():
 
     session["user_id"] = int(user["id"])
     session["username"] = user.get("username", "there")
+
+    for guild in _admin_guilds_for(session["user_id"]):
+        cfg = _get_guild_cfg(guild.id)
+        logins = cfg.setdefault("dashboard_logins", [])
+        logins.append({
+            "user_id": session["user_id"],
+            "username": session["username"],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        cfg["dashboard_logins"] = logins[-100:]  # keep it capped
+    _save_config(_config)
+
     return redirect(url_for("guild_picker"))
 
 
@@ -897,6 +910,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/dm"><span>✉️</span>Direct Message</a>
         <a class="action-tile" href="/dashboard/{guild_id}/logs"><span>🗂️</span>Logs</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activitylog"><span>🖱️</span>Dashboard Activity</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/loginhistory"><span>🔑</span>Login History</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/afk"><span>💤</span>AFK Status</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
@@ -3976,6 +3990,43 @@ def activity_log_page(guild_id):
     </div>
     """
     return render_page(f"{guild.name} — Dashboard Activity", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/loginhistory")
+def login_history_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    logins = list(reversed(cfg.get("dashboard_logins", [])))
+
+    rows = ""
+    if logins:
+        for entry in logins[:100]:
+            actor = guild.get_member(entry.get("user_id"))
+            name = actor.display_name if actor else html.escape(entry.get("username", "Unknown"))
+            rows += f"""
+            <tr>
+              <td>{name}</td>
+              <td class="hint" style="white-space:nowrap;">{_format_ts(entry.get('timestamp'))}</td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="2" class="hint" style="padding:16px;">No logins recorded yet.</td></tr>'
+
+    body = f"""
+    <h1>🔑 Login History</h1>
+    <div class="hint" style="margin-bottom:18px;">Everyone who has logged into this server's dashboard, and when. Keeps the most recent 100.</div>
+
+    <div class="card">
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Staff Member</th><th>Logged In</th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Login History", body, guild_id=guild_id)
 
 
 # ---------- entrypoint ----------
