@@ -36,6 +36,12 @@ DISCORD_API = "https://discord.com/api"
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
+# Session cookies expire when the browser closes (not "permanent"/long-lived),
+# so everyone has to log back in with Discord each time they open a new
+# browser session, even if they were logged in before.
+app.config["SESSION_PERMANENT"] = False
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_REFRESH_EACH_REQUEST"] = False
 
 # Set by start_web_app() once the bot is ready to share its live state.
 _bot = None
