@@ -1393,8 +1393,14 @@ def roster_addall_route(guild_id):
         rank_id = int(request.form["rank_id"])
     except (KeyError, ValueError):
         return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick a rank."))
-    result = _run_async(_roster_add_all(guild_id, rank_id, session["user_id"]))
-    return redirect(url_for("roster_page", guild_id=guild_id, result=result))
+    # This can take a while for large servers (one Discord API call per
+    # member) — don't block the HTTP request waiting for it, just kick it
+    # off in the background and let the user check back shortly.
+    asyncio.run_coroutine_threadsafe(_roster_add_all(guild_id, rank_id, session["user_id"]), _bot.loop)
+    return redirect(url_for(
+        "roster_page", guild_id=guild_id,
+        result="⏳ Started in the background — this can take a few minutes for large servers. Refresh this page shortly to see the results.",
+    ))
 
 
 @app.route("/dashboard/<int:guild_id>/roster/remove", methods=["POST"])
