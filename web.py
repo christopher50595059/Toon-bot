@@ -107,6 +107,7 @@ _minecraft_ban_player = None
 _minecraft_get_banlist = None
 _minecraft_unban_player = None
 _set_bot_status = None
+_roster_add_all = None
 
 
 # ---------- shared page chrome ----------
@@ -1330,6 +1331,15 @@ def roster_page(guild_id):
     </div>
 
     <div class="card">
+      <h2>👥 Put everyone on the roster</h2>
+      <div class="hint" style="margin-bottom:12px;">Adds EVERY server member to the roster at once, at the rank you pick — also grants them that role if they don't already have it. Big action, applies to the whole server.</div>
+      <form method="post" action="/dashboard/{guild_id}/roster/addall">
+        {_rank_search_field("Rank", "rank_id")}
+        <button class="btn btn-secondary" type="submit">Put Everyone On Roster</button>
+      </form>
+    </div>
+
+    <div class="card">
       <h2>⬆️ Promote</h2>
       <form method="post" action="/dashboard/{guild_id}/roster/promote">
         {_member_search_field()}
@@ -1371,6 +1381,19 @@ def roster_add_route(guild_id):
         return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick a member and a rank."))
     reason = request.form.get("reason", "").strip() or "No reason given"
     result = _run_async(_roster_add(guild_id, user_id, rank_id, reason, session["user_id"]))
+    return redirect(url_for("roster_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/roster/addall", methods=["POST"])
+def roster_addall_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        rank_id = int(request.form["rank_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick a rank."))
+    result = _run_async(_roster_add_all(guild_id, rank_id, session["user_id"]))
     return redirect(url_for("roster_page", guild_id=guild_id, result=result))
 
 
@@ -4560,6 +4583,7 @@ def start_web_app(
     redeem_web_login_code,
     minecraft_get_players, minecraft_kick_player, minecraft_ban_player, minecraft_get_banlist, minecraft_unban_player,
     set_bot_status,
+    roster_add_all,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -4580,6 +4604,7 @@ def start_web_app(
     global _redeem_web_login_code
     global _minecraft_get_players, _minecraft_kick_player, _minecraft_ban_player, _minecraft_get_banlist, _minecraft_unban_player
     global _set_bot_status
+    global _roster_add_all
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -4642,6 +4667,7 @@ def start_web_app(
     _minecraft_get_banlist = minecraft_get_banlist
     _minecraft_unban_player = minecraft_unban_player
     _set_bot_status = set_bot_status
+    _roster_add_all = roster_add_all
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

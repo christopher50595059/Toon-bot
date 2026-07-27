@@ -14,6 +14,7 @@ Commands:
   /promote user:<member> reason:<text>    - move a member up one rank (per /setranks order)
   /demote user:<member> reason:<text>     - move a member down one rank (per /setranks order) — asks for confirmation
   /rosterimport rank:<role>               - import everyone who already has a rank role onto the roster at once
+  /rosteraddall rank:<role>                - put EVERY server member on the roster at once, at this rank
   /roster                                 - show the current roster, grouped by rank
   /stats                                  - show roster counts per rank
   /rank [user]                            - show a member's current rank (defaults to you)
@@ -616,6 +617,55 @@ async def web_roster_add(guild_id: int, user_id: int, rank_role_id: int, reason:
     await refresh_server_stats_message(guild)
     note = "" if dm_sent else " (couldn't DM them)"
     return f"✅ Added {member.display_name} to the roster as @{rank.name}.{note}"
+
+
+async def web_roster_add_all(guild_id: int, rank_role_id: int, actor_id: int) -> str:
+    """Mirrors /rosteraddall — puts every member on the roster at once, at the given rank."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    rank = guild.get_role(rank_role_id)
+    if rank is None:
+        return "❌ Couldn't find that rank."
+
+    cfg = get_guild_cfg(guild_id)
+    valid_rank_ids = cfg.get("ranks", [])
+    if rank.id not in valid_rank_ids:
+        return f"❌ @{rank.name} isn't a configured rank. Run /setranks first."
+    if rank >= guild.me.top_role:
+        return f"❌ I can't assign @{rank.name} — it's above my own role in Server Settings > Roles."
+
+    all_members = [m async for m in guild.fetch_members(limit=None) if not m.bot]
+    if not all_members:
+        return "ℹ️ No members found."
+
+    roster = cfg.setdefault("roster", [])
+    added, moved, role_failed = 0, 0, 0
+
+    for member in all_members:
+        if rank not in member.roles:
+            try:
+                await member.add_roles(rank, reason=f"Bulk roster add by {actor_id} via web dashboard")
+            except discord.Forbidden:
+                role_failed += 1
+                continue
+
+        existing = next((entry for entry in roster if entry["user_id"] == member.id), None)
+        if existing is None:
+            roster.append({"user_id": member.id, "rank_role_id": rank.id})
+            record_history(guild_id, member.id, "Added to Roster", rank.mention, actor_id, "Bulk add-all via web")
+            added += 1
+        elif existing.get("rank_role_id") != rank.id:
+            existing["rank_role_id"] = rank.id
+            record_history(guild_id, member.id, "Rank Changed", rank.mention, actor_id, "Bulk add-all via web")
+            moved += 1
+
+    save_config(config)
+    await refresh_roster_message(guild)
+    await refresh_server_stats_message(guild)
+
+    note = f", {role_failed} role grant(s) failed" if role_failed else ""
+    return f"✅ Roster updated: {added} added, {moved} moved to @{rank.name}{note}."
 
 
 async def web_roster_remove(guild_id: int, user_id: int, reason: str, actor_id: int) -> str:
@@ -3923,6 +3973,104 @@ async def rosterimport(interaction: discord.Interaction, rank: discord.Role):
     await refresh_server_stats_message(interaction.guild)
 
 
+@bot.tree.command(name="rosteraddall", description="Put EVERY server member on the roster at once, at a given rank.")
+@app_commands.describe(rank="The rank to assign to everyone — this also grants them the role")
+async def rosteraddall(interaction: discord.Interaction, rank: discord.Role):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    valid_rank_ids = cfg.get("ranks", [])
+    if rank.id not in valid_rank_ids:
+        valid_mentions = ", ".join(r.mention for rid in valid_rank_ids if (r := interaction.guild.get_role(rid)))
+        await interaction.response.send_message(
+            f"❌ {rank.mention} isn't a configured rank. Choose from: {valid_mentions or '(none set — run /setranks first)'}",
+            ephemeral=True,
+        )
+        return
+
+    bot_top_role = interaction.guild.me.top_role
+    if rank >= bot_top_role:
+        await interaction.response.send_message(
+            f"❌ I can't assign {rank.mention} — it's higher than or equal to my own top role. "
+            "Move my bot role above it in Server Settings > Roles.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    all_members = [m async for m in interaction.guild.fetch_members(limit=None) if not m.bot]
+
+    if not all_members:
+        await interaction.followup.send("ℹ️ No members found.", ephemeral=True)
+        return
+
+    view = ConfirmView(interaction.user.id)
+    await interaction.followup.send(
+        f"⚠️ Put **all {len(all_members)}** member(s) on the roster at {rank.mention}? "
+        "This also grants them the role if they don't already have it.",
+        view=view, ephemeral=True,
+    )
+    await view.wait()
+    if view.confirmed is None:
+        await interaction.edit_original_response(content="⏱️ Timed out — no changes made.", view=None)
+        return
+    if not view.confirmed:
+        await interaction.edit_original_response(content="❌ Cancelled — no changes made.", view=None)
+        return
+
+    await interaction.edit_original_response(content=f"⏳ Adding {len(all_members)} member(s) to the roster...", view=None)
+
+    roster = cfg.setdefault("roster", [])
+    added_members, moved_members, role_failed = [], [], 0
+
+    for member in all_members:
+        if rank not in member.roles:
+            try:
+                await member.add_roles(rank, reason=f"Bulk roster add by {interaction.user}")
+            except discord.Forbidden:
+                role_failed += 1
+                continue
+
+        existing = next((entry for entry in roster if entry["user_id"] == member.id), None)
+        if existing is None:
+            roster.append({"user_id": member.id, "rank_role_id": rank.id})
+            record_history(interaction.guild_id, member.id, "Added to Roster", rank.mention, interaction.user.id, "Bulk add-all")
+            added_members.append(member)
+        elif existing.get("rank_role_id") != rank.id:
+            existing["rank_role_id"] = rank.id
+            record_history(interaction.guild_id, member.id, "Rank Changed", rank.mention, interaction.user.id, "Bulk add-all")
+            moved_members.append(member)
+
+    save_config(config)
+
+    embed = discord.Embed(title="📋 Roster Add-All Complete", color=discord.Color.teal())
+    embed.description = f"Put everyone on the roster at {rank.mention}."
+    embed.add_field(name="Added", value=str(len(added_members)), inline=True)
+    embed.add_field(name="Moved", value=str(len(moved_members)), inline=True)
+    if role_failed:
+        embed.add_field(name="Role grant failed", value=str(role_failed), inline=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+    cfg_log2 = get_guild_cfg(interaction.guild_id)
+    log_channel_id2 = cfg_log2.get("log_channel_id")
+    if log_channel_id2:
+        log_channel2 = interaction.guild.get_channel(log_channel_id2)
+        if log_channel2:
+            now_ts2 = int(datetime.now(timezone.utc).timestamp())
+            try:
+                await log_channel2.send(
+                    f"📋 Bulk roster add-all → {rank.mention} | {len(added_members)} added, {len(moved_members)} moved | "
+                    f"{interaction.user.mention} | <t:{now_ts2}:f>"
+                )
+            except discord.Forbidden:
+                pass
+
+    await refresh_roster_message(interaction.guild)
+    await refresh_server_stats_message(interaction.guild)
+
+
 @bot.tree.command(name="roster", description="Show the current roster.")
 async def roster(interaction: discord.Interaction):
     embed = build_roster_embed(interaction.guild)
@@ -5731,6 +5879,7 @@ HELP_CATEGORIES = {
         ("/promote", "Move a member up one rank"),
         ("/demote", "Move a member down one rank"),
         ("/rosterimport", "Bulk-import everyone with a rank role onto the roster"),
+        ("/rosteraddall", "Put EVERY server member on the roster at once"),
         ("/roster", "Show the current roster"),
         ("/stats", "Show roster counts per rank"),
         ("/rank", "Show a member's current rank"),
@@ -6092,5 +6241,6 @@ if __name__ == "__main__":
         redeem_web_login_code,
         minecraft_get_players, minecraft_kick_player, minecraft_ban_player, minecraft_get_banlist, minecraft_unban_player,
         web_set_bot_status,
+        web_roster_add_all,
     )
     bot.run(TOKEN)
