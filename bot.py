@@ -685,22 +685,22 @@ async def web_roster_add_all(guild_id: int, rank_role_id: int, actor_id: int) ->
     added, moved, role_failed = 0, 0, 0
 
     for member in all_members:
-        if rank not in member.roles:
-            try:
+        try:
+            if rank not in member.roles:
                 await member.add_roles(rank, reason=f"Bulk roster add by {actor_id} via web dashboard")
-            except discord.Forbidden:
-                role_failed += 1
-                continue
 
-        existing = next((entry for entry in roster if entry["user_id"] == member.id), None)
-        if existing is None:
-            roster.append({"user_id": member.id, "rank_role_id": rank.id})
-            record_history(guild_id, member.id, "Added to Roster", rank.mention, actor_id, "Bulk add-all via web")
-            added += 1
-        elif existing.get("rank_role_id") != rank.id:
-            existing["rank_role_id"] = rank.id
-            record_history(guild_id, member.id, "Rank Changed", rank.mention, actor_id, "Bulk add-all via web")
-            moved += 1
+            existing = next((entry for entry in roster if entry["user_id"] == member.id), None)
+            if existing is None:
+                roster.append({"user_id": member.id, "rank_role_id": rank.id})
+                record_history(guild_id, member.id, "Added to Roster", rank.mention, actor_id, "Bulk add-all via web")
+                added += 1
+            elif existing.get("rank_role_id") != rank.id:
+                existing["rank_role_id"] = rank.id
+                record_history(guild_id, member.id, "Rank Changed", rank.mention, actor_id, "Bulk add-all via web")
+                moved += 1
+        except discord.HTTPException:
+            role_failed += 1
+            continue
 
     save_config(config)
     await refresh_roster_message(guild)
@@ -4229,22 +4229,22 @@ async def rosteraddall(interaction: discord.Interaction, rank: discord.Role):
     added_members, moved_members, role_failed = [], [], 0
 
     for member in all_members:
-        if rank not in member.roles:
-            try:
+        try:
+            if rank not in member.roles:
                 await member.add_roles(rank, reason=f"Bulk roster add by {interaction.user}")
-            except discord.Forbidden:
-                role_failed += 1
-                continue
 
-        existing = next((entry for entry in roster if entry["user_id"] == member.id), None)
-        if existing is None:
-            roster.append({"user_id": member.id, "rank_role_id": rank.id})
-            record_history(interaction.guild_id, member.id, "Added to Roster", rank.mention, interaction.user.id, "Bulk add-all")
-            added_members.append(member)
-        elif existing.get("rank_role_id") != rank.id:
-            existing["rank_role_id"] = rank.id
-            record_history(interaction.guild_id, member.id, "Rank Changed", rank.mention, interaction.user.id, "Bulk add-all")
-            moved_members.append(member)
+            existing = next((entry for entry in roster if entry["user_id"] == member.id), None)
+            if existing is None:
+                roster.append({"user_id": member.id, "rank_role_id": rank.id})
+                record_history(interaction.guild_id, member.id, "Added to Roster", rank.mention, interaction.user.id, "Bulk add-all")
+                added_members.append(member)
+            elif existing.get("rank_role_id") != rank.id:
+                existing["rank_role_id"] = rank.id
+                record_history(interaction.guild_id, member.id, "Rank Changed", rank.mention, interaction.user.id, "Bulk add-all")
+                moved_members.append(member)
+        except discord.HTTPException:
+            role_failed += 1
+            continue
 
     save_config(config)
 
