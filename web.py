@@ -101,6 +101,11 @@ _set_ticket_questions = None
 _get_ticket_messages = None
 _send_ticket_message = None
 _redeem_web_login_code = None
+_minecraft_get_players = None
+_minecraft_kick_player = None
+_minecraft_ban_player = None
+_minecraft_get_banlist = None
+_minecraft_unban_player = None
 
 
 # ---------- shared page chrome ----------
@@ -360,7 +365,9 @@ SIDENAV_SECTIONS = [
         ("rust_page", "🦀", "Rust: Overview"),
         ("rust_players_page", "🎮", "Rust: Players"),
         ("rust_bans_page", "🚫", "Rust: Bans"),
-        ("minecraft_page", "⛏️", "Minecraft Server"),
+        ("minecraft_page", "⛏️", "Minecraft: Overview"),
+        ("minecraft_players_page", "🎮", "Minecraft: Players"),
+        ("minecraft_bans_page", "🚫", "Minecraft: Bans"),
         ("webhooks_page", "🔌", "Webhooks"),
     ]),
     ("Events", [
@@ -1114,6 +1121,8 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/rust/players"><span>🎮</span>Rust Players</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/bans"><span>🚫</span>Rust Bans</a>
         <a class="action-tile" href="/dashboard/{guild_id}/minecraft"><span>⛏️</span>Minecraft Server</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/minecraft/players"><span>🎮</span>Minecraft Players</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/minecraft/bans"><span>🚫</span>Minecraft Bans</a>
         <a class="action-tile" href="/dashboard/{guild_id}/webhooks"><span>🔌</span>Webhooks</a>
         <a class="action-tile" href="/dashboard/{guild_id}/tournaments"><span>🏆</span>Tournaments</a>
         <a class="action-tile" href="/dashboard/{guild_id}/gamenights"><span>🎮</span>Game Nights</a>
@@ -3362,6 +3371,174 @@ def minecraft_command_route(guild_id):
     return redirect(url_for("minecraft_page", guild_id=guild_id, result=f"📟 {result}"))
 
 
+@app.route("/dashboard/<int:guild_id>/minecraft/players")
+def minecraft_players_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    data = _run_async(_minecraft_get_players(guild_id))
+    if data.get("error"):
+        players_html = f'<div class="hint" style="color:#ff8080; padding:12px;">⚠️ {data["error"]}</div>'
+    else:
+        players = data.get("players", [])
+        if not players:
+            players_html = '<div class="hint" style="padding:12px;">Nobody online right now.</div>'
+        else:
+            rows = ""
+            for name in players:
+                safe_name = html.escape(name)
+                rows += f"""
+                <tr>
+                  <td>{safe_name}</td>
+                  <td style="white-space:nowrap;">
+                    <form method="post" action="/dashboard/{guild_id}/minecraft/players/kick" style="display:inline;">
+                      <input type="hidden" name="player_name" value="{safe_name}">
+                      <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Kick</button>
+                    </form>
+                    <form method="post" action="/dashboard/{guild_id}/minecraft/players/ban" style="display:inline;">
+                      <input type="hidden" name="player_name" value="{safe_name}">
+                      <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Ban</button>
+                    </form>
+                  </td>
+                </tr>
+                """
+            players_html = f"""
+            <div class="log-wrap"><table class="log-table">
+              <tr><th>Name</th><th></th></tr>
+              {rows}
+            </table></div>
+            """
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}/minecraft">&larr; Minecraft Overview</a></div>
+    <h1 style="margin-top:18px;">🎮 Minecraft Players</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>Online now ({len(data.get("players", [])) if not data.get("error") else "?"})</h2>
+      {players_html}
+    </div>
+    """
+    return render_page(f"{guild.name} — Minecraft Players", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/players/kick", methods=["POST"])
+def minecraft_players_kick_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    player_name = request.form.get("player_name", "").strip()
+    if not player_name:
+        return redirect(url_for("minecraft_players_page", guild_id=guild_id, result="❌ Missing player name."))
+    result = _run_async(_minecraft_kick_player(guild_id, player_name, "Kicked by staff via dashboard", session["user_id"]))
+    return redirect(url_for("minecraft_players_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/players/ban", methods=["POST"])
+def minecraft_players_ban_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    player_name = request.form.get("player_name", "").strip()
+    if not player_name:
+        return redirect(url_for("minecraft_players_page", guild_id=guild_id, result="❌ Missing player name."))
+    result = _run_async(_minecraft_ban_player(guild_id, player_name, "Banned by staff via dashboard", session["user_id"]))
+    return redirect(url_for("minecraft_players_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/bans")
+def minecraft_bans_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    data = _run_async(_minecraft_get_banlist(guild_id))
+    if data.get("error"):
+        bans_html = f'<div class="hint" style="color:#ff8080; padding:12px;">⚠️ {data["error"]}</div>'
+    else:
+        bans = data.get("bans", [])
+        if not bans:
+            bans_html = '<div class="hint" style="padding:12px;">No bans on record (or none could be parsed — try the raw command on the Overview page if this looks wrong).</div>'
+        else:
+            rows = ""
+            for b in bans:
+                safe_name = html.escape(b.get("name", ""))
+                rows += f"""
+                <tr>
+                  <td>{safe_name}</td>
+                  <td>{html.escape(b.get('reason',''))}</td>
+                  <td>
+                    <form method="post" action="/dashboard/{guild_id}/minecraft/bans/unban" style="margin:0;">
+                      <input type="hidden" name="player_name" value="{safe_name}">
+                      <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Unban</button>
+                    </form>
+                  </td>
+                </tr>
+                """
+            bans_html = f"""
+            <div class="log-wrap"><table class="log-table">
+              <tr><th>Name</th><th>Reason</th><th></th></tr>
+              {rows}
+            </table></div>
+            """
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}/minecraft">&larr; Minecraft Overview</a></div>
+    <h1 style="margin-top:18px;">🚫 Minecraft Bans</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>➕ Ban by player name</h2>
+      <div class="hint" style="margin-bottom:12px;">For banning someone who isn't currently online. For online players, use the Players page instead.</div>
+      <form method="post" action="/dashboard/{guild_id}/minecraft/bans/add">
+        <div class="grid-2">
+          <div class="field"><label>Player name</label><input type="text" name="player_name" placeholder="Steve" required></div>
+          <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
+        </div>
+        <button class="btn btn-secondary" type="submit">Ban</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Current bans</h2>
+      {bans_html}
+    </div>
+    """
+    return render_page(f"{guild.name} — Minecraft Bans", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/bans/add", methods=["POST"])
+def minecraft_bans_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    player_name = request.form.get("player_name", "").strip()
+    reason = request.form.get("reason", "").strip()
+    if not player_name or not reason:
+        return redirect(url_for("minecraft_bans_page", guild_id=guild_id, result="❌ Fill in both fields."))
+    result = _run_async(_minecraft_ban_player(guild_id, player_name, reason, session["user_id"]))
+    return redirect(url_for("minecraft_bans_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/bans/unban", methods=["POST"])
+def minecraft_bans_unban_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    player_name = request.form.get("player_name", "").strip()
+    if not player_name:
+        return redirect(url_for("minecraft_bans_page", guild_id=guild_id, result="❌ Missing player name."))
+    result = _run_async(_minecraft_unban_player(guild_id, player_name, session["user_id"]))
+    return redirect(url_for("minecraft_bans_page", guild_id=guild_id, result=result))
+
+
 # ---------- generic incoming webhooks ----------
 
 @app.route("/dashboard/<int:guild_id>/webhooks")
@@ -4302,6 +4479,7 @@ def start_web_app(
     get_ticket_messages, send_ticket_message,
     set_backup_settings, run_backup_now,
     redeem_web_login_code,
+    minecraft_get_players, minecraft_kick_player, minecraft_ban_player, minecraft_get_banlist, minecraft_unban_player,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -4320,6 +4498,7 @@ def start_web_app(
     global _add_ticket_category, _remove_ticket_category, _set_ticket_questions
     global _get_ticket_messages, _send_ticket_message
     global _redeem_web_login_code
+    global _minecraft_get_players, _minecraft_kick_player, _minecraft_ban_player, _minecraft_get_banlist, _minecraft_unban_player
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -4376,6 +4555,11 @@ def start_web_app(
     _get_ticket_messages = get_ticket_messages
     _send_ticket_message = send_ticket_message
     _redeem_web_login_code = redeem_web_login_code
+    _minecraft_get_players = minecraft_get_players
+    _minecraft_kick_player = minecraft_kick_player
+    _minecraft_ban_player = minecraft_ban_player
+    _minecraft_get_banlist = minecraft_get_banlist
+    _minecraft_unban_player = minecraft_unban_player
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

@@ -2273,6 +2273,97 @@ async def minecraft_rcon_command(host: str, port: int, password: str, command: s
     return await loop.run_in_executor(None, _minecraft_rcon_command_sync, host, port, password, command)
 
 
+async def minecraft_get_players(guild_id: int) -> dict:
+    """Returns {"players": [names], "error": None} using RCON's `list` command.
+    (Unlike Rust's playerlist, Minecraft's server list ping only gives a
+    limited sample, so RCON is the only reliable way to get everyone.)"""
+    cfg = get_guild_cfg(guild_id)
+    host = cfg.get("mc_host")
+    rcon_port = cfg.get("mc_rcon_port")
+    rcon_password = cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        return {"players": [], "error": "RCON isn't set up. Set an RCON port and password on the Overview page first."}
+    try:
+        raw = await minecraft_rcon_command(host, rcon_port, rcon_password, "list")
+        # Vanilla format: "There are 2 of a max of 20 players online: Alice, Bob"
+        if ":" in raw:
+            names_part = raw.split(":", 1)[1].strip()
+            players = [n.strip() for n in names_part.split(",") if n.strip()]
+        else:
+            players = []
+        return {"players": players, "error": None}
+    except Exception as e:
+        return {"players": [], "error": str(e)}
+
+
+async def minecraft_kick_player(guild_id: int, player_name: str, reason: str, actor_id: int) -> str:
+    cfg = get_guild_cfg(guild_id)
+    host = cfg.get("mc_host")
+    rcon_port = cfg.get("mc_rcon_port")
+    rcon_password = cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        return "❌ RCON isn't set up."
+    try:
+        await minecraft_rcon_command(host, rcon_port, rcon_password, f"kick {player_name} {reason}")
+    except Exception as e:
+        return f"❌ Kick failed: {e}"
+    return f"✅ Kicked {player_name}."
+
+
+async def minecraft_ban_player(guild_id: int, player_name: str, reason: str, actor_id: int) -> str:
+    cfg = get_guild_cfg(guild_id)
+    host = cfg.get("mc_host")
+    rcon_port = cfg.get("mc_rcon_port")
+    rcon_password = cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        return "❌ RCON isn't set up."
+    try:
+        await minecraft_rcon_command(host, rcon_port, rcon_password, f"ban {player_name} {reason}")
+    except Exception as e:
+        return f"❌ Ban failed: {e}"
+    return f"✅ Banned {player_name}."
+
+
+async def minecraft_get_banlist(guild_id: int) -> dict:
+    """Returns {"bans": [...], "error": None}. Parses vanilla Minecraft's
+    `banlist` output — best-effort, since exact wording can vary slightly
+    by server software (vanilla/Spigot/Paper). If this looks wrong once
+    tested, run the raw command via the RCON console and share the output."""
+    cfg = get_guild_cfg(guild_id)
+    host = cfg.get("mc_host")
+    rcon_port = cfg.get("mc_rcon_port")
+    rcon_password = cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        return {"bans": [], "error": "RCON isn't set up. Set an RCON port and password on the Overview page first."}
+    try:
+        raw = await minecraft_rcon_command(host, rcon_port, rcon_password, "banlist")
+        bans = []
+        for line in raw.splitlines()[1:]:  # first line is the "There are N banned players:" summary
+            line = line.strip()
+            if not line or "was banned by" not in line:
+                continue
+            name, rest = line.split(" was banned by", 1)
+            reason = rest.split(":", 1)[1].strip() if ":" in rest else ""
+            bans.append({"name": name.strip(), "reason": reason})
+        return {"bans": bans, "error": None}
+    except Exception as e:
+        return {"bans": [], "error": str(e)}
+
+
+async def minecraft_unban_player(guild_id: int, player_name: str, actor_id: int) -> str:
+    cfg = get_guild_cfg(guild_id)
+    host = cfg.get("mc_host")
+    rcon_port = cfg.get("mc_rcon_port")
+    rcon_password = cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        return "❌ RCON isn't set up."
+    try:
+        await minecraft_rcon_command(host, rcon_port, rcon_password, f"pardon {player_name}")
+    except Exception as e:
+        return f"❌ Unban failed: {e}"
+    return f"✅ Unbanned {player_name}."
+
+
 def build_minecraft_status_embed(host: str, info: dict = None, error: str = None) -> discord.Embed:
     embed = discord.Embed(title=f"⛏️ {host}", color=discord.Color.green())
     if error:
@@ -5915,5 +6006,6 @@ if __name__ == "__main__":
         web_mvp_end, web_add_ticket_category, web_remove_ticket_category, web_set_ticket_questions,
         web_get_ticket_messages, web_send_ticket_message, web_set_backup_settings, web_run_backup_now,
         redeem_web_login_code,
+        minecraft_get_players, minecraft_kick_player, minecraft_ban_player, minecraft_get_banlist, minecraft_unban_player,
     )
     bot.run(TOKEN)
