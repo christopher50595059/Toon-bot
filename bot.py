@@ -664,6 +664,21 @@ async def web_roster_add_all(guild_id: int, rank_role_id: int, actor_id: int) ->
     await refresh_roster_message(guild)
     await refresh_server_stats_message(guild)
 
+    log_channel_id = cfg.get("log_channel_id")
+    if log_channel_id:
+        log_channel = guild.get_channel(log_channel_id)
+        if log_channel:
+            actor = guild.get_member(actor_id)
+            actor_mention = actor.mention if actor else f"<@{actor_id}>"
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            try:
+                await log_channel.send(
+                    f"📋 Bulk roster add-all → {rank.mention} | {added} added, {moved} moved | "
+                    f"{actor_mention} (via web dashboard) | <t:{now_ts}:f>"
+                )
+            except discord.Forbidden:
+                pass
+
     note = f", {role_failed} role grant(s) failed" if role_failed else ""
     return f"✅ Roster updated: {added} added, {moved} moved to @{rank.name}{note}."
 
