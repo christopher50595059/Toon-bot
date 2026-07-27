@@ -362,6 +362,7 @@ SIDENAV_SECTIONS = [
         ("warnings_page", "⚠️", "Warnings"),
     ]),
     ("Integrations", [
+        ("game_servers_page", "🕹️", "Game Servers"),
         ("rust_page", "🦀", "Rust: Overview"),
         ("rust_players_page", "🎮", "Rust: Players"),
         ("rust_bans_page", "🚫", "Rust: Bans"),
@@ -1117,6 +1118,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/roster"><span>📋</span>Roster</a>
         <a class="action-tile" href="/dashboard/{guild_id}/moderation"><span>🛡️</span>Moderation</a>
         <a class="action-tile" href="/dashboard/{guild_id}/warnings"><span>⚠️</span>Warnings</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/gameservers"><span>🕹️</span>Game Servers</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust"><span>🦀</span>Rust Server</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/players"><span>🎮</span>Rust Players</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/bans"><span>🚫</span>Rust Bans</a>
@@ -2797,6 +2799,100 @@ def dm_send_route(guild_id):
         return redirect(url_for("dm_page", guild_id=guild_id, result="❌ Write a message."))
     result = _run_async(_send_dm(guild_id, user_id, message, session["user_id"]))
     return redirect(url_for("dm_page", guild_id=guild_id, result=result))
+
+
+# ---------- Game Servers hub ----------
+
+@app.route("/dashboard/<int:guild_id>/gameservers")
+def game_servers_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+
+    # ---- Rust card ----
+    if cfg.get("rust_host"):
+        rust_status = _run_async(_get_rust_status(guild_id))
+        if rust_status.get("error"):
+            rust_body = f'<div class="hint" style="color:#ff8080;">⚠️ {rust_status["error"]}</div>'
+        else:
+            info = rust_status["info"]
+            rcon_line = ""
+            if rust_status.get("rcon_configured"):
+                rcon_line = '<div class="field"><label>RCON</label><div>🟢 Connected</div></div>' if rust_status.get("rcon_connected") else '<div class="field"><label>RCON</label><div>🔴 Not connected</div></div>'
+            rust_body = f"""
+            <div class="grid-2">
+              <div class="field"><label>Map</label><div>{info['map']}</div></div>
+              <div class="field"><label>Players</label><div>{info['players']} / {info['max_players']}</div></div>
+              {rcon_line}
+            </div>
+            """
+        rust_card = f"""
+        <div class="card">
+          <h2>🦀 Rust — {cfg.get('rust_host')}</h2>
+          {rust_body}
+          <div class="hint" style="margin-top:12px; display:flex; gap:14px;">
+            <a href="/dashboard/{guild_id}/rust">Overview</a>
+            <a href="/dashboard/{guild_id}/rust/players">Players</a>
+            <a href="/dashboard/{guild_id}/rust/bans">Bans</a>
+          </div>
+        </div>
+        """
+    else:
+        rust_card = f"""
+        <div class="card">
+          <h2>🦀 Rust</h2>
+          <div class="hint">Not connected yet. <a href="/dashboard/{guild_id}/rust">Set it up →</a></div>
+        </div>
+        """
+
+    # ---- Minecraft card ----
+    if cfg.get("mc_host"):
+        mc_status = _run_async(_get_minecraft_status(guild_id))
+        if mc_status.get("error"):
+            mc_body = f'<div class="hint" style="color:#ff8080;">⚠️ {mc_status["error"]}</div>'
+        else:
+            info = mc_status["info"]
+            rcon_line = '<div class="field"><label>RCON</label><div>🟢 Configured</div></div>' if mc_status.get("rcon_configured") else ""
+            mc_body = f"""
+            <div class="grid-2">
+              <div class="field"><label>Players</label><div>{info['online']} / {info['max']}</div></div>
+              <div class="field"><label>Version</label><div>{info['version']}</div></div>
+              {rcon_line}
+            </div>
+            """
+        mc_card = f"""
+        <div class="card">
+          <h2>⛏️ Minecraft — {cfg.get('mc_host')}</h2>
+          {mc_body}
+          <div class="hint" style="margin-top:12px; display:flex; gap:14px;">
+            <a href="/dashboard/{guild_id}/minecraft">Overview</a>
+            <a href="/dashboard/{guild_id}/minecraft/players">Players</a>
+            <a href="/dashboard/{guild_id}/minecraft/bans">Bans</a>
+          </div>
+        </div>
+        """
+    else:
+        mc_card = f"""
+        <div class="card">
+          <h2>⛏️ Minecraft</h2>
+          <div class="hint">Not connected yet. <a href="/dashboard/{guild_id}/minecraft">Set it up →</a></div>
+        </div>
+        """
+
+    body = f"""
+    <h1>🕹️ Game Servers</h1>
+    <div class="hint" style="margin-bottom:18px;">Live status for both integrations in one place.</div>
+
+    <div class="card-row">
+      {rust_card}
+      {mc_card}
+    </div>
+
+    <div class="hint" style="margin-top:14px;">📡 Public status page (no login, safe to share with members): <a href="/status/{guild_id}" target="_blank">{DASHBOARD_URL}/status/{guild_id}</a></div>
+    """
+    return render_page(f"{guild.name} — Game Servers", body, guild_id=guild_id)
 
 
 # ---------- Rust server integration ----------
