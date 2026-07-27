@@ -108,6 +108,10 @@ _minecraft_get_banlist = None
 _minecraft_unban_player = None
 _set_bot_status = None
 _roster_add_all = None
+_set_suggestions_channel = None
+_suggestion_set_status = None
+_giveaway_start = None
+_giveaway_end = None
 
 
 # ---------- shared page chrome ----------
@@ -337,6 +341,8 @@ SIDENAV_SECTIONS = [
         ("tournaments_page", "🏆", "Tournaments"),
         ("gamenights_page", "🎮", "Game Nights"),
         ("mvp_page", "⭐", "MVP Voting"),
+        ("suggestions_page", "💡", "Suggestions"),
+        ("giveaways_page", "🎉", "Giveaways"),
     ]),
     ("Bulk & Broadcast", [
         ("mass_page", "🧰", "Mass Actions"),
@@ -1131,6 +1137,8 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/tournaments"><span>🏆</span>Tournaments</a>
         <a class="action-tile" href="/dashboard/{guild_id}/gamenights"><span>🎮</span>Game Nights</a>
         <a class="action-tile" href="/dashboard/{guild_id}/mvp"><span>⭐</span>MVP Voting</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/suggestions"><span>💡</span>Suggestions</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/giveaways"><span>🎉</span>Giveaways</a>
         <a class="action-tile" href="/dashboard/{guild_id}/mass"><span>🧰</span>Mass Actions</a>
         <a class="action-tile" href="/dashboard/{guild_id}/announce"><span>📣</span>Announcements</a>
         <a class="action-tile" href="/dashboard/{guild_id}/showcase"><span>🎭</span>Showcase</a>
@@ -4224,6 +4232,201 @@ def mvp_end_route(guild_id):
     return redirect(url_for("mvp_page", guild_id=guild_id, result=result))
 
 
+# ---------- suggestions ----------
+
+@app.route("/dashboard/<int:guild_id>/suggestions")
+def suggestions_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    suggestions = sorted(cfg.get("suggestions", {}).values(), key=lambda s: s.get("id", 0), reverse=True)
+    rows = ""
+    if suggestions:
+        for s in suggestions:
+            author = guild.get_member(s.get("user_id"))
+            author_name = author.display_name if author else f"Unknown ({s.get('user_id')})"
+            status = s.get("status", "pending")
+            color = {"pending": "#3b82f6", "approved": "#22c55e", "denied": "#f87171"}.get(status, "#8b96b3")
+            pill = f'<span class="pill" style="background:{color}22; border-color:{color}55; color:{color};">{status}</span>'
+            actions = ""
+            if status == "pending":
+                actions = f"""
+                <form method="post" action="/dashboard/{guild_id}/suggestions/{s['id']}/status" style="display:inline;">
+                  <input type="hidden" name="status" value="approved">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Approve</button>
+                </form>
+                <form method="post" action="/dashboard/{guild_id}/suggestions/{s['id']}/status" style="display:inline;">
+                  <input type="hidden" name="status" value="denied">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Deny</button>
+                </form>
+                """
+            rows += f"""
+            <tr>
+              <td>#{s['id']}</td>
+              <td>{html.escape(s.get('message', ''))}</td>
+              <td>{author_name}</td>
+              <td>👍 {len(s.get('upvotes', []))} 👎 {len(s.get('downvotes', []))}</td>
+              <td>{pill}</td>
+              <td style="white-space:nowrap;">{actions}</td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="6" class="hint" style="padding:16px;">No suggestions yet.</td></tr>'
+
+    channel_assets = _channel_search_assets(guild)
+    channel_id = cfg.get("suggestions_channel_id")
+
+    body = f"""
+    <h1>💡 Suggestions</h1>
+    {result_html}
+    {channel_assets}
+
+    <div class="card">
+      <h2>📌 Suggestions Channel</h2>
+      <div class="hint" style="margin-bottom:12px;">Where /suggest posts new suggestions for voting.</div>
+      <form method="post" action="/dashboard/{guild_id}/suggestions/channel">
+        {_channel_search_field("Channel", "channel_id", guild, channel_id)}
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>All suggestions</h2>
+      {_table_search_box("suggestions-table")}
+      <div class="log-wrap"><table class="log-table" id="suggestions-table">
+        <tr><th>#</th><th>Suggestion</th><th>By</th><th>Votes</th><th>Status</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Suggestions", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/suggestions/channel", methods=["POST"])
+def suggestions_channel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw = request.form.get("channel_id", "")
+    channel_id = int(raw) if raw else None
+    result = _run_async(_set_suggestions_channel(guild_id, channel_id, session["user_id"]))
+    return redirect(url_for("suggestions_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/suggestions/<int:suggestion_id>/status", methods=["POST"])
+def suggestions_status_route(guild_id, suggestion_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    status = request.form.get("status", "")
+    if status not in ("approved", "denied"):
+        return redirect(url_for("suggestions_page", guild_id=guild_id, result="❌ Invalid status."))
+    result = _run_async(_suggestion_set_status(guild_id, suggestion_id, status, session["user_id"]))
+    return redirect(url_for("suggestions_page", guild_id=guild_id, result=result))
+
+
+# ---------- giveaways ----------
+
+@app.route("/dashboard/<int:guild_id>/giveaways")
+def giveaways_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    giveaways = sorted(cfg.get("giveaways", {}).values(), key=lambda g: g.get("id", 0), reverse=True)
+    rows = ""
+    if giveaways:
+        for g in giveaways:
+            ended = g.get("ended", False)
+            pill = '<span class="pill" style="background:#8b96b322; border-color:#8b96b355; color:#8b96b3;">ended</span>' if ended else '<span class="pill">active</span>'
+            winners_text = ", ".join(f"<@{w}>" for w in g.get("winners", [])) if ended and g.get("winners") else "—"
+            action = "" if ended else f"""
+            <form method="post" action="/dashboard/{guild_id}/giveaways/{g['id']}/end" style="margin:0;">
+              <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">End Now</button>
+            </form>
+            """
+            rows += f"""
+            <tr>
+              <td>#{g['id']}</td>
+              <td>{html.escape(g.get('prize', ''))}</td>
+              <td>{len(g.get('entrants', []))}</td>
+              <td>{g.get('winner_count', 1)}</td>
+              <td class="hint">{winners_text}</td>
+              <td>{pill}</td>
+              <td>{action}</td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="7" class="hint" style="padding:16px;">No giveaways yet.</td></tr>'
+
+    channel_assets = _channel_search_assets(guild)
+
+    body = f"""
+    <h1>🎉 Giveaways</h1>
+    {result_html}
+    {channel_assets}
+
+    <div class="card">
+      <h2>➕ Start a giveaway</h2>
+      <form method="post" action="/dashboard/{guild_id}/giveaways/start">
+        <div class="field"><label>Prize</label><input type="text" name="prize" placeholder="Discord Nitro" required></div>
+        <div class="grid-2">
+          <div class="field"><label>Duration (minutes)</label><input type="number" name="duration_minutes" min="1" value="60" required></div>
+          <div class="field"><label>Number of winners</label><input type="number" name="winner_count" min="1" value="1" required></div>
+        </div>
+        {_channel_search_field()}
+        <button class="btn" type="submit">Start Giveaway</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>All giveaways</h2>
+      {_table_search_box("giveaways-table")}
+      <div class="log-wrap"><table class="log-table" id="giveaways-table">
+        <tr><th>#</th><th>Prize</th><th>Entrants</th><th>Winners</th><th>Won by</th><th>Status</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Giveaways", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/giveaways/start", methods=["POST"])
+def giveaways_start_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    prize = request.form.get("prize", "").strip()
+    try:
+        duration_minutes = int(request.form["duration_minutes"])
+        winner_count = int(request.form["winner_count"])
+        channel_id = int(request.form["channel_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("giveaways_page", guild_id=guild_id, result="❌ Fill in all fields correctly."))
+    if not prize:
+        return redirect(url_for("giveaways_page", guild_id=guild_id, result="❌ Enter a prize."))
+    result = _run_async(_giveaway_start(guild_id, prize, duration_minutes, winner_count, channel_id, session["user_id"]))
+    return redirect(url_for("giveaways_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/giveaways/<int:giveaway_id>/end", methods=["POST"])
+def giveaways_end_route(guild_id, giveaway_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    result = _run_async(_giveaway_end(guild_id, giveaway_id, session["user_id"]))
+    return redirect(url_for("giveaways_page", guild_id=guild_id, result=result))
+
+
 # ---------- member lookup ----------
 
 @app.route("/dashboard/<int:guild_id>/lookup")
@@ -4667,6 +4870,8 @@ def start_web_app(
     minecraft_get_players, minecraft_kick_player, minecraft_ban_player, minecraft_get_banlist, minecraft_unban_player,
     set_bot_status,
     roster_add_all,
+    set_suggestions_channel, suggestion_set_status,
+    giveaway_start, giveaway_end,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -4688,6 +4893,8 @@ def start_web_app(
     global _minecraft_get_players, _minecraft_kick_player, _minecraft_ban_player, _minecraft_get_banlist, _minecraft_unban_player
     global _set_bot_status
     global _roster_add_all
+    global _set_suggestions_channel, _suggestion_set_status
+    global _giveaway_start, _giveaway_end
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -4751,6 +4958,10 @@ def start_web_app(
     _minecraft_unban_player = minecraft_unban_player
     _set_bot_status = set_bot_status
     _roster_add_all = roster_add_all
+    _set_suggestions_channel = set_suggestions_channel
+    _suggestion_set_status = suggestion_set_status
+    _giveaway_start = giveaway_start
+    _giveaway_end = giveaway_end
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

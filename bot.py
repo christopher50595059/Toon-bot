@@ -86,6 +86,10 @@ Commands:
   /weblogin                               - get a one-time code to log into the web dashboard without Discord OAuth
   /setweblogincommandrole [role]          - (admin only) restrict who can run /weblogin (omit to allow everyone)
   /setbotstatus enabled:<bool>            - (admin only) rotate the bot's Discord status through live member/Rust/Minecraft stats
+  /suggest message:<text>                 - submit a suggestion for staff/community to vote on
+  /setsuggestionschannel [channel]        - (admin only) set where suggestions get posted (omit to disable)
+  /giveaway_start prize:<text> duration_minutes:<int> [winners] [channel] - start a giveaway
+  /giveaway_end giveaway_id:<int>         - end a giveaway early and pick winners now
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -220,6 +224,8 @@ async def on_ready():
         backup_scheduler_loop.start()
     if not bot_status_loop.is_running():
         bot_status_loop.start()
+    if not giveaway_check_loop.is_running():
+        giveaway_check_loop.start()
 
     # Reconnect any Rust RCON connections that were configured before a restart.
     for guild_id_str, cfg in config.items():
@@ -5082,7 +5088,374 @@ async def web_mvp_end(guild_id: int, actor_id: int) -> str:
     return f"✅ MVP vote ended. {result}"
 
 
-# ---------- cross-posting ----------
+# ---------- suggestions ----------
+
+def build_suggestion_embed(suggestion: dict) -> discord.Embed:
+    status = suggestion.get("status", "pending")
+    color = {"pending": discord.Color.blurple(), "approved": discord.Color.green(), "denied": discord.Color.red()}[status]
+    status_label = {"pending": "🗳️ Pending", "approved": "✅ Approved", "denied": "❌ Denied"}[status]
+    embed = discord.Embed(title=f"💡 Suggestion #{suggestion['id']}", description=suggestion["message"], color=color)
+    embed.add_field(name="👍", value=str(len(suggestion.get("upvotes", []))), inline=True)
+    embed.add_field(name="👎", value=str(len(suggestion.get("downvotes", []))), inline=True)
+    embed.add_field(name="Status", value=status_label, inline=True)
+    embed.set_footer(text=f"Suggested by user ID {suggestion['user_id']}")
+    return embed
+
+
+class SuggestionView(discord.ui.View):
+    def __init__(self, guild_id: int, suggestion_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.suggestion_id = suggestion_id
+
+    async def _get_suggestion(self):
+        cfg = get_guild_cfg(self.guild_id)
+        return cfg.get("suggestions", {}).get(str(self.suggestion_id))
+
+    @discord.ui.button(label="Upvote", style=discord.ButtonStyle.success, emoji="👍")
+    async def upvote(self, interaction: discord.Interaction, button: discord.ui.Button):
+        suggestion = await self._get_suggestion()
+        if not suggestion or suggestion.get("status") != "pending":
+            await interaction.response.send_message("❌ This suggestion is no longer open.", ephemeral=True)
+            return
+        uid = interaction.user.id
+        suggestion.setdefault("downvotes", [])
+        if uid in suggestion["downvotes"]:
+            suggestion["downvotes"].remove(uid)
+        upvotes = suggestion.setdefault("upvotes", [])
+        if uid in upvotes:
+            upvotes.remove(uid)
+        else:
+            upvotes.append(uid)
+        save_config(config)
+        await interaction.response.edit_message(embed=build_suggestion_embed(suggestion))
+
+    @discord.ui.button(label="Downvote", style=discord.ButtonStyle.danger, emoji="👎")
+    async def downvote(self, interaction: discord.Interaction, button: discord.ui.Button):
+        suggestion = await self._get_suggestion()
+        if not suggestion or suggestion.get("status") != "pending":
+            await interaction.response.send_message("❌ This suggestion is no longer open.", ephemeral=True)
+            return
+        uid = interaction.user.id
+        suggestion.setdefault("upvotes", [])
+        if uid in suggestion["upvotes"]:
+            suggestion["upvotes"].remove(uid)
+        downvotes = suggestion.setdefault("downvotes", [])
+        if uid in downvotes:
+            downvotes.remove(uid)
+        else:
+            downvotes.append(uid)
+        save_config(config)
+        await interaction.response.edit_message(embed=build_suggestion_embed(suggestion))
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.secondary, emoji="✅", row=1)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_authorized(interaction):
+            await interaction.response.send_message("❌ You don't have permission to do that.", ephemeral=True)
+            return
+        suggestion = await self._get_suggestion()
+        if not suggestion:
+            await interaction.response.send_message("❌ Suggestion not found.", ephemeral=True)
+            return
+        suggestion["status"] = "approved"
+        save_config(config)
+        await interaction.response.edit_message(embed=build_suggestion_embed(suggestion), view=self)
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.secondary, emoji="❌", row=1)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_authorized(interaction):
+            await interaction.response.send_message("❌ You don't have permission to do that.", ephemeral=True)
+            return
+        suggestion = await self._get_suggestion()
+        if not suggestion:
+            await interaction.response.send_message("❌ Suggestion not found.", ephemeral=True)
+            return
+        suggestion["status"] = "denied"
+        save_config(config)
+        await interaction.response.edit_message(embed=build_suggestion_embed(suggestion), view=self)
+
+
+@bot.tree.command(name="suggest", description="Submit a suggestion for staff and the community to vote on.")
+@app_commands.describe(message="Your suggestion")
+async def suggest(interaction: discord.Interaction, message: str):
+    cfg = get_guild_cfg(interaction.guild_id)
+    channel_id = cfg.get("suggestions_channel_id")
+    if not channel_id:
+        await interaction.response.send_message("❌ No suggestions channel has been set up yet. Ask an admin to run /setsuggestionschannel.", ephemeral=True)
+        return
+    channel = interaction.guild.get_channel(channel_id)
+    if channel is None:
+        await interaction.response.send_message("❌ The configured suggestions channel no longer exists.", ephemeral=True)
+        return
+
+    next_id = cfg.get("suggestion_next_id", 1)
+    cfg["suggestion_next_id"] = next_id + 1
+    suggestion = {
+        "id": next_id, "user_id": interaction.user.id, "message": message, "status": "pending",
+        "upvotes": [], "downvotes": [], "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    cfg.setdefault("suggestions", {})[str(next_id)] = suggestion
+    save_config(config)
+
+    view = SuggestionView(interaction.guild_id, next_id)
+    try:
+        msg = await channel.send(embed=build_suggestion_embed(suggestion), view=view)
+        suggestion["message_id"] = msg.id
+        save_config(config)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to post in the suggestions channel.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"✅ Suggestion #{next_id} posted in {channel.mention}!", ephemeral=True)
+
+
+@bot.tree.command(name="setsuggestionschannel", description="Set the channel where suggestions get posted.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="The channel for suggestions (omit to disable)")
+async def setsuggestionschannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if channel is None:
+        cfg.pop("suggestions_channel_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Suggestions disabled.", ephemeral=True)
+        return
+    cfg["suggestions_channel_id"] = channel.id
+    save_config(config)
+    await interaction.response.send_message(f"✅ Suggestions will now be posted in {channel.mention}.", ephemeral=True)
+
+
+async def web_set_suggestions_channel(guild_id: int, channel_id, actor_id: int) -> str:
+    """Mirrors /setsuggestionschannel."""
+    cfg = get_guild_cfg(guild_id)
+    if channel_id is None:
+        cfg.pop("suggestions_channel_id", None)
+        save_config(config)
+        return "✅ Suggestions disabled."
+    guild = bot.get_guild(guild_id)
+    channel = guild.get_channel(channel_id) if guild else None
+    if channel is None:
+        return "❌ Couldn't find that channel."
+    cfg["suggestions_channel_id"] = channel_id
+    save_config(config)
+    return f"✅ Suggestions will now be posted in #{channel.name}."
+
+
+async def web_suggestion_set_status(guild_id: int, suggestion_id: int, status: str, actor_id: int) -> str:
+    """Approve or deny a suggestion from the web dashboard."""
+    guild = bot.get_guild(guild_id)
+    cfg = get_guild_cfg(guild_id)
+    suggestion = cfg.get("suggestions", {}).get(str(suggestion_id))
+    if not suggestion:
+        return "❌ Suggestion not found."
+    suggestion["status"] = status
+    save_config(config)
+
+    if guild:
+        channel_id = cfg.get("suggestions_channel_id")
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if channel and suggestion.get("message_id"):
+            try:
+                msg = await channel.fetch_message(suggestion["message_id"])
+                view = SuggestionView(guild_id, suggestion_id) if status == "pending" else None
+                await msg.edit(embed=build_suggestion_embed(suggestion), view=view)
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+    return f"✅ Suggestion #{suggestion_id} marked {status}."
+
+
+# ---------- giveaways ----------
+
+def build_giveaway_embed(giveaway: dict, ended: bool = False) -> discord.Embed:
+    end_dt = datetime.fromisoformat(giveaway["end_time"])
+    color = discord.Color.gold() if not ended else discord.Color.dark_grey()
+    title = f"🎉 GIVEAWAY: {giveaway['prize']}" + (" (ENDED)" if ended else "")
+    embed = discord.Embed(title=title, color=color)
+    if not ended:
+        embed.description = f"Click **Enter** below to join!\nEnds: <t:{int(end_dt.timestamp())}:R>"
+    embed.add_field(name="Winners", value=str(giveaway["winner_count"]), inline=True)
+    embed.add_field(name="Entrants", value=str(len(giveaway.get("entrants", []))), inline=True)
+    return embed
+
+
+class GiveawayEnterView(discord.ui.View):
+    def __init__(self, guild_id: int, giveaway_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.giveaway_id = giveaway_id
+
+    @discord.ui.button(label="Enter 🎉", style=discord.ButtonStyle.success)
+    async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = get_guild_cfg(self.guild_id)
+        giveaway = cfg.get("giveaways", {}).get(str(self.giveaway_id))
+        if not giveaway or giveaway.get("ended"):
+            await interaction.response.send_message("❌ This giveaway has ended.", ephemeral=True)
+            return
+        entrants = giveaway.setdefault("entrants", [])
+        uid = interaction.user.id
+        if uid in entrants:
+            entrants.remove(uid)
+            save_config(config)
+            await interaction.response.send_message("↩️ You've left the giveaway.", ephemeral=True)
+        else:
+            entrants.append(uid)
+            save_config(config)
+            await interaction.response.send_message("🎉 You're entered! Good luck.", ephemeral=True)
+        try:
+            await interaction.message.edit(embed=build_giveaway_embed(giveaway))
+        except discord.Forbidden:
+            pass
+
+
+async def end_giveaway(guild_id: int, giveaway_id: int) -> str:
+    """Picks winners and announces them. Shared by the auto-end loop and manual /giveaway_end."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    cfg = get_guild_cfg(guild_id)
+    giveaway = cfg.get("giveaways", {}).get(str(giveaway_id))
+    if not giveaway:
+        return "❌ Giveaway not found."
+    if giveaway.get("ended"):
+        return "ℹ️ This giveaway already ended."
+
+    entrants = giveaway.get("entrants", [])
+    winner_count = min(giveaway["winner_count"], len(entrants))
+    winners = random.sample(entrants, winner_count) if winner_count > 0 else []
+    giveaway["ended"] = True
+    giveaway["winners"] = winners
+    save_config(config)
+
+    channel = guild.get_channel(giveaway["channel_id"])
+    if channel and giveaway.get("message_id"):
+        try:
+            msg = await channel.fetch_message(giveaway["message_id"])
+            await msg.edit(embed=build_giveaway_embed(giveaway, ended=True), view=None)
+        except (discord.NotFound, discord.Forbidden):
+            pass
+
+    if channel:
+        try:
+            if winners:
+                mentions = ", ".join(f"<@{w}>" for w in winners)
+                await channel.send(f"🎉 Congratulations {mentions} — you won **{giveaway['prize']}**!")
+            else:
+                await channel.send(f"😕 No one entered the giveaway for **{giveaway['prize']}** — no winner.")
+        except discord.Forbidden:
+            pass
+
+    return f"✅ Giveaway ended. {len(winners)} winner(s) picked from {len(entrants)} entrant(s)."
+
+
+@tasks.loop(seconds=30)
+async def giveaway_check_loop():
+    now = datetime.now(timezone.utc)
+    for guild_id_str in list(config.keys()):
+        try:
+            guild_id = int(guild_id_str)
+        except ValueError:
+            continue
+        cfg = config.get(guild_id_str, {})
+        for gid_str, giveaway in list(cfg.get("giveaways", {}).items()):
+            if giveaway.get("ended"):
+                continue
+            end_time = datetime.fromisoformat(giveaway["end_time"])
+            if now >= end_time:
+                await end_giveaway(guild_id, int(gid_str))
+
+
+@bot.tree.command(name="giveaway_start", description="Start a giveaway.")
+@app_commands.describe(
+    prize="What's being given away", duration_minutes="How long the giveaway runs, in minutes",
+    winners="How many winners to pick", channel="Where to post it (defaults to this channel)",
+)
+async def giveaway_start(
+    interaction: discord.Interaction, prize: str, duration_minutes: int, winners: int = 1,
+    channel: discord.TextChannel = None,
+):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if duration_minutes < 1:
+        await interaction.response.send_message("❌ Duration must be at least 1 minute.", ephemeral=True)
+        return
+    if winners < 1:
+        await interaction.response.send_message("❌ Need at least 1 winner.", ephemeral=True)
+        return
+
+    target_channel = channel or interaction.channel
+    cfg = get_guild_cfg(interaction.guild_id)
+    next_id = cfg.get("giveaway_next_id", 1)
+    cfg["giveaway_next_id"] = next_id + 1
+    end_time = datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)
+    giveaway = {
+        "id": next_id, "prize": prize, "channel_id": target_channel.id,
+        "end_time": end_time.isoformat(), "winner_count": winners, "entrants": [], "ended": False,
+    }
+    cfg.setdefault("giveaways", {})[str(next_id)] = giveaway
+    save_config(config)
+
+    view = GiveawayEnterView(interaction.guild_id, next_id)
+    try:
+        msg = await target_channel.send(embed=build_giveaway_embed(giveaway), view=view)
+        giveaway["message_id"] = msg.id
+        save_config(config)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to post there.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"✅ Giveaway #{next_id} started in {target_channel.mention}!", ephemeral=True)
+
+
+@bot.tree.command(name="giveaway_end", description="End a giveaway early and pick winners now.")
+@app_commands.describe(giveaway_id="The giveaway's ID (shown when it was started)")
+async def giveaway_end(interaction: discord.Interaction, giveaway_id: int):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await end_giveaway(interaction.guild_id, giveaway_id)
+    await interaction.followup.send(result, ephemeral=True)
+
+
+async def web_giveaway_start(guild_id: int, prize: str, duration_minutes: int, winner_count: int, channel_id: int, actor_id: int) -> str:
+    """Mirrors /giveaway_start."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return "❌ Couldn't find that channel."
+    if duration_minutes < 1 or winner_count < 1:
+        return "❌ Duration and winner count must be at least 1."
+
+    cfg = get_guild_cfg(guild_id)
+    next_id = cfg.get("giveaway_next_id", 1)
+    cfg["giveaway_next_id"] = next_id + 1
+    end_time = datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)
+    giveaway = {
+        "id": next_id, "prize": prize, "channel_id": channel_id,
+        "end_time": end_time.isoformat(), "winner_count": winner_count, "entrants": [], "ended": False,
+    }
+    cfg.setdefault("giveaways", {})[str(next_id)] = giveaway
+    save_config(config)
+
+    view = GiveawayEnterView(guild_id, next_id)
+    try:
+        msg = await channel.send(embed=build_giveaway_embed(giveaway), view=view)
+        giveaway["message_id"] = msg.id
+        save_config(config)
+    except discord.Forbidden:
+        return "❌ I don't have permission to post in that channel."
+    return f"✅ Giveaway #{next_id} started in #{channel.name}."
+
+
+async def web_giveaway_end(guild_id: int, giveaway_id: int, actor_id: int) -> str:
+    """Mirrors /giveaway_end."""
+    return await end_giveaway(guild_id, giveaway_id)
+
+
+
 
 @bot.tree.command(name="crosspost_add", description="Mirror messages from THIS channel to a channel in another server the bot is also in.")
 @app_commands.checks.has_permissions(administrator=True)
@@ -5938,6 +6311,8 @@ HELP_CATEGORIES = {
         ("/tournament_create / _start / _report / _bracket", "Run a bracket tournament"),
         ("/gamenight_create / _list / _cancel", "Schedule game nights with RSVPs"),
         ("/mvp_start / _end", "Vote for MVP among candidates"),
+        ("/suggest / setsuggestionschannel", "Community suggestions with voting + staff approval"),
+        ("/giveaway_start / _end", "Run a giveaway with a random winner picker"),
     ],
     "🛡️ Moderation": [
         ("/kick", "Kick a member (confirmation required)"),
@@ -6241,6 +6616,7 @@ bot.tree.add_command(showcase_group)
 @setminecraftstatuschannel.error
 @setweblogincommandrole.error
 @setbotstatus.error
+@setsuggestionschannel.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -6274,5 +6650,7 @@ if __name__ == "__main__":
         minecraft_get_players, minecraft_kick_player, minecraft_ban_player, minecraft_get_banlist, minecraft_unban_player,
         web_set_bot_status,
         web_roster_add_all,
+        web_set_suggestions_channel, web_suggestion_set_status,
+        web_giveaway_start, web_giveaway_end,
     )
     bot.run(TOKEN)
