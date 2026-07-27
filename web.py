@@ -112,6 +112,8 @@ _set_suggestions_channel = None
 _suggestion_set_status = None
 _giveaway_start = None
 _giveaway_end = None
+_put_on_cooldown = None
+_remove_cooldown = None
 
 
 # ---------- shared page chrome ----------
@@ -1183,6 +1185,7 @@ def dashboard(guild_id):
           {_role_search_field("Manager role (can use staff commands)", "manager_role", guild, cfg.get('manager_role_id'))}
           {_role_search_field("Birthday role", "birthday_role", guild, cfg.get('birthday_role_id'))}
           {_role_search_field("Who can run /weblogin (blank = everyone)", "weblogin_role", guild, cfg.get('weblogin_role_id'))}
+          {_role_search_field("Promotion cooldown role (blocks promote/demote while worn)", "promotion_cooldown_role", guild, cfg.get('promotion_cooldown_role_id'))}
         </div>
       </div>
 
@@ -1240,6 +1243,7 @@ def dashboard_save(guild_id):
     set_or_clear("manager_role_id", "manager_role")
     set_or_clear("birthday_role_id", "birthday_role")
     set_or_clear("weblogin_role_id", "weblogin_role")
+    set_or_clear("promotion_cooldown_role_id", "promotion_cooldown_role")
 
     ranks = []
     for i in range(16):
@@ -1404,6 +1408,26 @@ def roster_page(guild_id):
       </form>
     </div>
 
+    <div class="card-row">
+      <div class="card">
+        <h2>⏳ Put on Cooldown</h2>
+        <div class="hint" style="margin-bottom:12px;">Gives selected members the promotion cooldown role, blocking them from being promoted/demoted until it's removed. Set the role first on the main Settings page.</div>
+        <form method="post" action="/dashboard/{guild_id}/roster/cooldown/add">
+          {_member_multi_search_field()}
+          <button class="btn btn-secondary" type="submit">Put on Cooldown</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>✅ Remove Cooldown</h2>
+        <div class="hint" style="margin-bottom:12px;">Removes the cooldown role from selected members, letting them be promoted/demoted again.</div>
+        <form method="post" action="/dashboard/{guild_id}/roster/cooldown/remove">
+          {_member_multi_search_field()}
+          <button class="btn" type="submit">Remove Cooldown</button>
+        </form>
+      </div>
+    </div>
+
     <div class="card">
       <h2>⬆️ Promote</h2>
       <form method="post" action="/dashboard/{guild_id}/roster/promote">
@@ -1466,6 +1490,40 @@ def roster_addall_route(guild_id):
         "roster_page", guild_id=guild_id,
         result="⏳ Started in the background — this can take a few minutes for large servers. Refresh this page shortly to see the results.",
     ))
+
+
+@app.route("/dashboard/<int:guild_id>/roster/cooldown/add", methods=["POST"])
+def roster_cooldown_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    user_ids = request.form.getlist("user_ids")
+    if not user_ids:
+        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick at least one member."))
+    results = []
+    for raw_id in user_ids:
+        try:
+            results.append(_run_async(_put_on_cooldown(guild_id, int(raw_id), session["user_id"])))
+        except ValueError:
+            continue
+    return redirect(url_for("roster_page", guild_id=guild_id, result=" / ".join(results)))
+
+
+@app.route("/dashboard/<int:guild_id>/roster/cooldown/remove", methods=["POST"])
+def roster_cooldown_remove_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    user_ids = request.form.getlist("user_ids")
+    if not user_ids:
+        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick at least one member."))
+    results = []
+    for raw_id in user_ids:
+        try:
+            results.append(_run_async(_remove_cooldown(guild_id, int(raw_id), session["user_id"])))
+        except ValueError:
+            continue
+    return redirect(url_for("roster_page", guild_id=guild_id, result=" / ".join(results)))
 
 
 @app.route("/dashboard/<int:guild_id>/roster/remove", methods=["POST"])
@@ -4872,6 +4930,7 @@ def start_web_app(
     roster_add_all,
     set_suggestions_channel, suggestion_set_status,
     giveaway_start, giveaway_end,
+    put_on_cooldown, remove_cooldown,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -4895,6 +4954,7 @@ def start_web_app(
     global _roster_add_all
     global _set_suggestions_channel, _suggestion_set_status
     global _giveaway_start, _giveaway_end
+    global _put_on_cooldown, _remove_cooldown
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -4962,6 +5022,8 @@ def start_web_app(
     _suggestion_set_status = suggestion_set_status
     _giveaway_start = giveaway_start
     _giveaway_end = giveaway_end
+    _put_on_cooldown = put_on_cooldown
+    _remove_cooldown = remove_cooldown
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

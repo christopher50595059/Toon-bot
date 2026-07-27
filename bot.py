@@ -90,6 +90,9 @@ Commands:
   /setsuggestionschannel [channel]        - (admin only) set where suggestions get posted (omit to disable)
   /giveaway_start prize:<text> duration_minutes:<int> [winners] [channel] - start a giveaway
   /giveaway_end giveaway_id:<int>         - end a giveaway early and pick winners now
+  /setpromotioncooldownrole [role]        - (admin only) role that blocks promotion/demotion while a member has it
+  /putoncooldown user:<member>            - give a member the promotion cooldown role
+  /removecooldown user:<member>           - remove the promotion cooldown role from a member
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -740,6 +743,12 @@ async def _web_change_rank(guild_id: int, user_id: int, reason: str, actor_id: i
     existing = next((entry for entry in roster if entry["user_id"] == member.id), None)
     if not existing or existing.get("rank_role_id") not in rank_ids:
         return f"❌ {member.display_name} isn't on the roster at a known rank yet."
+
+    cooldown_role_id = cfg.get("promotion_cooldown_role_id")
+    if cooldown_role_id:
+        cooldown_role = guild.get_role(cooldown_role_id)
+        if cooldown_role and cooldown_role in member.roles:
+            return f"⏳ {member.display_name} has the @{cooldown_role.name} role and can't be {verb.lower()}d right now."
 
     user_cooldowns = cfg.get("user_cooldowns", {})
     cooldown_hours = user_cooldowns.get(str(member.id), cfg.get("cooldown_hours", 0))
@@ -3278,6 +3287,119 @@ async def setweblogincommandrole(interaction: discord.Interaction, role: discord
     await interaction.response.send_message(f"✅ Only Administrators and @{role.name} can now use /weblogin.", ephemeral=True)
 
 
+@bot.tree.command(name="setpromotioncooldownrole", description="Set the role that blocks a member from being promoted/demoted while they have it.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(role="The cooldown role — omit to disable this feature")
+async def setpromotioncooldownrole(interaction: discord.Interaction, role: discord.Role = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if role is None:
+        cfg.pop("promotion_cooldown_role_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Promotion cooldown role disabled.", ephemeral=True)
+        return
+    cfg["promotion_cooldown_role_id"] = role.id
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ Members with @{role.name} can no longer be promoted or demoted until it's removed from them.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="putoncooldown", description="Give a member the promotion cooldown role, blocking promotions/demotions for them.")
+@app_commands.describe(user="The member to put on cooldown")
+async def putoncooldown(interaction: discord.Interaction, user: discord.Member):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    role_id = cfg.get("promotion_cooldown_role_id")
+    if not role_id:
+        await interaction.response.send_message("❌ No cooldown role set up yet. Run /setpromotioncooldownrole first.", ephemeral=True)
+        return
+    role = interaction.guild.get_role(role_id)
+    if role is None:
+        await interaction.response.send_message("❌ That role no longer exists.", ephemeral=True)
+        return
+    if role >= interaction.guild.me.top_role:
+        await interaction.response.send_message(f"❌ I can't assign @{role.name} — it's above my own role.", ephemeral=True)
+        return
+    try:
+        await user.add_roles(role, reason=f"Put on promotion cooldown by {interaction.user}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to manage that role.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"✅ {user.mention} is now on promotion cooldown.", ephemeral=True)
+
+
+@bot.tree.command(name="removecooldown", description="Remove the promotion cooldown role from a member.")
+@app_commands.describe(user="The member to take off cooldown")
+async def removecooldown(interaction: discord.Interaction, user: discord.Member):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    role_id = cfg.get("promotion_cooldown_role_id")
+    if not role_id:
+        await interaction.response.send_message("❌ No cooldown role set up yet.", ephemeral=True)
+        return
+    role = interaction.guild.get_role(role_id)
+    if role is None:
+        await interaction.response.send_message("❌ That role no longer exists.", ephemeral=True)
+        return
+    try:
+        await user.remove_roles(role, reason=f"Removed from promotion cooldown by {interaction.user}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to manage that role.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"✅ {user.mention} is off promotion cooldown.", ephemeral=True)
+
+
+async def web_put_on_cooldown(guild_id: int, user_id: int, actor_id: int) -> str:
+    """Mirrors /putoncooldown."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    if member is None:
+        return "❌ Couldn't find that member."
+    cfg = get_guild_cfg(guild_id)
+    role_id = cfg.get("promotion_cooldown_role_id")
+    if not role_id:
+        return "❌ No cooldown role set up yet."
+    role = guild.get_role(role_id)
+    if role is None:
+        return "❌ That role no longer exists."
+    if role >= guild.me.top_role:
+        return f"❌ I can't assign @{role.name} — it's above my own role."
+    try:
+        await member.add_roles(role, reason="Put on promotion cooldown via web dashboard")
+    except discord.Forbidden:
+        return "❌ I don't have permission to manage that role."
+    return f"✅ {member.display_name} is now on promotion cooldown."
+
+
+async def web_remove_cooldown(guild_id: int, user_id: int, actor_id: int) -> str:
+    """Mirrors /removecooldown."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    member = guild.get_member(user_id)
+    if member is None:
+        return "❌ Couldn't find that member."
+    cfg = get_guild_cfg(guild_id)
+    role_id = cfg.get("promotion_cooldown_role_id")
+    if not role_id:
+        return "❌ No cooldown role set up yet."
+    role = guild.get_role(role_id)
+    if role is None:
+        return "❌ That role no longer exists."
+    try:
+        await member.remove_roles(role, reason="Removed from promotion cooldown via web dashboard")
+    except discord.Forbidden:
+        return "❌ I don't have permission to manage that role."
+    return f"✅ {member.display_name} is off promotion cooldown."
+
+
 def redeem_web_login_code(code: str):
     """Returns the Discord user ID if the code is valid and unexpired, else
     None. One-time use — the code is removed either way once checked."""
@@ -3797,6 +3919,16 @@ async def _change_rank(interaction: discord.Interaction, user: discord.Member, r
             f"❌ {user.mention} isn't on the roster at a known rank yet. Use /rosteradd first.", ephemeral=True
         )
         return
+
+    cooldown_role_id = cfg.get("promotion_cooldown_role_id")
+    if cooldown_role_id:
+        cooldown_role = interaction.guild.get_role(cooldown_role_id)
+        if cooldown_role and cooldown_role in user.roles:
+            await interaction.response.send_message(
+                f"⏳ {user.mention} has the @{cooldown_role.name} role and can't be {verb.lower()}d right now.",
+                ephemeral=True,
+            )
+            return
 
     user_cooldowns = cfg.get("user_cooldowns", {})
     cooldown_hours = user_cooldowns.get(str(user.id), cfg.get("cooldown_hours", 0))
@@ -6313,6 +6445,7 @@ HELP_CATEGORIES = {
         ("/mvp_start / _end", "Vote for MVP among candidates"),
         ("/suggest / setsuggestionschannel", "Community suggestions with voting + staff approval"),
         ("/giveaway_start / _end", "Run a giveaway with a random winner picker"),
+        ("/setpromotioncooldownrole / _putoncooldown / _removecooldown", "Role-based promotion/demotion cooldown"),
     ],
     "🛡️ Moderation": [
         ("/kick", "Kick a member (confirmation required)"),
@@ -6617,6 +6750,7 @@ bot.tree.add_command(showcase_group)
 @setweblogincommandrole.error
 @setbotstatus.error
 @setsuggestionschannel.error
+@setpromotioncooldownrole.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -6652,5 +6786,6 @@ if __name__ == "__main__":
         web_roster_add_all,
         web_set_suggestions_channel, web_suggestion_set_status,
         web_giveaway_start, web_giveaway_end,
+        web_put_on_cooldown, web_remove_cooldown,
     )
     bot.run(TOKEN)
