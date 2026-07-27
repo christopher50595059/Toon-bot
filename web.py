@@ -299,6 +299,17 @@ BASE_STYLE = """
   }
   .search-option:last-child { border-bottom:none; }
   .search-option:hover { background:var(--accent-soft); color:#fff; }
+  .chips-box { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .chip {
+    display:inline-flex; align-items:center; gap:6px; background:var(--accent-soft);
+    border:1px solid rgba(59,130,246,0.35); color:#93c5fd; padding:4px 6px 4px 12px;
+    border-radius:20px; font-size:12.5px; font-weight:500;
+  }
+  .chip-remove {
+    background:none; border:none; color:#93c5fd; cursor:pointer; font-size:16px; line-height:1;
+    padding:0 4px; border-radius:50%; transition:background 0.1s ease;
+  }
+  .chip-remove:hover { background:rgba(248,113,113,0.25); color:#f87171; }
 </style>
 """
 
@@ -403,11 +414,33 @@ SEARCH_JS = """
   }
   function selectSearchOption(label) {
     if (!_activeSearchInput) return;
+    const map = SEARCH_MAPS[_activeSearchInput.dataset.map] || {};
+    const id = map[label] || '';
+
+    if (_activeSearchInput.dataset.multi === 'true') {
+      const chipsBox = _activeSearchInput.closest('.field').querySelector('.chips-box');
+      if (!chipsBox || !id) { getDropdownEl().style.display = 'none'; return; }
+      if (chipsBox.querySelector('input[value="' + id + '"]')) {
+        _activeSearchInput.value = '';
+        getDropdownEl().style.display = 'none';
+        return; // already added
+      }
+      const fieldName = chipsBox.dataset.fieldName;
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.innerHTML = '<input type="hidden" name="' + fieldName + '" value="' + id + '">' +
+        '<span>' + label + '</span><button type="button" class="chip-remove">&times;</button>';
+      chip.querySelector('.chip-remove').addEventListener('click', function() { chip.remove(); });
+      chipsBox.appendChild(chip);
+      _activeSearchInput.value = '';
+      getDropdownEl().style.display = 'none';
+      return;
+    }
+
     const field = _activeSearchInput.closest('.field');
     const hidden = field.querySelector('input[type=hidden]');
-    const map = SEARCH_MAPS[_activeSearchInput.dataset.map] || {};
     _activeSearchInput.value = label;
-    hidden.value = map[label] || '';
+    hidden.value = id;
     getDropdownEl().style.display = 'none';
   }
   document.addEventListener('click', function(e) {
@@ -841,6 +874,23 @@ def _member_search_field(label="Member", field_name="user_id"):
                oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
       </div>
       <input type="hidden" name="{field_name}">
+    </div>
+    """
+
+
+def _member_multi_search_field(label="Members", field_name="user_ids"):
+    """A type-to-search picker that lets you select MULTIPLE members, shown
+    as removable chips. Each selected member becomes its own hidden input
+    sharing {field_name}, so the route reads them with request.form.getlist().
+    Pair with one _member_search_assets() call anywhere earlier in the page."""
+    return f"""
+    <div class="field">
+      <label>{label}</label>
+      <div class="search-wrap">
+        <input type="text" data-map="member" data-multi="true" placeholder="Type to search, click to add..." autocomplete="off"
+               oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
+      </div>
+      <div class="chips-box" data-field-name="{field_name}"></div>
     </div>
     """
 
@@ -1342,7 +1392,7 @@ def roster_page(guild_id):
     <div class="card">
       <h2>⬆️ Promote</h2>
       <form method="post" action="/dashboard/{guild_id}/roster/promote">
-        {_member_search_field()}
+        {_member_multi_search_field()}
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn" type="submit">Promote</button>
       </form>
@@ -1351,7 +1401,7 @@ def roster_page(guild_id):
     <div class="card">
       <h2>⬇️ Demote</h2>
       <form method="post" action="/dashboard/{guild_id}/roster/demote">
-        {_member_search_field()}
+        {_member_multi_search_field()}
         <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
         <button class="btn btn-secondary" type="submit">Demote</button>
       </form>
@@ -1422,13 +1472,17 @@ def roster_promote_route(guild_id):
     guild, member = _check_access(guild_id)
     if guild is None:
         return redirect(url_for("guild_picker"))
-    try:
-        user_id = int(request.form["user_id"])
-    except (KeyError, ValueError):
-        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick a member."))
+    user_ids = request.form.getlist("user_ids")
+    if not user_ids:
+        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick at least one member."))
     reason = request.form.get("reason", "").strip() or "No reason given"
-    result = _run_async(_promote(guild_id, user_id, reason, session["user_id"]))
-    return redirect(url_for("roster_page", guild_id=guild_id, result=result))
+    results = []
+    for raw_id in user_ids:
+        try:
+            results.append(_run_async(_promote(guild_id, int(raw_id), reason, session["user_id"])))
+        except ValueError:
+            continue
+    return redirect(url_for("roster_page", guild_id=guild_id, result=" / ".join(results)))
 
 
 @app.route("/dashboard/<int:guild_id>/roster/demote", methods=["POST"])
@@ -1436,13 +1490,17 @@ def roster_demote_route(guild_id):
     guild, member = _check_access(guild_id)
     if guild is None:
         return redirect(url_for("guild_picker"))
-    try:
-        user_id = int(request.form["user_id"])
-    except (KeyError, ValueError):
-        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick a member."))
+    user_ids = request.form.getlist("user_ids")
+    if not user_ids:
+        return redirect(url_for("roster_page", guild_id=guild_id, result="❌ Pick at least one member."))
     reason = request.form.get("reason", "").strip() or "No reason given"
-    result = _run_async(_demote(guild_id, user_id, reason, session["user_id"]))
-    return redirect(url_for("roster_page", guild_id=guild_id, result=result))
+    results = []
+    for raw_id in user_ids:
+        try:
+            results.append(_run_async(_demote(guild_id, int(raw_id), reason, session["user_id"])))
+        except ValueError:
+            continue
+    return redirect(url_for("roster_page", guild_id=guild_id, result=" / ".join(results)))
 
 
 # ---------- moderation actions (kick/ban/timeout/warn) ----------
