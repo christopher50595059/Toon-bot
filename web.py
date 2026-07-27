@@ -143,11 +143,12 @@ BASE_STYLE = """
 
   body {
     background:
-      radial-gradient(ellipse 950px 550px at 15% -10%, rgba(59,130,246,0.32) 0%, transparent 62%),
-      radial-gradient(ellipse 750px 550px at 100% 10%, rgba(37,99,235,0.26) 0%, transparent 58%),
-      radial-gradient(ellipse 700px 400px at 50% 100%, rgba(29,78,216,0.14) 0%, transparent 55%),
-      linear-gradient(180deg, #080c18 0%, #05070d 45%, #030408 100%);
-    background-attachment: fixed;
+      radial-gradient(ellipse 950px 600px at 10% 0%, rgba(59,130,246,0.34) 0%, transparent 60%),
+      radial-gradient(ellipse 800px 600px at 95% 6%, rgba(37,99,235,0.28) 0%, transparent 58%),
+      radial-gradient(ellipse 900px 700px at 50% 38%, rgba(29,78,216,0.18) 0%, transparent 62%),
+      radial-gradient(ellipse 800px 650px at 4% 68%, rgba(30,64,175,0.22) 0%, transparent 58%),
+      radial-gradient(ellipse 850px 650px at 100% 82%, rgba(37,99,235,0.20) 0%, transparent 58%),
+      linear-gradient(180deg, #0a0f1e 0%, #080c18 35%, #070b16 65%, #060a14 100%);
     color:var(--text); font-family:'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     font-size:14.5px; font-weight:400; margin:0; padding:0 0 80px; line-height:1.5; min-height:100vh;
   }
