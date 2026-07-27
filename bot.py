@@ -20,7 +20,7 @@ Commands:
   /rank [user]                            - show a member's current rank (defaults to you)
   /history [user]                         - show a member's rank/roster history (defaults to you)
   /setrosterchannel channel:<channel>     - (admin only) post a live roster embed that auto-updates in this channel
-  /setranks rank1:<role> [rank2]...[rank8]  - (admin only) set the ordered rank roles (highest first)
+  /setranks rank1:<role> [rank2]...[rank12] - (admin only) set the ordered rank roles (highest first)
   /setcooldown hours:<int> [user]         - (admin only) require a wait between promote/demote — server-wide, or just for one person
   /setinactivitydays days:<int>           - (admin only) set the silence threshold used by /inactive
   /inactive                               - show roster members who haven't sent a message in a while
@@ -3344,7 +3344,8 @@ async def setrosterchannel(interaction: discord.Interaction, channel: discord.Te
 @app_commands.describe(
     rank1="Highest rank role", rank2="2nd rank role", rank3="3rd rank role",
     rank4="4th rank role", rank5="5th rank role", rank6="6th rank role",
-    rank7="7th rank role", rank8="8th rank role (lowest)",
+    rank7="7th rank role", rank8="8th rank role", rank9="9th rank role",
+    rank10="10th rank role", rank11="11th rank role", rank12="12th rank role (lowest)",
 )
 async def setranks(
     interaction: discord.Interaction,
@@ -3356,8 +3357,15 @@ async def setranks(
     rank6: discord.Role = None,
     rank7: discord.Role = None,
     rank8: discord.Role = None,
+    rank9: discord.Role = None,
+    rank10: discord.Role = None,
+    rank11: discord.Role = None,
+    rank12: discord.Role = None,
 ):
-    roles_in_order = [r for r in [rank1, rank2, rank3, rank4, rank5, rank6, rank7, rank8] if r is not None]
+    roles_in_order = [
+        r for r in [rank1, rank2, rank3, rank4, rank5, rank6, rank7, rank8, rank9, rank10, rank11, rank12]
+        if r is not None
+    ]
 
     cfg = get_guild_cfg(interaction.guild_id)
     cfg["ranks"] = [r.id for r in roles_in_order]

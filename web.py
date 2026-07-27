@@ -1000,7 +1000,7 @@ def dashboard(guild_id):
 
     ranks = cfg.get("ranks", [])
     rank_fields = ""
-    for i in range(8):
+    for i in range(12):
         selected = ranks[i] if i < len(ranks) else None
         rank_fields += _role_search_field(f"Rank {i + 1} {'(highest)' if i == 0 else ''}", f"rank{i}", guild, selected)
 
@@ -1133,7 +1133,7 @@ def dashboard(guild_id):
         <div class="grid-2">
           {rank_fields}
         </div>
-        <div class="hint">Leave lower ones on "none" if you have fewer than 8 ranks.</div>
+        <div class="hint">Leave lower ones on "none" if you have fewer than 12 ranks.</div>
       </div>
 
       <div class="card" id="other">
@@ -1184,7 +1184,7 @@ def dashboard_save(guild_id):
     set_or_clear("weblogin_role_id", "weblogin_role")
 
     ranks = []
-    for i in range(8):
+    for i in range(12):
         raw = f.get(f"rank{i}", "")
         if raw:
             ranks.append(int(raw))
