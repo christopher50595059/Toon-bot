@@ -114,6 +114,8 @@ _giveaway_start = None
 _giveaway_end = None
 _put_on_cooldown = None
 _remove_cooldown = None
+_add_custom_command = None
+_remove_custom_command = None
 
 
 # ---------- shared page chrome ----------
@@ -360,6 +362,8 @@ SIDENAV_SECTIONS = [
         ("activity_log_page", "🖱️", "Dashboard Activity"),
         ("login_history_page", "🔑", "Login History"),
         ("activity_page", "📈", "Activity"),
+        ("trivia_page", "🧠", "Trivia Leaderboard"),
+        ("custom_commands_page", "💬", "Custom Commands"),
         ("afk_page", "💤", "AFK Status"),
         ("backup_download", "💾", "Backup"),
         ("backups_page", "🗄️", "Auto Backups"),
@@ -1168,6 +1172,8 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/activitylog"><span>🖱️</span>Dashboard Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/loginhistory"><span>🔑</span>Login History</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/trivia"><span>🧠</span>Trivia</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/customcommands"><span>💬</span>Custom Commands</a>
         <a class="action-tile" href="/dashboard/{guild_id}/afk"><span>💤</span>AFK Status</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backups"><span>🗄️</span>Auto Backups</a>
@@ -2400,6 +2406,125 @@ def activity_page(guild_id):
     </div>
     """
     return render_page(f"{guild.name} — Activity", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/trivia")
+def trivia_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    scores = cfg.get("trivia_scores", {})
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:50]
+    rows = ""
+    if ranked:
+        for i, (uid, score) in enumerate(ranked, start=1):
+            m = guild.get_member(int(uid))
+            name = m.display_name if m else f"Unknown ({uid})"
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"#{i}")
+            rows += f"<tr><td>{medal}</td><td>{name}</td><td>{score}</td></tr>"
+    else:
+        rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No trivia games played yet — run /trivia in Discord to start!</td></tr>'
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🧠 Trivia Leaderboard</h1>
+    <div class="hint" style="margin-bottom:18px;">Run <code>/trivia</code> in Discord to play — first correct answer wins a point.</div>
+
+    <div class="card">
+      <h2>Top {len(ranked)}</h2>
+      {_table_search_box("trivia-table")}
+      <div class="log-wrap"><table class="log-table" id="trivia-table">
+        <tr><th>Rank</th><th>Member</th><th>Points</th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Trivia Leaderboard", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/customcommands")
+def custom_commands_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    custom_commands = cfg.get("custom_commands", {})
+    rows = ""
+    if custom_commands:
+        for trigger, response in custom_commands.items():
+            safe_trigger = html.escape(trigger)
+            rows += f"""
+            <tr>
+              <td><code>{safe_trigger}</code></td>
+              <td>{html.escape(response)}</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/customcommands/remove" style="margin:0;">
+                  <input type="hidden" name="trigger" value="{safe_trigger}">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No custom commands yet.</td></tr>'
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">💬 Custom Commands</h1>
+    <div class="hint" style="margin-bottom:18px;">When a member's message matches a trigger word exactly (not case-sensitive), the bot replies automatically.</div>
+    {result_html}
+
+    <div class="card">
+      <h2>➕ Add a custom command</h2>
+      <form method="post" action="/dashboard/{guild_id}/customcommands/add">
+        <div class="field"><label>Trigger word/phrase</label><input type="text" name="trigger" placeholder="!rules" required></div>
+        <div class="field"><label>Response</label><input type="text" name="response" placeholder="Check out #rules for the full list!" required></div>
+        <button class="btn" type="submit">Add</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>All custom commands</h2>
+      {_table_search_box("customcommands-table")}
+      <div class="log-wrap"><table class="log-table" id="customcommands-table">
+        <tr><th>Trigger</th><th>Response</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Custom Commands", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/customcommands/add", methods=["POST"])
+def custom_commands_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    trigger = request.form.get("trigger", "").strip()
+    response = request.form.get("response", "").strip()
+    if not trigger or not response:
+        return redirect(url_for("custom_commands_page", guild_id=guild_id, result="❌ Fill in both fields."))
+    result = _run_async(_add_custom_command(guild_id, trigger, response, session["user_id"]))
+    return redirect(url_for("custom_commands_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/customcommands/remove", methods=["POST"])
+def custom_commands_remove_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    trigger = request.form.get("trigger", "").strip()
+    if not trigger:
+        return redirect(url_for("custom_commands_page", guild_id=guild_id, result="❌ Missing trigger."))
+    result = _run_async(_remove_custom_command(guild_id, trigger, session["user_id"]))
+    return redirect(url_for("custom_commands_page", guild_id=guild_id, result=result))
 
 
 # ---------- tickets ----------
@@ -4947,6 +5072,7 @@ def start_web_app(
     set_suggestions_channel, suggestion_set_status,
     giveaway_start, giveaway_end,
     put_on_cooldown, remove_cooldown,
+    add_custom_command, remove_custom_command,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -4971,6 +5097,7 @@ def start_web_app(
     global _set_suggestions_channel, _suggestion_set_status
     global _giveaway_start, _giveaway_end
     global _put_on_cooldown, _remove_cooldown
+    global _add_custom_command, _remove_custom_command
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -5040,6 +5167,8 @@ def start_web_app(
     _giveaway_end = giveaway_end
     _put_on_cooldown = put_on_cooldown
     _remove_cooldown = remove_cooldown
+    _add_custom_command = add_custom_command
+    _remove_custom_command = remove_custom_command
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

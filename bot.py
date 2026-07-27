@@ -93,6 +93,11 @@ Commands:
   /setpromotioncooldownrole [role]        - (admin only) role that blocks promotion/demotion while a member has it
   /putoncooldown user:<member>            - give a member the promotion cooldown role
   /removecooldown user:<member>           - remove the promotion cooldown role from a member
+  /trivia                                 - answer a trivia question, first correct answer wins a point
+  /trivialeaderboard                      - show the top trivia scorers
+  /addcustomcommand trigger:<text> response:<text> - add a trigger word the bot auto-replies to
+  /removecustomcommand trigger:<text>     - remove a custom trigger word
+  /listcustomcommands                     - show all configured custom commands
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -280,6 +285,17 @@ async def on_message(message: discord.Message):
                     embed.add_field(name="Attachment", value=first.url, inline=False)
             try:
                 await dest_channel.send(embed=embed)
+            except discord.Forbidden:
+                pass
+
+    # ---- custom commands (staff-defined trigger words) ----
+    custom_commands = cfg.get("custom_commands", {})
+    if custom_commands:
+        content_lower = message.content.lower().strip()
+        response = custom_commands.get(content_lower)
+        if response:
+            try:
+                await message.channel.send(response)
             except discord.Forbidden:
                 pass
 
@@ -5635,6 +5651,195 @@ async def web_giveaway_end(guild_id: int, giveaway_id: int, actor_id: int) -> st
     return await end_giveaway(guild_id, giveaway_id)
 
 
+# ---------- trivia ----------
+
+TRIVIA_QUESTIONS = [
+    ("What year was the original Minecraft released?", ["2009", "2011", "2013", "2008"], 1),
+    ("In Rust, what do you need to craft a bow?", ["Wood + String", "Wood only", "Metal + Wood", "Cloth + Wood"], 0),
+    ("Which company developed Fortnite?", ["Valve", "Epic Games", "Riot Games", "Blizzard"], 1),
+    ("What does 'GG' mean in gaming?", ["Great Game", "Good Game", "Go Go", "Great Guy"], 1),
+    ("What is the best-selling video game of all time?", ["Tetris", "Minecraft", "GTA V", "Wii Sports"], 1),
+    ("Which console was released first?", ["Xbox", "PlayStation", "Nintendo 64", "Sega Genesis"], 3),
+    ("What does 'FPS' stand for in gaming?", ["Frames Per Second / First Person Shooter", "Fast Paced Strategy", "Final Player Score", "Free Play Server"], 0),
+    ("In Discord, what's the maximum length of a server name?", ["50 characters", "100 characters", "32 characters", "20 characters"], 1),
+    ("Which game popularized the Battle Royale genre?", ["Fortnite", "PUBG", "Apex Legends", "Warzone"], 1),
+    ("What programming language is Minecraft's Java Edition written in?", ["C++", "Python", "Java", "C#"], 2),
+    ("How many players are on a standard Rust server wipe day typically highest?", ["It varies wildly by server size", "Always exactly 100", "Always exactly 50", "Always exactly 200"], 0),
+    ("What year was Discord founded?", ["2013", "2015", "2017", "2011"], 1),
+    ("Which of these is NOT a Minecraft mob?", ["Creeper", "Enderman", "Grubber", "Skeleton"], 2),
+    ("What's the max level in vanilla Minecraft enchanting normally?", ["Level 30", "Level 50", "Level 100", "Level 20"], 0),
+    ("In Rust, what resource is needed to research most items?", ["Scrap", "Wood", "Stone", "Metal Fragments"], 0),
+    ("What does 'AFK' stand for?", ["Away From Keyboard", "Always Fighting Killers", "Attack From Kill-zone", "After Final Kill"], 0),
+    ("Which game engine does Fortnite use?", ["Unity", "Unreal Engine", "Source", "CryEngine"], 1),
+    ("What's the rarest ore color-coded in Minecraft (pre-1.17)?", ["Diamond", "Emerald", "Netherite", "Gold"], 1),
+    ("How many hearts does a default Minecraft player have?", ["10", "20 (health points, 10 hearts)", "15", "25"], 1),
+    ("What was the first ever video game widely credited as such?", ["Pong", "Tennis for Two", "Spacewar!", "Pac-Man"], 1),
+]
+
+
+class TriviaView(discord.ui.View):
+    def __init__(self, guild_id: int, correct_index: int, channel_id: int, message_id_holder: dict):
+        super().__init__(timeout=20)
+        self.guild_id = guild_id
+        self.correct_index = correct_index
+        self.channel_id = channel_id
+        self.message_id_holder = message_id_holder
+        self.answered_by = None
+        labels = ["🅰️", "🅱️", "🅲️", "🅳️"]
+        for i in range(4):
+            button = discord.ui.Button(label=labels[i], style=discord.ButtonStyle.primary)
+            button.callback = self._make_callback(i)
+            self.add_item(button)
+
+    def _make_callback(self, index: int):
+        async def callback(interaction: discord.Interaction):
+            if self.answered_by is not None:
+                await interaction.response.send_message("❌ Someone already answered this one!", ephemeral=True)
+                return
+            self.answered_by = interaction.user
+            for item in self.children:
+                item.disabled = True
+            if index == self.correct_index:
+                cfg = get_guild_cfg(self.guild_id)
+                scores = cfg.setdefault("trivia_scores", {})
+                uid = str(interaction.user.id)
+                scores[uid] = scores.get(uid, 0) + 1
+                save_config(config)
+                await interaction.response.edit_message(
+                    content=f"✅ **{interaction.user.display_name}** got it right! (+1 point)", view=self
+                )
+            else:
+                await interaction.response.edit_message(
+                    content=f"❌ **{interaction.user.display_name}** guessed wrong. The correct answer was option {['🅰️','🅱️','🅲️','🅳️'][self.correct_index]}.",
+                    view=self,
+                )
+            self.stop()
+        return callback
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        guild = bot.get_guild(self.guild_id)
+        channel = guild.get_channel(self.channel_id) if guild else None
+        message_id = self.message_id_holder.get("id")
+        if channel and message_id:
+            try:
+                msg = await channel.fetch_message(message_id)
+                await msg.edit(content=f"⏱️ Time's up! Nobody answered in time.", view=self)
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+
+@bot.tree.command(name="trivia", description="Answer a trivia question — first correct answer wins a point!")
+async def trivia(interaction: discord.Interaction):
+    question, options, correct_index = random.choice(TRIVIA_QUESTIONS)
+    embed = discord.Embed(title="🧠 Trivia Time!", description=question, color=discord.Color.purple())
+    labels = ["🅰️", "🅱️", "🅲️", "🅳️"]
+    for i, opt in enumerate(options):
+        embed.add_field(name=labels[i], value=opt, inline=False)
+    embed.set_footer(text="You have 20 seconds to answer!")
+
+    message_id_holder = {}
+    view = TriviaView(interaction.guild_id, correct_index, interaction.channel_id, message_id_holder)
+    await interaction.response.send_message(embed=embed, view=view)
+    sent = await interaction.original_response()
+    message_id_holder["id"] = sent.id
+
+
+@bot.tree.command(name="trivialeaderboard", description="Show the top trivia scorers in this server.")
+async def trivialeaderboard(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    scores = cfg.get("trivia_scores", {})
+    if not scores:
+        await interaction.response.send_message("No trivia games played yet — run /trivia to start!", ephemeral=True)
+        return
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    lines = []
+    for i, (uid, score) in enumerate(ranked, start=1):
+        member = interaction.guild.get_member(int(uid))
+        name = member.display_name if member else f"Unknown ({uid})"
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+        lines.append(f"{medal} {name} — {score} point(s)")
+
+    embed = discord.Embed(title="🧠 Trivia Leaderboard", description="\n".join(lines), color=discord.Color.purple())
+    await interaction.response.send_message(embed=embed)
+
+
+# ---------- custom commands ----------
+
+@bot.tree.command(name="addcustomcommand", description="Add a custom trigger word — the bot replies automatically when someone types it.")
+@app_commands.describe(trigger="The exact word/phrase that triggers this (not case-sensitive)", response="What the bot replies with")
+async def addcustomcommand(interaction: discord.Interaction, trigger: str, response: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    custom_commands = cfg.setdefault("custom_commands", {})
+    trigger_key = trigger.lower().strip()
+    if not trigger_key:
+        await interaction.response.send_message("❌ Trigger can't be empty.", ephemeral=True)
+        return
+    is_update = trigger_key in custom_commands
+    custom_commands[trigger_key] = response
+    save_config(config)
+    verb = "Updated" if is_update else "Added"
+    await interaction.response.send_message(f"✅ {verb} custom command: when someone types `{trigger_key}`, I'll reply with your message.", ephemeral=True)
+
+
+@bot.tree.command(name="removecustomcommand", description="Remove a custom trigger word.")
+@app_commands.describe(trigger="The trigger word to remove")
+async def removecustomcommand(interaction: discord.Interaction, trigger: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    custom_commands = cfg.get("custom_commands", {})
+    trigger_key = trigger.lower().strip()
+    if trigger_key not in custom_commands:
+        await interaction.response.send_message(f"❌ No custom command found for `{trigger_key}`.", ephemeral=True)
+        return
+    del custom_commands[trigger_key]
+    save_config(config)
+    await interaction.response.send_message(f"✅ Removed custom command `{trigger_key}`.", ephemeral=True)
+
+
+@bot.tree.command(name="listcustomcommands", description="Show all configured custom commands.")
+async def listcustomcommands(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    custom_commands = cfg.get("custom_commands", {})
+    if not custom_commands:
+        await interaction.response.send_message("No custom commands configured yet.", ephemeral=True)
+        return
+    lines = [f"**{trigger}** → {response[:80]}{'...' if len(response) > 80 else ''}" for trigger, response in custom_commands.items()]
+    await interaction.response.send_message("\n".join(lines)[:2000], ephemeral=True)
+
+
+async def web_add_custom_command(guild_id: int, trigger: str, response: str, actor_id: int) -> str:
+    """Mirrors /addcustomcommand."""
+    cfg = get_guild_cfg(guild_id)
+    custom_commands = cfg.setdefault("custom_commands", {})
+    trigger_key = trigger.lower().strip()
+    if not trigger_key:
+        return "❌ Trigger can't be empty."
+    is_update = trigger_key in custom_commands
+    custom_commands[trigger_key] = response
+    save_config(config)
+    verb = "Updated" if is_update else "Added"
+    return f"✅ {verb} custom command: `{trigger_key}`."
+
+
+async def web_remove_custom_command(guild_id: int, trigger: str, actor_id: int) -> str:
+    """Mirrors /removecustomcommand."""
+    cfg = get_guild_cfg(guild_id)
+    custom_commands = cfg.get("custom_commands", {})
+    trigger_key = trigger.lower().strip()
+    if trigger_key not in custom_commands:
+        return f"❌ No custom command found for `{trigger_key}`."
+    del custom_commands[trigger_key]
+    save_config(config)
+    return f"✅ Removed custom command `{trigger_key}`."
+
 
 
 @bot.tree.command(name="crosspost_add", description="Mirror messages from THIS channel to a channel in another server the bot is also in.")
@@ -6511,6 +6716,15 @@ HELP_CATEGORIES = {
         ("/massaddrole", "Give a role to multiple members at once"),
         ("/massremoverole", "Remove a role from multiple members at once"),
     ],
+    "🎮 Fun": [
+        ("/trivia", "Answer a trivia question — first correct answer wins a point"),
+        ("/trivialeaderboard", "Show the top trivia scorers"),
+    ],
+    "💬 Custom Commands": [
+        ("/addcustomcommand", "Add a trigger word the bot auto-replies to"),
+        ("/removecustomcommand", "Remove a custom trigger word"),
+        ("/listcustomcommands", "Show all configured custom commands"),
+    ],
     "🔧 Utility": [
         ("/afk", "Mark yourself AFK"),
         ("/weblogin", "Get a one-time code to log into the web dashboard"),
@@ -6835,5 +7049,6 @@ if __name__ == "__main__":
         web_set_suggestions_channel, web_suggestion_set_status,
         web_giveaway_start, web_giveaway_end,
         web_put_on_cooldown, web_remove_cooldown,
+        web_add_custom_command, web_remove_custom_command,
     )
     bot.run(TOKEN)
