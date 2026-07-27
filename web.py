@@ -504,6 +504,7 @@ SEARCH_JS = """
     if (link.hasAttribute('data-no-ajax') || link.target === '_blank') return;
     const url = new URL(link.href, window.location.href);
     if (url.origin !== window.location.origin) return; // never intercept external links
+    if (url.pathname === window.location.pathname && url.search === window.location.search && url.hash) return; // same-page anchor jump
     e.preventDefault();
     navigateAjax(link.href);
   });
