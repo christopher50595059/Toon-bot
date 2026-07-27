@@ -629,24 +629,57 @@ async def web_roster_add(guild_id: int, user_id: int, rank_role_id: int, reason:
 
 
 async def web_roster_add_all(guild_id: int, rank_role_id: int, actor_id: int) -> str:
-    """Mirrors /rosteraddall — puts every member on the roster at once, at the given rank."""
+    """Mirrors /rosteraddall — puts every member on the roster at once, at the given rank.
+    Called fire-and-forget from the web dashboard (it can take a while for large servers),
+    so every outcome — success or failure — gets posted to the log channel, since there's
+    no page waiting around to show a return value."""
     guild = bot.get_guild(guild_id)
     if guild is None:
         return "❌ Server not found."
+
+    async def _post_log(text: str):
+        cfg = get_guild_cfg(guild_id)
+        log_channel_id = cfg.get("log_channel_id")
+        if not log_channel_id:
+            return
+        log_channel = guild.get_channel(log_channel_id)
+        if not log_channel:
+            return
+        try:
+            await log_channel.send(text)
+        except discord.Forbidden:
+            pass
+
     rank = guild.get_role(rank_role_id)
     if rank is None:
-        return "❌ Couldn't find that rank."
+        result = "❌ Couldn't find that rank."
+        await _post_log(f"📋 Bulk roster add-all failed: {result}")
+        return result
 
     cfg = get_guild_cfg(guild_id)
     valid_rank_ids = cfg.get("ranks", [])
     if rank.id not in valid_rank_ids:
-        return f"❌ @{rank.name} isn't a configured rank. Run /setranks first."
+        result = f"❌ @{rank.name} isn't a configured rank. Run /setranks first."
+        await _post_log(f"📋 Bulk roster add-all failed: {result}")
+        return result
     if rank >= guild.me.top_role:
-        return f"❌ I can't assign @{rank.name} — it's above my own role in Server Settings > Roles."
+        result = f"❌ I can't assign @{rank.name} — it's above my own role in Server Settings > Roles."
+        await _post_log(f"📋 Bulk roster add-all failed: {result}")
+        return result
 
-    all_members = [m async for m in guild.fetch_members(limit=None) if not m.bot]
+    try:
+        all_members = [m async for m in guild.fetch_members(limit=None) if not m.bot]
+    except discord.HTTPException as e:
+        result = (
+            f"❌ Couldn't fetch server members ({e}). Make sure 'Server Members Intent' is enabled for this bot "
+            "in the Discord Developer Portal (Bot page)."
+        )
+        await _post_log(f"📋 Bulk roster add-all failed: {result}")
+        return result
     if not all_members:
-        return "ℹ️ No members found."
+        result = "ℹ️ No members found."
+        await _post_log(f"📋 Bulk roster add-all: {result}")
+        return result
 
     roster = cfg.setdefault("roster", [])
     added, moved, role_failed = 0, 0, 0
@@ -673,22 +706,14 @@ async def web_roster_add_all(guild_id: int, rank_role_id: int, actor_id: int) ->
     await refresh_roster_message(guild)
     await refresh_server_stats_message(guild)
 
-    log_channel_id = cfg.get("log_channel_id")
-    if log_channel_id:
-        log_channel = guild.get_channel(log_channel_id)
-        if log_channel:
-            actor = guild.get_member(actor_id)
-            actor_mention = actor.mention if actor else f"<@{actor_id}>"
-            now_ts = int(datetime.now(timezone.utc).timestamp())
-            try:
-                await log_channel.send(
-                    f"📋 Bulk roster add-all → {rank.mention} | {added} added, {moved} moved | "
-                    f"{actor_mention} (via web dashboard) | <t:{now_ts}:f>"
-                )
-            except discord.Forbidden:
-                pass
-
+    actor = guild.get_member(actor_id)
+    actor_mention = actor.mention if actor else f"<@{actor_id}>"
+    now_ts = int(datetime.now(timezone.utc).timestamp())
     note = f", {role_failed} role grant(s) failed" if role_failed else ""
+    await _post_log(
+        f"📋 Bulk roster add-all → {rank.mention} | {added} added, {moved} moved{note} | "
+        f"{actor_mention} (via web dashboard) | <t:{now_ts}:f>"
+    )
     return f"✅ Roster updated: {added} added, {moved} moved to @{rank.name}{note}."
 
 
@@ -4170,7 +4195,15 @@ async def rosteraddall(interaction: discord.Interaction, rank: discord.Role):
         return
 
     await interaction.response.defer(ephemeral=True)
-    all_members = [m async for m in interaction.guild.fetch_members(limit=None) if not m.bot]
+    try:
+        all_members = [m async for m in interaction.guild.fetch_members(limit=None) if not m.bot]
+    except discord.HTTPException as e:
+        await interaction.followup.send(
+            f"❌ Couldn't fetch server members ({e}). Make sure 'Server Members Intent' is enabled for this bot "
+            "in the Discord Developer Portal (Bot page).",
+            ephemeral=True,
+        )
+        return
 
     if not all_members:
         await interaction.followup.send("ℹ️ No members found.", ephemeral=True)

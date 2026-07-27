@@ -1046,6 +1046,22 @@ def _run_async(coro, timeout=15):
         return f"❌ Something went wrong: {e}"
 
 
+def _fire_and_forget(coro):
+    """For background tasks the request doesn't wait on (e.g. bulk actions
+    that could take minutes). Unlike a bare asyncio.run_coroutine_threadsafe,
+    this makes sure an unexpected exception gets printed instead of vanishing
+    with zero trace — since nothing else is watching this task complete."""
+    future = asyncio.run_coroutine_threadsafe(coro, _bot.loop)
+
+    def _log_if_failed(f):
+        try:
+            f.result()
+        except Exception as e:
+            print(f"⚠️ Background task failed: {e}")
+
+    future.add_done_callback(_log_if_failed)
+
+
 @app.route("/dashboard/<int:guild_id>", methods=["GET"])
 def dashboard(guild_id):
     guild, member = _check_access(guild_id)
@@ -1485,7 +1501,7 @@ def roster_addall_route(guild_id):
     # This can take a while for large servers (one Discord API call per
     # member) — don't block the HTTP request waiting for it, just kick it
     # off in the background and let the user check back shortly.
-    asyncio.run_coroutine_threadsafe(_roster_add_all(guild_id, rank_id, session["user_id"]), _bot.loop)
+    _fire_and_forget(_roster_add_all(guild_id, rank_id, session["user_id"]))
     return redirect(url_for(
         "roster_page", guild_id=guild_id,
         result="⏳ Started in the background — this can take a few minutes for large servers. Refresh this page shortly to see the results.",
