@@ -3714,12 +3714,14 @@ def public_status_page(guild_id):
               <div class="field"><label>Players</label><div>{info['players']} / {info['max_players']}</div></div>
             </div>
             """
-        sections += f"""
-        <div class="card">
-          <h2>🦀 Rust Server</h2>
-          {rust_html}
-        </div>
-        """
+    else:
+        rust_html = '<div class="hint">Not set up yet.</div>'
+    sections += f"""
+    <div class="card">
+      <h2>🦀 Rust Server</h2>
+      {rust_html}
+    </div>
+    """
 
     if cfg.get("mc_host"):
         mc_status = _run_async(_get_minecraft_status(guild_id))
@@ -3733,12 +3735,14 @@ def public_status_page(guild_id):
               <div class="field"><label>Version</label><div>{info['version']}</div></div>
             </div>
             """
-        sections += f"""
-        <div class="card">
-          <h2>⛏️ Minecraft Server</h2>
-          {mc_html}
-        </div>
-        """
+    else:
+        mc_html = '<div class="hint">Not set up yet.</div>'
+    sections += f"""
+    <div class="card">
+      <h2>⛏️ Minecraft Server</h2>
+      {mc_html}
+    </div>
+    """
 
     body = f"""
     <h1>📡 {guild.name} — Status</h1>
