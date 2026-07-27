@@ -1278,7 +1278,7 @@ def roles_page(guild_id):
       <h2>🟢 Give a role</h2>
       <form method="post" action="/dashboard/{guild_id}/roles/give">
         <div class="grid-2">
-          {_member_search_field()}
+          {_member_multi_search_field()}
           {_role_search_field()}
         </div>
         <div class="field">
@@ -1313,15 +1313,22 @@ def roles_give(guild_id):
     if guild is None:
         return redirect(url_for("guild_picker"))
 
+    user_ids = request.form.getlist("user_ids")
     try:
-        user_id = int(request.form["user_id"])
         role_id = int(request.form["role_id"])
     except (KeyError, ValueError):
-        return redirect(url_for("roles_page", guild_id=guild_id, result="❌ Pick a member and a role."))
+        return redirect(url_for("roles_page", guild_id=guild_id, result="❌ Pick a role."))
+    if not user_ids:
+        return redirect(url_for("roles_page", guild_id=guild_id, result="❌ Pick at least one member."))
 
     reason = request.form.get("reason", "").strip() or "No reason given"
-    result = _run_async(_give_role(guild_id, user_id, role_id, reason, session["user_id"]))
-    return redirect(url_for("roles_page", guild_id=guild_id, result=result))
+    results = []
+    for raw_id in user_ids:
+        try:
+            results.append(_run_async(_give_role(guild_id, int(raw_id), role_id, reason, session["user_id"])))
+        except ValueError:
+            continue
+    return redirect(url_for("roles_page", guild_id=guild_id, result=" / ".join(results)))
 
 
 @app.route("/dashboard/<int:guild_id>/roles/remove", methods=["POST"])
@@ -1525,7 +1532,7 @@ def moderation_page(guild_id):
       <div class="card">
         <h2>⚠️ Warn</h2>
         <form method="post" action="/dashboard/{guild_id}/moderation/warn">
-          {_member_search_field()}
+          {_member_multi_search_field()}
           <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
           <button class="btn" type="submit">Warn</button>
         </form>
@@ -1553,7 +1560,7 @@ def moderation_page(guild_id):
       <div class="card">
         <h2>👢 Kick</h2>
         <form method="post" action="/dashboard/{guild_id}/moderation/kick">
-          {_member_search_field()}
+          {_member_multi_search_field()}
           <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
           <button class="btn btn-secondary" type="submit">Kick</button>
         </form>
@@ -1562,7 +1569,7 @@ def moderation_page(guild_id):
       <div class="card">
         <h2>🔨 Ban</h2>
         <form method="post" action="/dashboard/{guild_id}/moderation/ban">
-          {_member_search_field()}
+          {_member_multi_search_field()}
           <div class="field"><label>Delete message history (days, 0-7)</label><input type="number" name="delete_days" min="0" max="7" value="0"></div>
           <div class="field"><label>Reason</label><input type="text" name="reason" placeholder="Why" required></div>
           <button class="btn btn-secondary" type="submit">Ban</button>
@@ -1578,13 +1585,17 @@ def moderation_kick(guild_id):
     guild, member = _check_access(guild_id)
     if guild is None:
         return redirect(url_for("guild_picker"))
-    try:
-        user_id = int(request.form["user_id"])
-    except (KeyError, ValueError):
-        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick a member."))
+    user_ids = request.form.getlist("user_ids")
+    if not user_ids:
+        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick at least one member."))
     reason = request.form.get("reason", "").strip() or "No reason given"
-    result = _run_async(_kick(guild_id, user_id, reason, session["user_id"]))
-    return redirect(url_for("moderation_page", guild_id=guild_id, result=result))
+    results = []
+    for raw_id in user_ids:
+        try:
+            results.append(_run_async(_kick(guild_id, int(raw_id), reason, session["user_id"])))
+        except ValueError:
+            continue
+    return redirect(url_for("moderation_page", guild_id=guild_id, result=" / ".join(results)))
 
 
 @app.route("/dashboard/<int:guild_id>/moderation/ban", methods=["POST"])
@@ -1592,17 +1603,21 @@ def moderation_ban(guild_id):
     guild, member = _check_access(guild_id)
     if guild is None:
         return redirect(url_for("guild_picker"))
-    try:
-        user_id = int(request.form["user_id"])
-    except (KeyError, ValueError):
-        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick a member."))
+    user_ids = request.form.getlist("user_ids")
+    if not user_ids:
+        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick at least one member."))
     try:
         delete_days = int(request.form.get("delete_days", 0))
     except ValueError:
         delete_days = 0
     reason = request.form.get("reason", "").strip() or "No reason given"
-    result = _run_async(_ban(guild_id, user_id, reason, delete_days, session["user_id"]))
-    return redirect(url_for("moderation_page", guild_id=guild_id, result=result))
+    results = []
+    for raw_id in user_ids:
+        try:
+            results.append(_run_async(_ban(guild_id, int(raw_id), reason, delete_days, session["user_id"])))
+        except ValueError:
+            continue
+    return redirect(url_for("moderation_page", guild_id=guild_id, result=" / ".join(results)))
 
 
 @app.route("/dashboard/<int:guild_id>/moderation/timeout", methods=["POST"])
@@ -1639,13 +1654,17 @@ def moderation_warn(guild_id):
     guild, member = _check_access(guild_id)
     if guild is None:
         return redirect(url_for("guild_picker"))
-    try:
-        user_id = int(request.form["user_id"])
-    except (KeyError, ValueError):
-        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick a member."))
+    user_ids = request.form.getlist("user_ids")
+    if not user_ids:
+        return redirect(url_for("moderation_page", guild_id=guild_id, result="❌ Pick at least one member."))
     reason = request.form.get("reason", "").strip() or "No reason given"
-    result = _run_async(_warn(guild_id, user_id, reason, session["user_id"]))
-    return redirect(url_for("moderation_page", guild_id=guild_id, result=result))
+    results = []
+    for raw_id in user_ids:
+        try:
+            results.append(_run_async(_warn(guild_id, int(raw_id), reason, session["user_id"])))
+        except ValueError:
+            continue
+    return redirect(url_for("moderation_page", guild_id=guild_id, result=" / ".join(results)))
 
 
 # ---------- logs / movements ----------
