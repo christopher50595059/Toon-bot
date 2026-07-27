@@ -681,10 +681,12 @@ async def web_roster_add_all(guild_id: int, rank_role_id: int, actor_id: int) ->
         await _post_log(f"📋 Bulk roster add-all: {result}")
         return result
 
+    await _post_log(f"📋 Bulk roster add-all → {rank.mention}: starting on {len(all_members)} member(s). This can take a while due to Discord's rate limits — progress updates every 50.")
+
     roster = cfg.setdefault("roster", [])
     added, moved, role_failed = 0, 0, 0
 
-    for member in all_members:
+    for i, member in enumerate(all_members, start=1):
         try:
             if rank not in member.roles:
                 await member.add_roles(rank, reason=f"Bulk roster add by {actor_id} via web dashboard")
@@ -701,6 +703,10 @@ async def web_roster_add_all(guild_id: int, rank_role_id: int, actor_id: int) ->
         except discord.HTTPException:
             role_failed += 1
             continue
+
+        if i % 50 == 0:
+            save_config(config)  # checkpoint progress so a restart mid-run doesn't lose it
+            await _post_log(f"📋 Bulk roster add-all progress: {i}/{len(all_members)} processed ({added} added, {moved} moved so far).")
 
     save_config(config)
     await refresh_roster_message(guild)
@@ -4223,12 +4229,12 @@ async def rosteraddall(interaction: discord.Interaction, rank: discord.Role):
         await interaction.edit_original_response(content="❌ Cancelled — no changes made.", view=None)
         return
 
-    await interaction.edit_original_response(content=f"⏳ Adding {len(all_members)} member(s) to the roster...", view=None)
+    await interaction.edit_original_response(content=f"⏳ Adding {len(all_members)} member(s) to the roster... (this can take a while due to Discord's rate limits)", view=None)
 
     roster = cfg.setdefault("roster", [])
     added_members, moved_members, role_failed = [], [], 0
 
-    for member in all_members:
+    for i, member in enumerate(all_members, start=1):
         try:
             if rank not in member.roles:
                 await member.add_roles(rank, reason=f"Bulk roster add by {interaction.user}")
@@ -4245,6 +4251,15 @@ async def rosteraddall(interaction: discord.Interaction, rank: discord.Role):
         except discord.HTTPException:
             role_failed += 1
             continue
+
+        if i % 50 == 0:
+            save_config(config)  # checkpoint progress so a restart mid-run doesn't lose it
+            try:
+                await interaction.edit_original_response(
+                    content=f"⏳ Progress: {i}/{len(all_members)} processed ({len(added_members)} added, {len(moved_members)} moved so far)...",
+                )
+            except discord.HTTPException:
+                pass
 
     save_config(config)
 

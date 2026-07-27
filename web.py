@@ -1504,7 +1504,7 @@ def roster_addall_route(guild_id):
     _fire_and_forget(_roster_add_all(guild_id, rank_id, session["user_id"]))
     return redirect(url_for(
         "roster_page", guild_id=guild_id,
-        result="⏳ Started in the background — this can take a few minutes for large servers. Refresh this page shortly to see the results.",
+        result="⏳ Started in the background — Discord rate-limits bulk role changes to roughly 1 member per 10 seconds, so this can take a while for large servers (e.g. ~1-3 hours for 500-1000+ members). Check your log channel for progress updates every 50 members.",
     ))
 
 
