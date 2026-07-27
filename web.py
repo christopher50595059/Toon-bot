@@ -106,6 +106,7 @@ _minecraft_kick_player = None
 _minecraft_ban_player = None
 _minecraft_get_banlist = None
 _minecraft_unban_player = None
+_set_bot_status = None
 
 
 # ---------- shared page chrome ----------
@@ -2760,6 +2761,8 @@ def game_servers_page(guild_id):
         return redirect(url_for("guild_picker"))
 
     cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
 
     # ---- Rust card ----
     if cfg.get("rust_host"):
@@ -2834,15 +2837,41 @@ def game_servers_page(guild_id):
     body = f"""
     <h1>🕹️ Game Servers</h1>
     <div class="hint" style="margin-bottom:18px;">Live status for both integrations in one place.</div>
+    {result_html}
 
     <div class="card-row">
       {rust_card}
       {mc_card}
     </div>
 
+    <div class="card">
+      <h2>🔄 Rotating Bot Status</h2>
+      <div class="hint" style="margin-bottom:12px;">
+        Shows a live, auto-updating status under the bot's name in Discord's member list — cycling through member count
+        and Rust/Minecraft player counts if connected. Refreshes every 45 seconds.
+        {"<br>Currently <strong>ON</strong> for this server." if cfg.get("bot_status_enabled") else "<br>Currently <strong>OFF</strong> for this server."}
+      </div>
+      <form method="post" action="/dashboard/{guild_id}/gameservers/botstatus">
+        <input type="hidden" name="enabled" value="{'false' if cfg.get('bot_status_enabled') else 'true'}">
+        <button class="btn" type="submit">
+          {"Turn Off" if cfg.get("bot_status_enabled") else "Turn On"}
+        </button>
+      </form>
+    </div>
+
     <div class="hint" style="margin-top:14px;">📡 Public status page (no login, safe to share with members): <a href="/status/{guild_id}" target="_blank">{DASHBOARD_URL}/status/{guild_id}</a></div>
     """
     return render_page(f"{guild.name} — Game Servers", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/gameservers/botstatus", methods=["POST"])
+def game_servers_botstatus_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    enabled = request.form.get("enabled", "false") == "true"
+    result = _run_async(_set_bot_status(guild_id, enabled, session["user_id"]))
+    return redirect(url_for("game_servers_page", guild_id=guild_id, result=result))
 
 
 # ---------- Rust server integration ----------
@@ -4530,6 +4559,7 @@ def start_web_app(
     set_backup_settings, run_backup_now,
     redeem_web_login_code,
     minecraft_get_players, minecraft_kick_player, minecraft_ban_player, minecraft_get_banlist, minecraft_unban_player,
+    set_bot_status,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -4549,6 +4579,7 @@ def start_web_app(
     global _get_ticket_messages, _send_ticket_message
     global _redeem_web_login_code
     global _minecraft_get_players, _minecraft_kick_player, _minecraft_ban_player, _minecraft_get_banlist, _minecraft_unban_player
+    global _set_bot_status
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -4610,6 +4641,7 @@ def start_web_app(
     _minecraft_ban_player = minecraft_ban_player
     _minecraft_get_banlist = minecraft_get_banlist
     _minecraft_unban_player = minecraft_unban_player
+    _set_bot_status = set_bot_status
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

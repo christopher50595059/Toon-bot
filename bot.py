@@ -84,6 +84,7 @@ Commands:
   /setbirthdaychannel [channel]           - (admin only) channel for birthday shoutouts (omit to disable)
   /weblogin                               - get a one-time code to log into the web dashboard without Discord OAuth
   /setweblogincommandrole [role]          - (admin only) restrict who can run /weblogin (omit to allow everyone)
+  /setbotstatus enabled:<bool>            - (admin only) rotate the bot's Discord status through live member/Rust/Minecraft stats
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -216,6 +217,8 @@ async def on_ready():
         minecraft_status_loop.start()
     if not backup_scheduler_loop.is_running():
         backup_scheduler_loop.start()
+    if not bot_status_loop.is_running():
+        bot_status_loop.start()
 
     # Reconnect any Rust RCON connections that were configured before a restart.
     for guild_id_str, cfg in config.items():
@@ -2459,6 +2462,85 @@ async def minecraft_status_loop():
             await refresh_minecraft_status_message(guild_id)
         if cfg.get("mc_alert_channel_id"):
             await check_minecraft_downtime(guild_id)
+
+
+# ---------- rotating bot status ----------
+#
+# The bot's Discord presence is global (shared across every server it's in,
+# since it's tied to one gateway connection) — not per-guild like everything
+# else. Any guild that turns this on contributes its stats to the rotation;
+# with multiple guilds enabled, the status just cycles through all of them.
+
+_bot_status_index = 0
+
+
+@tasks.loop(seconds=45)
+async def bot_status_loop():
+    global _bot_status_index
+    lines = []
+    for guild_id_str in list(config.keys()):
+        try:
+            guild_id = int(guild_id_str)
+        except ValueError:
+            continue
+        cfg = config.get(guild_id_str, {})
+        if not cfg.get("bot_status_enabled"):
+            continue
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            continue
+
+        lines.append(f"👥 {guild.member_count} members")
+
+        if cfg.get("rust_host") and cfg.get("rust_query_port"):
+            try:
+                info = await query_rust_server(cfg["rust_host"], cfg["rust_query_port"])
+                lines.append(f"🦀 {info['players']}/{info['max_players']} on Rust")
+            except Exception:
+                pass
+
+        if cfg.get("mc_host") and cfg.get("mc_port"):
+            try:
+                info = await query_minecraft_server(cfg["mc_host"], cfg["mc_port"])
+                lines.append(f"⛏️ {info['online']}/{info['max']} on Minecraft")
+            except Exception:
+                pass
+
+    if not lines:
+        return
+
+    line = lines[_bot_status_index % len(lines)]
+    _bot_status_index += 1
+    try:
+        await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=line))
+    except Exception:
+        pass
+
+
+@bot.tree.command(name="setbotstatus", description="Show a rotating live status (members + Rust/Minecraft players) as the bot's Discord status.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(enabled="Turn the rotating status on or off")
+async def setbotstatus(interaction: discord.Interaction, enabled: bool):
+    cfg = get_guild_cfg(interaction.guild_id)
+    cfg["bot_status_enabled"] = enabled
+    save_config(config)
+    if enabled:
+        await interaction.response.send_message(
+            "✅ The bot's Discord status will now rotate through this server's live stats — "
+            "member count, plus Rust/Minecraft player counts if connected.", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message("✅ Disabled — this server's stats won't feed into the bot's status anymore.", ephemeral=True)
+
+
+async def web_set_bot_status(guild_id: int, enabled: bool, actor_id: int) -> str:
+    """Mirrors /setbotstatus."""
+    cfg = get_guild_cfg(guild_id)
+    cfg["bot_status_enabled"] = enabled
+    save_config(config)
+    if enabled:
+        return "✅ The bot's Discord status will now rotate through this server's live stats."
+    return "✅ Disabled — this server's stats won't feed into the bot's status anymore."
 
 
 @bot.tree.command(name="setminecraftserver", description="Connect this server to your Minecraft server.")
@@ -5696,6 +5778,7 @@ HELP_CATEGORIES = {
         ("/afk", "Mark yourself AFK"),
         ("/weblogin", "Get a one-time code to log into the web dashboard"),
         ("/setweblogincommandrole", "(admin) Restrict who can run /weblogin"),
+        ("/setbotstatus", "(admin) Rotate the bot's Discord status through live stats"),
         ("/announce", "Post a formatted announcement to one channel"),
         ("/massannounce", "Post + speak an announcement everywhere (text + VC)"),
         ("/setvcgreeting / removevcgreeting", "Bot speaks a custom greeting when someone joins a VC"),
@@ -5976,6 +6059,7 @@ bot.tree.add_command(showcase_group)
 @setminecraftserver.error
 @setminecraftstatuschannel.error
 @setweblogincommandrole.error
+@setbotstatus.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -6007,5 +6091,6 @@ if __name__ == "__main__":
         web_get_ticket_messages, web_send_ticket_message, web_set_backup_settings, web_run_backup_now,
         redeem_web_login_code,
         minecraft_get_players, minecraft_kick_player, minecraft_ban_player, minecraft_get_banlist, minecraft_unban_player,
+        web_set_bot_status,
     )
     bot.run(TOKEN)
