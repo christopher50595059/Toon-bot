@@ -98,6 +98,7 @@ Commands:
   /addcustomcommand trigger:<text> response:<text> - add a trigger word the bot auto-replies to
   /removecustomcommand trigger:<text>     - remove a custom trigger word
   /listcustomcommands                     - show all configured custom commands
+  /refreshroster                          - force the live roster/stats embeds to update right now
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -6227,6 +6228,27 @@ async def slowmode(interaction: discord.Interaction, seconds: int = 0):
 
 # ---------- admin utility ----------
 
+@bot.tree.command(name="refreshroster", description="Force the live roster and server stats embeds to update right now.")
+async def refreshroster(interaction: discord.Interaction):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    await refresh_roster_message(interaction.guild)
+    await refresh_server_stats_message(interaction.guild)
+    await interaction.followup.send("✅ Roster and stats embeds refreshed.", ephemeral=True)
+
+
+async def web_refresh_roster(guild_id: int, actor_id: int) -> str:
+    """Mirrors /refreshroster."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    await refresh_roster_message(guild)
+    await refresh_server_stats_message(guild)
+    return "✅ Roster and stats embeds refreshed."
+
+
 @bot.tree.command(name="audit", description="Show the last 20 rank/roster actions across everyone in this server.")
 async def audit(interaction: discord.Interaction):
     if not is_authorized(interaction):
@@ -7050,5 +7072,6 @@ if __name__ == "__main__":
         web_giveaway_start, web_giveaway_end,
         web_put_on_cooldown, web_remove_cooldown,
         web_add_custom_command, web_remove_custom_command,
+        web_refresh_roster,
     )
     bot.run(TOKEN)

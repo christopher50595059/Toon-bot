@@ -116,6 +116,7 @@ _put_on_cooldown = None
 _remove_cooldown = None
 _add_custom_command = None
 _remove_custom_command = None
+_refresh_roster = None
 
 
 # ---------- shared page chrome ----------
@@ -1403,7 +1404,12 @@ def roster_page(guild_id):
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">📋 Roster Actions</h1>
-    <div class="hint" style="margin-bottom:18px;"><a href="/dashboard/{guild_id}/export/roster.csv">⬇️ Download roster as CSV</a></div>
+    <div class="hint" style="margin-bottom:18px;">
+      <a href="/dashboard/{guild_id}/export/roster.csv">⬇️ Download roster as CSV</a>
+    </div>
+    <form method="post" action="/dashboard/{guild_id}/roster/refresh" style="margin-bottom:18px;">
+      <button class="btn btn-secondary" type="submit">🔄 Force Refresh Roster & Stats Embeds</button>
+    </form>
     {result_html}
     {member_assets}
     {rank_assets}
@@ -1512,6 +1518,15 @@ def roster_addall_route(guild_id):
         "roster_page", guild_id=guild_id,
         result="⏳ Started in the background — Discord rate-limits bulk role changes to roughly 1 member per 10 seconds, so this can take a while for large servers (e.g. ~1-3 hours for 500-1000+ members). Check your log channel for progress updates every 50 members.",
     ))
+
+
+@app.route("/dashboard/<int:guild_id>/roster/refresh", methods=["POST"])
+def roster_refresh_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    result = _run_async(_refresh_roster(guild_id, session["user_id"]))
+    return redirect(url_for("roster_page", guild_id=guild_id, result=result))
 
 
 @app.route("/dashboard/<int:guild_id>/roster/cooldown/add", methods=["POST"])
@@ -5073,6 +5088,7 @@ def start_web_app(
     giveaway_start, giveaway_end,
     put_on_cooldown, remove_cooldown,
     add_custom_command, remove_custom_command,
+    refresh_roster,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -5098,6 +5114,7 @@ def start_web_app(
     global _giveaway_start, _giveaway_end
     global _put_on_cooldown, _remove_cooldown
     global _add_custom_command, _remove_custom_command
+    global _refresh_roster
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -5169,6 +5186,7 @@ def start_web_app(
     _remove_cooldown = remove_cooldown
     _add_custom_command = add_custom_command
     _remove_custom_command = remove_custom_command
+    _refresh_roster = refresh_roster
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 
