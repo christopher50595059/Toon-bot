@@ -643,14 +643,11 @@ async def log_bulk_action(
     fields: dict = None,
 ):
     """Post a log embed for an action that isn't about a single member (e.g. bulk import)."""
-    embed = discord.Embed(title=title, description=f"{description}\n{SPACER}", color=color, timestamp=discord.utils.utcnow())
+    embed = discord.Embed(title=title, description=description, color=color, timestamp=discord.utils.utcnow())
 
     if fields:
-        items = list(fields.items())
-        for i, (name, value) in enumerate(items):
-            embed.add_field(name=name, value=value, inline=len(str(value)) <= 30)
-            if i < len(items) - 1:
-                embed.add_field(name=SPACER, value=SPACER, inline=False)
+        for name, value in fields.items():
+            embed.add_field(name=name, value=str(value), inline=len(str(value)) <= 30)
 
     embed.set_footer(
         text=f"Run by {moderator.display_name} • Moderator ID: {moderator.id}",
