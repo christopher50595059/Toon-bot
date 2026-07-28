@@ -117,6 +117,10 @@ _remove_cooldown = None
 _add_custom_command = None
 _remove_custom_command = None
 _refresh_roster = None
+_automod_toggle = None
+_automod_settings = None
+_automod_add_word = None
+_automod_remove_word = None
 
 
 # ---------- shared page chrome ----------
@@ -330,6 +334,7 @@ SIDENAV_SECTIONS = [
         ("roles_page", "🎭", "Roles"),
         ("roster_page", "📋", "Roster"),
         ("moderation_page", "🛡️", "Moderation"),
+        ("automod_page", "🚨", "Auto-Moderation"),
         ("warnings_page", "⚠️", "Warnings"),
     ]),
     ("Integrations", [
@@ -1148,6 +1153,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/roles"><span>🎭</span>Roles</a>
         <a class="action-tile" href="/dashboard/{guild_id}/roster"><span>📋</span>Roster</a>
         <a class="action-tile" href="/dashboard/{guild_id}/moderation"><span>🛡️</span>Moderation</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/automod"><span>🚨</span>Auto-Moderation</a>
         <a class="action-tile" href="/dashboard/{guild_id}/warnings"><span>⚠️</span>Warnings</a>
         <a class="action-tile" href="/dashboard/{guild_id}/gameservers"><span>🕹️</span>Game Servers</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust"><span>🦀</span>Rust Server</a>
@@ -1721,6 +1727,147 @@ def moderation_ban(guild_id):
         except ValueError:
             continue
     return redirect(url_for("moderation_page", guild_id=guild_id, result=" / ".join(results)))
+
+
+# ---------- auto-moderation ----------
+
+@app.route("/dashboard/<int:guild_id>/automod")
+def automod_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    enabled = cfg.get("automod_enabled", False)
+    block_invites = cfg.get("automod_block_invites", True)
+    block_spam = cfg.get("automod_block_spam", True)
+    action = cfg.get("automod_action", "delete_only")
+    role_assets = _role_search_assets(guild)
+
+    words = cfg.get("automod_banned_words", [])
+    word_rows = ""
+    if words:
+        for w in words:
+            safe_w = html.escape(w)
+            word_rows += f"""
+            <tr>
+              <td><code>{safe_w}</code></td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/automod/removeword" style="margin:0;">
+                  <input type="hidden" name="word" value="{safe_w}">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        word_rows = '<tr><td colspan="2" class="hint" style="padding:16px;">No blocked words yet.</td></tr>'
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🚨 Auto-Moderation</h1>
+    {result_html}
+    {role_assets}
+
+    <div class="card">
+      <h2>{'🟢 Currently ON' if enabled else '🔴 Currently OFF'}</h2>
+      <form method="post" action="/dashboard/{guild_id}/automod/toggle">
+        <input type="hidden" name="enabled" value="{'false' if enabled else 'true'}">
+        <button class="btn{' btn-secondary' if enabled else ''}" type="submit">{"Turn Off" if enabled else "Turn On"}</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>⚙️ Settings</h2>
+      <form method="post" action="/dashboard/{guild_id}/automod/settings">
+        <div class="grid-2">
+          <div class="field">
+            <label>Block Discord invite links</label>
+            <select name="block_invites"><option value="true" {"selected" if block_invites else ""}>Yes</option><option value="false" {"selected" if not block_invites else ""}>No</option></select>
+          </div>
+          <div class="field">
+            <label>Block repeated-message spam</label>
+            <select name="block_spam"><option value="true" {"selected" if block_spam else ""}>Yes</option><option value="false" {"selected" if not block_spam else ""}>No</option></select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Action (in addition to deleting the message)</label>
+          <select name="action">
+            <option value="delete_only" {"selected" if action == "delete_only" else ""}>Delete only</option>
+            <option value="delete_and_warn" {"selected" if action == "delete_and_warn" else ""}>Delete + warn</option>
+            <option value="delete_and_timeout" {"selected" if action == "delete_and_timeout" else ""}>Delete + 10 minute timeout</option>
+          </select>
+        </div>
+        {_role_search_field("Exempt role (staff, etc. — blank = none)", "exempt_role", guild, cfg.get('automod_exempt_role_id'))}
+        <button class="btn" type="submit">Save Settings</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🚫 Blocked Words</h2>
+      <form method="post" action="/dashboard/{guild_id}/automod/addword" style="margin-bottom:14px;">
+        <div class="field"><input type="text" name="word" placeholder="Add a word to block" required></div>
+        <button class="btn btn-secondary" type="submit">Add Word</button>
+      </form>
+      {_table_search_box("automod-words-table")}
+      <div class="log-wrap"><table class="log-table" id="automod-words-table">
+        <tr><th>Word</th><th></th></tr>
+        {word_rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Auto-Moderation", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/automod/toggle", methods=["POST"])
+def automod_toggle_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    enabled = request.form.get("enabled", "false") == "true"
+    result = _run_async(_automod_toggle(guild_id, enabled, session["user_id"]))
+    return redirect(url_for("automod_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/automod/settings", methods=["POST"])
+def automod_settings_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    block_invites = request.form.get("block_invites", "true") == "true"
+    block_spam = request.form.get("block_spam", "true") == "true"
+    action = request.form.get("action", "delete_only")
+    raw_role = request.form.get("exempt_role", "")
+    exempt_role_id = int(raw_role) if raw_role else None
+    result = _run_async(_automod_settings(guild_id, block_invites, block_spam, action, exempt_role_id, session["user_id"]))
+    return redirect(url_for("automod_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/automod/addword", methods=["POST"])
+def automod_addword_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    word = request.form.get("word", "").strip()
+    if not word:
+        return redirect(url_for("automod_page", guild_id=guild_id, result="❌ Enter a word."))
+    result = _run_async(_automod_add_word(guild_id, word, session["user_id"]))
+    return redirect(url_for("automod_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/automod/removeword", methods=["POST"])
+def automod_removeword_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    word = request.form.get("word", "").strip()
+    if not word:
+        return redirect(url_for("automod_page", guild_id=guild_id, result="❌ Missing word."))
+    result = _run_async(_automod_remove_word(guild_id, word, session["user_id"]))
+    return redirect(url_for("automod_page", guild_id=guild_id, result=result))
 
 
 @app.route("/dashboard/<int:guild_id>/moderation/timeout", methods=["POST"])
@@ -5089,6 +5236,7 @@ def start_web_app(
     put_on_cooldown, remove_cooldown,
     add_custom_command, remove_custom_command,
     refresh_roster,
+    automod_toggle, automod_settings, automod_add_word, automod_remove_word,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -5115,6 +5263,7 @@ def start_web_app(
     global _put_on_cooldown, _remove_cooldown
     global _add_custom_command, _remove_custom_command
     global _refresh_roster
+    global _automod_toggle, _automod_settings, _automod_add_word, _automod_remove_word
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -5187,6 +5336,10 @@ def start_web_app(
     _add_custom_command = add_custom_command
     _remove_custom_command = remove_custom_command
     _refresh_roster = refresh_roster
+    _automod_toggle = automod_toggle
+    _automod_settings = automod_settings
+    _automod_add_word = automod_add_word
+    _automod_remove_word = automod_remove_word
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

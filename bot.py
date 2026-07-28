@@ -99,6 +99,11 @@ Commands:
   /removecustomcommand trigger:<text>     - remove a custom trigger word
   /listcustomcommands                     - show all configured custom commands
   /refreshroster                          - force the live roster/stats embeds to update right now
+  /automod_toggle enabled:<bool>          - (admin only) turn auto-moderation on or off
+  /automod_settings [block_invites] [block_spam] [action] [exempt_role] - (admin only) configure auto-mod
+  /automod_addword word:<text>            - add a word to the blocked list
+  /automod_removeword word:<text>         - remove a word from the blocked list
+  /automod_listwords                      - show the blocked word list
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -111,6 +116,8 @@ import io
 import json
 import os
 import random
+import re
+from collections import deque
 import secrets
 import socket
 import string
@@ -245,12 +252,110 @@ async def on_ready():
                 print(f"⚠️ Couldn't restart Rust RCON for guild {guild_id_str}: {e}")
 
 
+# ---------- auto-moderation ----------
+
+INVITE_LINK_PATTERN = re.compile(r"(discord\.gg/|discord(?:app)?\.com/invite/)[a-zA-Z0-9-]+", re.IGNORECASE)
+
+# Tracks each member's last few messages in memory (not persisted) to catch
+# rapid identical-message spam. Keyed by (guild_id, user_id) -> deque of (content, timestamp).
+_recent_messages: dict = {}
+
+
+def _is_automod_exempt(member: discord.Member, cfg: dict) -> bool:
+    if member.guild_permissions.administrator:
+        return True
+    exempt_role_id = cfg.get("automod_exempt_role_id")
+    if exempt_role_id and any(r.id == exempt_role_id for r in member.roles):
+        return True
+    manager_role_id = cfg.get("manager_role_id")
+    if manager_role_id and any(r.id == manager_role_id for r in member.roles):
+        return True
+    return False
+
+
+async def _apply_automod_action(message: discord.Message, cfg: dict, reason: str):
+    """Deletes the message and, depending on config, also warns or times out the author."""
+    try:
+        await message.delete()
+    except discord.Forbidden:
+        pass
+
+    action = cfg.get("automod_action", "delete_only")
+    if action in ("delete_and_warn", "delete_and_timeout"):
+        warnings = cfg.setdefault("warnings", {})
+        warnings.setdefault(str(message.author.id), []).append({
+            "reason": f"Auto-mod: {reason}", "moderator_id": bot.user.id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        save_config(config)
+        try:
+            await message.author.send(f"⚠️ You were warned in **{message.guild.name}** by auto-mod: {reason}")
+        except discord.Forbidden:
+            pass
+
+    if action == "delete_and_timeout":
+        try:
+            await message.author.timeout(timedelta(minutes=10), reason=f"Auto-mod: {reason}")
+        except discord.Forbidden:
+            pass
+
+    log_channel_id = cfg.get("log_channel_id")
+    if log_channel_id:
+        log_channel = message.guild.get_channel(log_channel_id)
+        if log_channel:
+            try:
+                await log_channel.send(
+                    f"🛡️ Auto-mod removed a message from {message.author.mention} in {message.channel.mention} — {reason}"
+                )
+            except discord.Forbidden:
+                pass
+
+
+async def _run_automod_check(message: discord.Message, cfg: dict) -> bool:
+    """Returns True if the message was removed by auto-mod."""
+    if not isinstance(message.author, discord.Member) or _is_automod_exempt(message.author, cfg):
+        return False
+
+    content = message.content or ""
+
+    if cfg.get("automod_block_invites") and INVITE_LINK_PATTERN.search(content):
+        await _apply_automod_action(message, cfg, "posted a Discord invite link")
+        return True
+
+    banned_words = cfg.get("automod_banned_words", [])
+    if banned_words:
+        content_lower = content.lower()
+        for word in banned_words:
+            if re.search(rf"\b{re.escape(word.lower())}\b", content_lower):
+                await _apply_automod_action(message, cfg, f"used a blocked word")
+                return True
+
+    if cfg.get("automod_block_spam", True) and content:
+        key = (message.guild.id, message.author.id)
+        history = _recent_messages.setdefault(key, deque(maxlen=5))
+        now = datetime.now(timezone.utc)
+        history.append((content, now))
+        recent_matches = [t for c, t in history if c == content and (now - t).total_seconds() < 10]
+        if len(recent_matches) >= 3:
+            await _apply_automod_action(message, cfg, "repeated the same message too quickly (spam)")
+            history.clear()
+            return True
+
+    return False
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
     cfg = get_guild_cfg(message.guild.id)
+
+    # ---- auto-moderation ----
+    if cfg.get("automod_enabled"):
+        deleted = await _run_automod_check(message, cfg)
+        if deleted:
+            return  # message is gone — no point cross-posting/tracking it
 
     # ---- Rust chat bridge (Discord -> in-game) ----
     rust_chat_channel_id = cfg.get("rust_chat_channel_id")
@@ -5876,6 +5981,146 @@ async def web_remove_custom_command(guild_id: int, trigger: str, actor_id: int) 
     return f"✅ Removed custom command `{trigger_key}`."
 
 
+@bot.tree.command(name="automod_toggle", description="Turn auto-moderation on or off.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(enabled="Turn auto-mod on or off")
+async def automod_toggle(interaction: discord.Interaction, enabled: bool):
+    cfg = get_guild_cfg(interaction.guild_id)
+    cfg["automod_enabled"] = enabled
+    save_config(config)
+    await interaction.response.send_message(f"✅ Auto-mod is now {'ON' if enabled else 'OFF'}.", ephemeral=True)
+
+
+@bot.tree.command(name="automod_settings", description="Configure auto-mod behavior.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    block_invites="Automatically delete Discord invite links",
+    block_spam="Automatically delete rapid repeated messages",
+    action="What happens in addition to deleting the message",
+    exempt_role="Role that's exempt from auto-mod (staff, etc.) — omit to leave unchanged",
+)
+@app_commands.choices(action=[
+    app_commands.Choice(name="Delete only", value="delete_only"),
+    app_commands.Choice(name="Delete + warn", value="delete_and_warn"),
+    app_commands.Choice(name="Delete + 10 minute timeout", value="delete_and_timeout"),
+])
+async def automod_settings(
+    interaction: discord.Interaction, block_invites: bool = None, block_spam: bool = None,
+    action: app_commands.Choice[str] = None, exempt_role: discord.Role = None,
+):
+    cfg = get_guild_cfg(interaction.guild_id)
+    changes = []
+    if block_invites is not None:
+        cfg["automod_block_invites"] = block_invites
+        changes.append(f"block invites: {block_invites}")
+    if block_spam is not None:
+        cfg["automod_block_spam"] = block_spam
+        changes.append(f"block spam: {block_spam}")
+    if action is not None:
+        cfg["automod_action"] = action.value
+        changes.append(f"action: {action.name}")
+    if exempt_role is not None:
+        cfg["automod_exempt_role_id"] = exempt_role.id
+        changes.append(f"exempt role: @{exempt_role.name}")
+    save_config(config)
+    if not changes:
+        await interaction.response.send_message("ℹ️ No changes made — pass at least one setting to update.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"✅ Updated: {', '.join(changes)}.", ephemeral=True)
+
+
+@bot.tree.command(name="automod_addword", description="Add a word to the auto-mod blocked word list.")
+@app_commands.describe(word="The word to block")
+async def automod_addword(interaction: discord.Interaction, word: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    words = cfg.setdefault("automod_banned_words", [])
+    word_lower = word.lower().strip()
+    if word_lower in words:
+        await interaction.response.send_message(f"ℹ️ `{word_lower}` is already blocked.", ephemeral=True)
+        return
+    words.append(word_lower)
+    save_config(config)
+    await interaction.response.send_message(f"✅ Added `{word_lower}` to the blocked word list.", ephemeral=True)
+
+
+@bot.tree.command(name="automod_removeword", description="Remove a word from the auto-mod blocked word list.")
+@app_commands.describe(word="The word to unblock")
+async def automod_removeword(interaction: discord.Interaction, word: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    words = cfg.get("automod_banned_words", [])
+    word_lower = word.lower().strip()
+    if word_lower not in words:
+        await interaction.response.send_message(f"❌ `{word_lower}` isn't on the blocked list.", ephemeral=True)
+        return
+    words.remove(word_lower)
+    save_config(config)
+    await interaction.response.send_message(f"✅ Removed `{word_lower}` from the blocked word list.", ephemeral=True)
+
+
+@bot.tree.command(name="automod_listwords", description="Show the auto-mod blocked word list.")
+async def automod_listwords(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    words = cfg.get("automod_banned_words", [])
+    if not words:
+        await interaction.response.send_message("No blocked words configured.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"Blocked words: {', '.join(f'`{w}`' for w in words)}", ephemeral=True)
+
+
+async def web_automod_toggle(guild_id: int, enabled: bool, actor_id: int) -> str:
+    """Mirrors /automod_toggle."""
+    cfg = get_guild_cfg(guild_id)
+    cfg["automod_enabled"] = enabled
+    save_config(config)
+    return f"✅ Auto-mod is now {'ON' if enabled else 'OFF'}."
+
+
+async def web_automod_settings(guild_id: int, block_invites: bool, block_spam: bool, action: str, exempt_role_id, actor_id: int) -> str:
+    """Mirrors /automod_settings."""
+    cfg = get_guild_cfg(guild_id)
+    cfg["automod_block_invites"] = block_invites
+    cfg["automod_block_spam"] = block_spam
+    cfg["automod_action"] = action
+    if exempt_role_id is None:
+        cfg.pop("automod_exempt_role_id", None)
+    else:
+        cfg["automod_exempt_role_id"] = exempt_role_id
+    save_config(config)
+    return "✅ Auto-mod settings saved."
+
+
+async def web_automod_add_word(guild_id: int, word: str, actor_id: int) -> str:
+    """Mirrors /automod_addword."""
+    cfg = get_guild_cfg(guild_id)
+    words = cfg.setdefault("automod_banned_words", [])
+    word_lower = word.lower().strip()
+    if not word_lower:
+        return "❌ Enter a word."
+    if word_lower in words:
+        return f"ℹ️ `{word_lower}` is already blocked."
+    words.append(word_lower)
+    save_config(config)
+    return f"✅ Added `{word_lower}` to the blocked word list."
+
+
+async def web_automod_remove_word(guild_id: int, word: str, actor_id: int) -> str:
+    """Mirrors /automod_removeword."""
+    cfg = get_guild_cfg(guild_id)
+    words = cfg.get("automod_banned_words", [])
+    word_lower = word.lower().strip()
+    if word_lower not in words:
+        return f"❌ `{word_lower}` isn't on the blocked list."
+    words.remove(word_lower)
+    save_config(config)
+    return f"✅ Removed `{word_lower}`."
+
+
 
 @bot.tree.command(name="crosspost_add", description="Mirror messages from THIS channel to a channel in another server the bot is also in.")
 @app_commands.checks.has_permissions(administrator=True)
@@ -6788,6 +7033,11 @@ HELP_CATEGORIES = {
         ("/removecustomcommand", "Remove a custom trigger word"),
         ("/listcustomcommands", "Show all configured custom commands"),
     ],
+    "🛡️ Auto-Moderation": [
+        ("/automod_toggle", "(admin) Turn auto-mod on or off"),
+        ("/automod_settings", "(admin) Configure invites/spam/action/exempt role"),
+        ("/automod_addword / _removeword / _listwords", "Manage the blocked word list"),
+    ],
     "🔧 Utility": [
         ("/afk", "Mark yourself AFK"),
         ("/weblogin", "Get a one-time code to log into the web dashboard"),
@@ -7076,6 +7326,8 @@ bot.tree.add_command(showcase_group)
 @setbotstatus.error
 @setsuggestionschannel.error
 @setpromotioncooldownrole.error
+@automod_toggle.error
+@automod_settings.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -7114,5 +7366,6 @@ if __name__ == "__main__":
         web_put_on_cooldown, web_remove_cooldown,
         web_add_custom_command, web_remove_custom_command,
         web_refresh_roster,
+        web_automod_toggle, web_automod_settings, web_automod_add_word, web_automod_remove_word,
     )
     bot.run(TOKEN)
