@@ -3180,6 +3180,16 @@ async def refresh_roster_message(guild: discord.Guild):
     if channel is None:
         return
 
+    # guild.get_member() only checks the local cache — after a restart (or
+    # for a large server that hasn't fully synced yet), that cache can be
+    # incomplete, which shows up as a wall of raw <@id> mentions instead of
+    # real names. Force a full sync first so everyone resolves correctly.
+    if not guild.chunked:
+        try:
+            await guild.chunk()
+        except discord.HTTPException:
+            pass
+
     embed = build_roster_embed(guild)
     message_id = cfg.get("roster_message_id")
 
@@ -4326,8 +4336,14 @@ async def rosteraddall(interaction: discord.Interaction, rank: discord.Role):
 
 @bot.tree.command(name="roster", description="Show the current roster.")
 async def roster(interaction: discord.Interaction):
+    await interaction.response.defer()
+    if not interaction.guild.chunked:
+        try:
+            await interaction.guild.chunk()
+        except discord.HTTPException:
+            pass
     embed = build_roster_embed(interaction.guild)
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="stats", description="Show roster counts per rank.")
