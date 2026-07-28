@@ -122,6 +122,8 @@ _automod_settings = None
 _automod_add_word = None
 _automod_remove_word = None
 _set_ticket_autoclose = None
+_set_reports_channel = None
+_report_set_status = None
 
 
 # ---------- shared page chrome ----------
@@ -331,12 +333,14 @@ BASE_STYLE = """
 SIDENAV_SECTIONS = [
     ("General", [
         ("dashboard", "⚙️", "Settings"),
+        ("setup_wizard_page", "🧭", "Setup Wizard"),
         ("lookup_page", "🔎", "Member Lookup"),
         ("roles_page", "🎭", "Roles"),
         ("roster_page", "📋", "Roster"),
         ("moderation_page", "🛡️", "Moderation"),
         ("automod_page", "🚨", "Auto-Moderation"),
         ("warnings_page", "⚠️", "Warnings"),
+        ("reports_page", "🚩", "Reports"),
     ]),
     ("Integrations", [
         ("game_servers_page", "🕹️", "Game Servers"),
@@ -1157,6 +1161,8 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/moderation"><span>🛡️</span>Moderation</a>
         <a class="action-tile" href="/dashboard/{guild_id}/automod"><span>🚨</span>Auto-Moderation</a>
         <a class="action-tile" href="/dashboard/{guild_id}/warnings"><span>⚠️</span>Warnings</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/reports"><span>🚩</span>Reports</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/setup"><span>🧭</span>Setup Wizard</a>
         <a class="action-tile" href="/dashboard/{guild_id}/gameservers"><span>🕹️</span>Game Servers</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust"><span>🦀</span>Rust Server</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/players"><span>🎮</span>Rust Players</a>
@@ -1295,6 +1301,122 @@ def dashboard_save(guild_id):
 
     _save_config(_config)
     return redirect(url_for("dashboard", guild_id=guild_id, saved=1))
+
+
+# ---------- setup wizard ----------
+
+@app.route("/dashboard/<int:guild_id>/setup")
+def setup_wizard_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    role_assets = _role_search_assets(guild)
+    channel_assets = _channel_search_assets(guild)
+
+    body = f"""
+    <h1>🧭 Setup Wizard</h1>
+    <div class="hint" style="margin-bottom:18px;">
+      A quick walkthrough of the essentials — the dashboard has a lot of pages, but these are the settings
+      that make the roster and moderation tools actually work. Fill in what applies and save; you can always
+      change any of this later on the main Settings page or the more specific pages in the sidebar.
+    </div>
+    {result_html}
+    {role_assets}
+    {channel_assets}
+
+    <form method="post" action="/dashboard/{guild_id}/setup/save">
+      <div class="card">
+        <h2>1️⃣ Log Channel</h2>
+        <div class="hint" style="margin-bottom:12px;">Where moderation actions and role/roster changes get logged.</div>
+        {_channel_search_field("Log channel", "log_channel", guild, cfg.get('log_channel_id'))}
+      </div>
+
+      <div class="card">
+        <h2>2️⃣ Manager Role</h2>
+        <div class="hint" style="margin-bottom:12px;">Who besides Administrators can use staff commands (roster, moderation, etc.) on this bot.</div>
+        {_role_search_field("Manager role", "manager_role", guild, cfg.get('manager_role_id'))}
+      </div>
+
+      <div class="card">
+        <h2>3️⃣ Top Rank</h2>
+        <div class="hint" style="margin-bottom:12px;">Your highest roster rank — you can add the rest (up to 16 total) later on the main Settings page.</div>
+        {_role_search_field("Rank 1 (highest)", "rank1", guild, (cfg.get('ranks') or [None])[0])}
+      </div>
+
+      <div class="card">
+        <h2>4️⃣ Roster Channel</h2>
+        <div class="hint" style="margin-bottom:12px;">Where the live, auto-updating roster embed gets posted.</div>
+        {_channel_search_field("Roster channel", "roster_channel", guild, cfg.get('roster_channel_id'))}
+      </div>
+
+      <div class="card">
+        <h2>5️⃣ Ticket Panel Channel</h2>
+        <div class="hint" style="margin-bottom:12px;">Where the "Open Ticket" button gets posted for members to reach staff. Optional.</div>
+        {_channel_search_field("Ticket channel", "ticket_channel", guild, cfg.get('ticket_channel_id'))}
+      </div>
+
+      <div class="save-bar">
+        <button class="btn" type="submit">Save & Finish Setup</button>
+      </div>
+    </form>
+    """
+    return render_page(f"{guild.name} — Setup Wizard", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/setup/save", methods=["POST"])
+def setup_wizard_save(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    f = request.form
+
+    # Scoped on purpose — only touches these specific keys, so re-running the
+    # wizard (or skipping fields) never wipes out unrelated settings elsewhere.
+    def set_or_clear(key, form_key):
+        raw = f.get(form_key, "")
+        if raw:
+            try:
+                cfg[key] = int(raw)
+            except ValueError:
+                pass
+        else:
+            cfg.pop(key, None)
+
+    set_or_clear("log_channel_id", "log_channel")
+    set_or_clear("manager_role_id", "manager_role")
+    set_or_clear("roster_channel_id", "roster_channel")
+    set_or_clear("ticket_channel_id", "ticket_channel")
+
+    rank1_raw = f.get("rank1", "")
+    if rank1_raw:
+        try:
+            rank1_id = int(rank1_raw)
+            ranks = cfg.get("ranks", [])
+            if not ranks:
+                ranks = [rank1_id]
+            else:
+                ranks[0] = rank1_id
+            cfg["ranks"] = ranks
+        except ValueError:
+            pass
+
+    _save_config(_config)
+
+    # Posting the ticket panel and roster embed are real Discord actions
+    # (not just config), so run those through the normal async bridges.
+    if f.get("ticket_channel"):
+        _run_async(_set_ticket_channel(guild_id, cfg.get("ticket_channel_id"), session["user_id"]))
+    if f.get("roster_channel"):
+        _run_async(_refresh_roster(guild_id, session["user_id"]))
+
+    return redirect(url_for("setup_wizard_page", guild_id=guild_id, result="✅ Setup saved! Head to the main Settings page anytime to fine-tune everything else."))
 
 
 # ---------- role actions (give/remove) ----------
@@ -3186,6 +3308,105 @@ def warnings_clearall_route(guild_id):
     return redirect(url_for("warnings_page", guild_id=guild_id, result="ℹ️ That member has no warnings."))
 
 
+# ---------- member reports ----------
+
+@app.route("/dashboard/<int:guild_id>/reports")
+def reports_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    reports = sorted(cfg.get("reports", {}).values(), key=lambda r: r.get("id", 0), reverse=True)
+    rows = ""
+    if reports:
+        for r in reports:
+            reporter = guild.get_member(r.get("reporter_id"))
+            reported = guild.get_member(r.get("reported_user_id"))
+            reporter_name = reporter.display_name if reporter else f"Unknown ({r.get('reporter_id')})"
+            reported_name = reported.display_name if reported else f"Unknown ({r.get('reported_user_id')})"
+            status = r.get("status", "open")
+            color = {"open": "#f5b942", "resolved": "#22c55e", "dismissed": "#8b96b3"}.get(status, "#8b96b3")
+            pill = f'<span class="pill" style="background:{color}22; border-color:{color}55; color:{color};">{status}</span>'
+            actions = ""
+            if status == "open":
+                actions = f"""
+                <form method="post" action="/dashboard/{guild_id}/reports/{r['id']}/status" style="display:inline;">
+                  <input type="hidden" name="status" value="resolved">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Resolve</button>
+                </form>
+                <form method="post" action="/dashboard/{guild_id}/reports/{r['id']}/status" style="display:inline;">
+                  <input type="hidden" name="status" value="dismissed">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Dismiss</button>
+                </form>
+                """
+            rows += f"""
+            <tr>
+              <td>#{r['id']}</td>
+              <td>{reported_name}</td>
+              <td>{reporter_name}</td>
+              <td>{html.escape(r.get('reason', ''))}</td>
+              <td>{pill}</td>
+              <td style="white-space:nowrap;">{actions}</td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="6" class="hint" style="padding:16px;">No reports yet.</td></tr>'
+
+    channel_assets = _channel_search_assets(guild)
+
+    body = f"""
+    <h1>🚩 Member Reports</h1>
+    {result_html}
+    {channel_assets}
+
+    <div class="card">
+      <h2>📌 Reports Channel</h2>
+      <div class="hint" style="margin-bottom:12px;">Where /report submissions get sent — keep this staff-only.</div>
+      <form method="post" action="/dashboard/{guild_id}/reports/channel">
+        {_channel_search_field("Channel", "channel_id", guild, cfg.get("reports_channel_id"))}
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>All reports</h2>
+      {_table_search_box("reports-table")}
+      <div class="log-wrap"><table class="log-table" id="reports-table">
+        <tr><th>#</th><th>Reported</th><th>Reported by</th><th>Reason</th><th>Status</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Reports", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/reports/channel", methods=["POST"])
+def reports_channel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw = request.form.get("channel_id", "")
+    channel_id = int(raw) if raw else None
+    result = _run_async(_set_reports_channel(guild_id, channel_id, session["user_id"]))
+    return redirect(url_for("reports_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/reports/<int:report_id>/status", methods=["POST"])
+def reports_status_route(guild_id, report_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    status = request.form.get("status", "")
+    if status not in ("resolved", "dismissed"):
+        return redirect(url_for("reports_page", guild_id=guild_id, result="❌ Invalid status."))
+    result = _run_async(_report_set_status(guild_id, report_id, status, session["user_id"]))
+    return redirect(url_for("reports_page", guild_id=guild_id, result=result))
+
+
 # ---------- AFK status ----------
 
 @app.route("/dashboard/<int:guild_id>/afk")
@@ -4915,6 +5136,15 @@ def lookup_page(guild_id):
         if not history_rows:
             history_rows = '<tr><td colspan="4" class="hint" style="padding:12px;">No history.</td></tr>'
 
+        # ---- name history ----
+        name_history = cfg.get("name_history", {}).get(str(user_id), [])
+        name_history_rows = ""
+        for entry in reversed(name_history[-15:]):
+            icon = "🏷️" if entry.get("kind") == "nickname" else "👤"
+            name_history_rows += f"<tr><td>{icon} {entry.get('kind','')}</td><td>{html.escape(entry.get('old',''))}</td><td>{html.escape(entry.get('new',''))}</td><td class='hint'>{_format_ts(entry.get('timestamp'))}</td></tr>"
+        if not name_history_rows:
+            name_history_rows = '<tr><td colspan="4" class="hint" style="padding:12px;">No recorded name changes.</td></tr>'
+
         # ---- tickets ----
         tickets = [t for t in cfg.get("tickets", {}).values() if t.get("user_id") == user_id]
         tickets.sort(key=lambda t: t.get("id", 0), reverse=True)
@@ -4954,6 +5184,14 @@ def lookup_page(guild_id):
           <div class="log-wrap"><table class="log-table">
             <tr><th>Action</th><th>Detail</th><th>By</th><th>When</th></tr>
             {history_rows}
+          </table></div>
+        </div>
+
+        <div class="card">
+          <h2>📝 Name History</h2>
+          <div class="log-wrap"><table class="log-table">
+            <tr><th>Type</th><th>Old</th><th>New</th><th>When</th></tr>
+            {name_history_rows}
           </table></div>
         </div>
 
@@ -5310,6 +5548,7 @@ def start_web_app(
     refresh_roster,
     automod_toggle, automod_settings, automod_add_word, automod_remove_word,
     set_ticket_autoclose,
+    set_reports_channel, report_set_status,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -5338,6 +5577,7 @@ def start_web_app(
     global _refresh_roster
     global _automod_toggle, _automod_settings, _automod_add_word, _automod_remove_word
     global _set_ticket_autoclose
+    global _set_reports_channel, _report_set_status
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -5415,6 +5655,8 @@ def start_web_app(
     _automod_add_word = automod_add_word
     _automod_remove_word = automod_remove_word
     _set_ticket_autoclose = set_ticket_autoclose
+    _set_reports_channel = set_reports_channel
+    _report_set_status = report_set_status
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

@@ -106,6 +106,9 @@ Commands:
   /automod_listwords                      - show the blocked word list
   /voiceactivity [user]                   - show voice channel activity (leaderboard or one person)
   /setticketautoclose enabled:<bool> [reminder_hours] [close_hours] - (admin only) auto-remind/close quiet tickets
+  /namehistory [user]                     - show a member's nickname/username change history
+  /report user:<member> reason:<text>     - privately report a member to staff
+  /setreportschannel [channel]            - (admin only) set the private channel for member reports
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -525,6 +528,39 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         return
 
     asyncio.create_task(speak_vc_greeting(member, after.channel, message))
+
+
+def _record_name_change(guild_id: int, user_id: int, old_name: str, new_name: str, kind: str):
+    cfg = get_guild_cfg(guild_id)
+    history = cfg.setdefault("name_history", {})
+    entries = history.setdefault(str(user_id), [])
+    entries.append({
+        "old": old_name, "new": new_name, "kind": kind,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    cfg["name_history"][str(user_id)] = entries[-25:]  # keep it capped per member
+    save_config(config)
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    if before.bot:
+        return
+    if before.nick != after.nick:
+        _record_name_change(
+            after.guild.id, after.id,
+            before.nick or before.name, after.nick or after.name, "nickname",
+        )
+
+
+@bot.event
+async def on_user_update(before: discord.User, after: discord.User):
+    if before.bot or before.name == after.name:
+        return
+    # Global username changes aren't guild-scoped, so log it to every mutual server.
+    for guild in bot.guilds:
+        if guild.get_member(after.id):
+            _record_name_change(guild.id, after.id, before.name, after.name, "username")
 
 
 async def send_to_log_channel(guild: discord.Guild, embed: discord.Embed):
@@ -4751,7 +4787,117 @@ async def history(interaction: discord.Interaction, user: discord.Member = None)
     await interaction.response.send_message(embed=embed)
 
 
-# ---------- tournaments ----------
+@bot.tree.command(name="namehistory", description="Show a member's nickname/username change history.")
+@app_commands.describe(user="The member to look up (defaults to you)")
+async def namehistory(interaction: discord.Interaction, user: discord.Member = None):
+    user = user or interaction.user
+    cfg = get_guild_cfg(interaction.guild_id)
+    entries = cfg.get("name_history", {}).get(str(user.id), [])
+
+    embed = discord.Embed(title=f"📝 Name History for {user.display_name}", color=discord.Color.dark_grey())
+    embed.set_thumbnail(url=user.display_avatar.url)
+
+    if not entries:
+        embed.description = "No recorded name changes yet."
+        await interaction.response.send_message(embed=embed)
+        return
+
+    recent = list(reversed(entries))[:15]
+    lines = []
+    for entry in recent:
+        ts = datetime.fromisoformat(entry["timestamp"])
+        icon = "🏷️" if entry["kind"] == "nickname" else "👤"
+        lines.append(f"{icon} `{entry['old']}` → `{entry['new']}` — <t:{int(ts.timestamp())}:R>")
+
+    embed.description = "\n".join(lines)
+    if len(entries) > 15:
+        embed.set_footer(text=f"Showing 15 most recent of {len(entries)} total changes")
+    await interaction.response.send_message(embed=embed)
+
+
+# ---------- member reports ----------
+
+@bot.tree.command(name="report", description="Privately report a member to staff.")
+@app_commands.describe(user="Who you're reporting", reason="What happened")
+async def report(interaction: discord.Interaction, user: discord.Member, reason: str):
+    cfg = get_guild_cfg(interaction.guild_id)
+    channel_id = cfg.get("reports_channel_id")
+    if not channel_id:
+        await interaction.response.send_message("❌ Reports aren't set up on this server yet. Ask an admin to run /setreportschannel.", ephemeral=True)
+        return
+    channel = interaction.guild.get_channel(channel_id)
+    if channel is None:
+        await interaction.response.send_message("❌ The configured reports channel no longer exists.", ephemeral=True)
+        return
+    if user.id == interaction.user.id:
+        await interaction.response.send_message("❌ You can't report yourself.", ephemeral=True)
+        return
+
+    next_id = cfg.get("report_next_id", 1)
+    cfg["report_next_id"] = next_id + 1
+    report_entry = {
+        "id": next_id, "reporter_id": interaction.user.id, "reported_user_id": user.id,
+        "reason": reason, "status": "open", "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    cfg.setdefault("reports", {})[str(next_id)] = report_entry
+    save_config(config)
+
+    embed = discord.Embed(title=f"🚩 Report #{next_id}", color=discord.Color.red())
+    embed.add_field(name="Reported", value=user.mention, inline=True)
+    embed.add_field(name="Reported by", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.timestamp = discord.utils.utcnow()
+    try:
+        await channel.send(embed=embed)
+    except discord.Forbidden:
+        pass
+
+    await interaction.response.send_message("✅ Your report has been sent to staff privately. Thank you.", ephemeral=True)
+
+
+@bot.tree.command(name="setreportschannel", description="Set the private channel where member reports get sent.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="The staff-only channel for reports (omit to disable)")
+async def setreportschannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if channel is None:
+        cfg.pop("reports_channel_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Reports disabled.", ephemeral=True)
+        return
+    cfg["reports_channel_id"] = channel.id
+    save_config(config)
+    await interaction.response.send_message(f"✅ Reports will now be sent to {channel.mention}.", ephemeral=True)
+
+
+async def web_set_reports_channel(guild_id: int, channel_id, actor_id: int) -> str:
+    """Mirrors /setreportschannel."""
+    cfg = get_guild_cfg(guild_id)
+    if channel_id is None:
+        cfg.pop("reports_channel_id", None)
+        save_config(config)
+        return "✅ Reports disabled."
+    guild = bot.get_guild(guild_id)
+    channel = guild.get_channel(channel_id) if guild else None
+    if channel is None:
+        return "❌ Couldn't find that channel."
+    cfg["reports_channel_id"] = channel_id
+    save_config(config)
+    return f"✅ Reports will now be sent to #{channel.name}."
+
+
+async def web_report_set_status(guild_id: int, report_id: int, status: str, actor_id: int) -> str:
+    """Mark a report as resolved or dismissed from the web dashboard."""
+    cfg = get_guild_cfg(guild_id)
+    report_entry = cfg.get("reports", {}).get(str(report_id))
+    if not report_entry:
+        return "❌ Report not found."
+    report_entry["status"] = status
+    save_config(config)
+    return f"✅ Report #{report_id} marked {status}."
+
+
+
 
 def build_tournament_signup_embed(name: str, data: dict) -> discord.Embed:
     embed = discord.Embed(title=f"🏆 Tournament: {name}", color=discord.Color.gold())
@@ -7236,6 +7382,11 @@ HELP_CATEGORIES = {
     "🎙️ Voice & Tickets": [
         ("/voiceactivity", "Voice channel activity leaderboard or one person"),
         ("/setticketautoclose", "(admin) Auto-remind/close tickets that go quiet"),
+        ("/namehistory", "Show a member's nickname/username change history"),
+    ],
+    "🚩 Reports": [
+        ("/report", "Privately report a member to staff"),
+        ("/setreportschannel", "(admin) Set the private channel for reports"),
     ],
     "🔧 Utility": [
         ("/afk", "Mark yourself AFK"),
@@ -7528,6 +7679,7 @@ bot.tree.add_command(showcase_group)
 @automod_toggle.error
 @automod_settings.error
 @setticketautoclose.error
+@setreportschannel.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -7568,5 +7720,6 @@ if __name__ == "__main__":
         web_refresh_roster,
         web_automod_toggle, web_automod_settings, web_automod_add_word, web_automod_remove_word,
         web_set_ticket_autoclose,
+        web_set_reports_channel, web_report_set_status,
     )
     bot.run(TOKEN)
