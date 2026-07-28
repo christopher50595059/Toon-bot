@@ -3118,13 +3118,6 @@ def build_roster_embed(guild: discord.Guild) -> discord.Embed:
 
     embed.description = f"**{len(roster)}** total member(s)"
 
-    def member_mentions(entries):
-        names = []
-        for entry in entries:
-            member = guild.get_member(entry["user_id"])
-            names.append(member.mention if member else f"<@{entry['user_id']}> (left)")
-        return ", ".join(names)
-
     # Group entries by rank role, preserving the configured rank order.
     grouped = {rid: [] for rid in rank_role_ids}
     unranked = []
@@ -3134,6 +3127,31 @@ def build_roster_embed(guild: discord.Guild) -> discord.Embed:
             grouped[rid].append(entry)
         else:
             unranked.append(entry)
+
+    populated_groups = [g for g in grouped.values() if g] + ([unranked] if unranked else [])
+    # Discord caps a single embed at 6000 characters total AND 1024 per field
+    # value. With enough rank groups populated, splitting that budget evenly
+    # keeps the whole embed safely under both limits instead of crashing.
+    field_budget = min(1000, max(150, 4500 // max(1, len(populated_groups))))
+
+    def member_mentions(entries):
+        names = []
+        for entry in entries:
+            member = guild.get_member(entry["user_id"])
+            names.append(member.mention if member else f"<@{entry['user_id']}> (left)")
+        text = ", ".join(names)
+        if len(text) <= field_budget:
+            return text
+        truncated = []
+        running_len = 0
+        for name in names:
+            add_len = len(name) + 2  # +2 for ", "
+            if running_len + add_len > field_budget - 20:  # leave room for the "+N more" suffix
+                break
+            truncated.append(name)
+            running_len += add_len
+        remaining = len(names) - len(truncated)
+        return ", ".join(truncated) + f", … +{remaining} more"
 
     for position, rid in enumerate(rank_role_ids):
         members = grouped[rid]
@@ -3177,7 +3195,7 @@ async def refresh_roster_message(guild: discord.Guild):
         message = await channel.send(embed=embed)
         cfg["roster_message_id"] = message.id
         save_config(config)
-    except discord.Forbidden:
+    except discord.HTTPException:
         pass
 
 
@@ -6234,8 +6252,12 @@ async def refreshroster(interaction: discord.Interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    await refresh_roster_message(interaction.guild)
-    await refresh_server_stats_message(interaction.guild)
+    try:
+        await refresh_roster_message(interaction.guild)
+        await refresh_server_stats_message(interaction.guild)
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Couldn't refresh the embeds: {e}", ephemeral=True)
+        return
     await interaction.followup.send("✅ Roster and stats embeds refreshed.", ephemeral=True)
 
 
@@ -6244,8 +6266,11 @@ async def web_refresh_roster(guild_id: int, actor_id: int) -> str:
     guild = bot.get_guild(guild_id)
     if guild is None:
         return "❌ Server not found."
-    await refresh_roster_message(guild)
-    await refresh_server_stats_message(guild)
+    try:
+        await refresh_roster_message(guild)
+        await refresh_server_stats_message(guild)
+    except discord.HTTPException as e:
+        return f"❌ Couldn't refresh the embeds: {e}"
     return "✅ Roster and stats embeds refreshed."
 
 
