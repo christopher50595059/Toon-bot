@@ -121,6 +121,7 @@ _automod_toggle = None
 _automod_settings = None
 _automod_add_word = None
 _automod_remove_word = None
+_set_ticket_autoclose = None
 
 
 # ---------- shared page chrome ----------
@@ -369,6 +370,7 @@ SIDENAV_SECTIONS = [
         ("login_history_page", "🔑", "Login History"),
         ("activity_page", "📈", "Activity"),
         ("trivia_page", "🧠", "Trivia Leaderboard"),
+        ("voice_activity_page", "🎙️", "Voice Activity"),
         ("custom_commands_page", "💬", "Custom Commands"),
         ("afk_page", "💤", "AFK Status"),
         ("backup_download", "💾", "Backup"),
@@ -1180,6 +1182,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/loginhistory"><span>🔑</span>Login History</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/trivia"><span>🧠</span>Trivia</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/voiceactivity"><span>🎙️</span>Voice Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/customcommands"><span>💬</span>Custom Commands</a>
         <a class="action-tile" href="/dashboard/{guild_id}/afk"><span>💤</span>AFK Status</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
@@ -2607,6 +2610,47 @@ def trivia_page(guild_id):
     return render_page(f"{guild.name} — Trivia Leaderboard", body, guild_id=guild_id)
 
 
+@app.route("/dashboard/<int:guild_id>/voiceactivity")
+def voice_activity_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    minutes_map = cfg.get("voice_minutes", {})
+    since_str = cfg.get("voice_minutes_since")
+    since_label = _format_ts(since_str) if since_str else "—"
+
+    ranked = sorted(minutes_map.items(), key=lambda kv: kv[1], reverse=True)[:50]
+    rows = ""
+    if ranked:
+        for i, (uid, mins) in enumerate(ranked, start=1):
+            m = guild.get_member(int(uid))
+            name = m.display_name if m else f"Unknown ({uid})"
+            hours, remainder_mins = divmod(int(mins), 60)
+            duration = f"{hours}h {remainder_mins}m" if hours else f"{remainder_mins}m"
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"#{i}")
+            rows += f"<tr><td>{medal}</td><td>{name}</td><td>{duration}</td></tr>"
+    else:
+        rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No voice activity recorded yet this period.</td></tr>'
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🎙️ Voice Activity</h1>
+    <div class="hint" style="margin-bottom:18px;">Counting time spent in voice channels since {since_label} — resets automatically every 7 days.</div>
+
+    <div class="card">
+      <h2>Top {len(ranked)}</h2>
+      {_table_search_box("voice-activity-table")}
+      <div class="log-wrap"><table class="log-table" id="voice-activity-table">
+        <tr><th>Rank</th><th>Member</th><th>Time</th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Voice Activity", body, guild_id=guild_id)
+
+
 @app.route("/dashboard/<int:guild_id>/customcommands")
 def custom_commands_page(guild_id):
     guild, member = _check_access(guild_id)
@@ -2801,6 +2845,19 @@ def tickets_page(guild_id):
     </div>
 
     <div class="card">
+      <h2>⏰ Auto-Reminder / Auto-Close</h2>
+      <div class="hint" style="margin-bottom:12px;">Nudges (then closes) tickets that go quiet too long, so nothing sits open forever unnoticed. {"<br>Currently <strong>ON</strong>." if cfg.get("ticket_autoclose_enabled") else "<br>Currently <strong>OFF</strong>."}</div>
+      <form method="post" action="/dashboard/{guild_id}/tickets/autoclose">
+        <div class="grid-2">
+          <div class="field"><label>Remind after (hours)</label><input type="number" name="reminder_hours" min="1" value="{cfg.get('ticket_reminder_hours', 24)}" required></div>
+          <div class="field"><label>Auto-close after (hours)</label><input type="number" name="close_hours" min="2" value="{cfg.get('ticket_autoclose_hours', 48)}" required></div>
+        </div>
+        <input type="hidden" name="enabled" value="{'false' if cfg.get('ticket_autoclose_enabled') else 'true'}">
+        <button class="btn" type="submit">{"Save & Turn Off" if cfg.get("ticket_autoclose_enabled") else "Save & Turn On"}</button>
+      </form>
+    </div>
+
+    <div class="card">
       <h2>🗂️ Ticket categories</h2>
       <div class="hint" style="margin-bottom:12px;">Add multiple ticket types (e.g. "Support", "Report Player", "Appeal") — each routes to its own Discord category. Members pick one from a dropdown when opening a ticket. Add intake questions below each type and members fill out a short form before their channel is created.</div>
       <div class="log-wrap"><table class="log-table">
@@ -2872,6 +2929,21 @@ def tickets_setchannel_route(guild_id):
     except (KeyError, ValueError):
         return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Pick a channel."))
     result = _run_async(_set_ticket_channel(guild_id, channel_id, session["user_id"]))
+    return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tickets/autoclose", methods=["POST"])
+def tickets_autoclose_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    enabled = request.form.get("enabled", "false") == "true"
+    try:
+        reminder_hours = int(request.form["reminder_hours"])
+        close_hours = int(request.form["close_hours"])
+    except (KeyError, ValueError):
+        return redirect(url_for("tickets_page", guild_id=guild_id, result="❌ Enter valid hour values."))
+    result = _run_async(_set_ticket_autoclose(guild_id, enabled, reminder_hours, close_hours, session["user_id"]))
     return redirect(url_for("tickets_page", guild_id=guild_id, result=result))
 
 
@@ -5237,6 +5309,7 @@ def start_web_app(
     add_custom_command, remove_custom_command,
     refresh_roster,
     automod_toggle, automod_settings, automod_add_word, automod_remove_word,
+    set_ticket_autoclose,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -5264,6 +5337,7 @@ def start_web_app(
     global _add_custom_command, _remove_custom_command
     global _refresh_roster
     global _automod_toggle, _automod_settings, _automod_add_word, _automod_remove_word
+    global _set_ticket_autoclose
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -5340,6 +5414,7 @@ def start_web_app(
     _automod_settings = automod_settings
     _automod_add_word = automod_add_word
     _automod_remove_word = automod_remove_word
+    _set_ticket_autoclose = set_ticket_autoclose
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

@@ -104,6 +104,8 @@ Commands:
   /automod_addword word:<text>            - add a word to the blocked list
   /automod_removeword word:<text>         - remove a word from the blocked list
   /automod_listwords                      - show the blocked word list
+  /voiceactivity [user]                   - show voice channel activity (leaderboard or one person)
+  /setticketautoclose enabled:<bool> [reminder_hours] [close_hours] - (admin only) auto-remind/close quiet tickets
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -230,6 +232,10 @@ async def on_ready():
         gamenight_reminder_loop.start()
     if not weekly_evaluation_loop.is_running():
         weekly_evaluation_loop.start()
+    if not weekly_voice_activity_loop.is_running():
+        weekly_voice_activity_loop.start()
+    if not ticket_autoclose_loop.is_running():
+        ticket_autoclose_loop.start()
     if not birthday_check_loop.is_running():
         birthday_check_loop.start()
     if not rust_status_loop.is_running():
@@ -259,6 +265,10 @@ INVITE_LINK_PATTERN = re.compile(r"(discord\.gg/|discord(?:app)?\.com/invite/)[a
 # Tracks each member's last few messages in memory (not persisted) to catch
 # rapid identical-message spam. Keyed by (guild_id, user_id) -> deque of (content, timestamp).
 _recent_messages: dict = {}
+
+# Tracks when each member joined their current voice channel, in memory —
+# used to compute voice activity minutes on leave/switch. Keyed by (guild_id, user_id).
+_voice_join_times: dict = {}
 
 
 def _is_automod_exempt(member: discord.Member, cfg: dict) -> bool:
@@ -394,6 +404,16 @@ async def on_message(message: discord.Message):
             except discord.Forbidden:
                 pass
 
+    # ---- ticket activity tracking (for auto-reminder/auto-close) ----
+    tickets = cfg.get("tickets", {})
+    if tickets:
+        for ticket in tickets.values():
+            if ticket.get("status") == "open" and ticket.get("channel_id") == message.channel.id:
+                ticket["last_activity"] = datetime.now(timezone.utc).isoformat()
+                ticket["reminded"] = False  # any new activity clears a pending reminder
+                save_config(config)
+                break
+
     # ---- custom commands (staff-defined trigger words) ----
     custom_commands = cfg.get("custom_commands", {})
     if custom_commands:
@@ -472,7 +492,25 @@ async def on_member_remove(member: discord.Member):
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     if member.bot:
         return
-    # Only fire when they've actually landed in a NEW voice channel (not on mute/deafen toggles, etc.)
+
+    # ---- voice activity tracking (join/leave/switch — NOT pure mute/deafen toggles) ----
+    if before.channel != after.channel:
+        key = (member.guild.id, member.id)
+        now = datetime.now(timezone.utc)
+        if before.channel is not None and key in _voice_join_times:
+            elapsed_minutes = (now - _voice_join_times[key]).total_seconds() / 60
+            if elapsed_minutes > 0:
+                cfg = get_guild_cfg(member.guild.id)
+                voice_minutes = cfg.setdefault("voice_minutes", {})
+                voice_minutes[str(member.id)] = voice_minutes.get(str(member.id), 0) + elapsed_minutes
+                if "voice_minutes_since" not in cfg:
+                    cfg["voice_minutes_since"] = now.isoformat()
+                save_config(config)
+            del _voice_join_times[key]
+        if after.channel is not None:
+            _voice_join_times[key] = now
+
+    # Only fire the VC greeting when they've actually landed in a NEW voice channel (not on mute/deafen toggles, etc.)
     if after.channel is None or after.channel == before.channel:
         return
 
@@ -1711,6 +1749,93 @@ async def close_ticket(guild_id: int, ticket_id: int, closed_by_id: int) -> str:
             return f"⚠️ Ticket #{ticket_id} marked closed, but I couldn't delete the channel (missing permission)."
 
     return f"✅ Ticket #{ticket_id} closed."
+
+
+@tasks.loop(hours=1)
+async def ticket_autoclose_loop():
+    now = datetime.now(timezone.utc)
+    for guild_id_str in list(config.keys()):
+        try:
+            guild_id = int(guild_id_str)
+        except ValueError:
+            continue
+        cfg = config.get(guild_id_str, {})
+        if not cfg.get("ticket_autoclose_enabled"):
+            continue
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            continue
+
+        reminder_hours = cfg.get("ticket_reminder_hours", 24)
+        close_hours = cfg.get("ticket_autoclose_hours", 48)
+
+        for ticket_id_str, ticket in list(cfg.get("tickets", {}).items()):
+            if ticket.get("status") != "open":
+                continue
+            last_activity_str = ticket.get("last_activity") or ticket.get("created_at")
+            if not last_activity_str:
+                continue
+            last_activity = datetime.fromisoformat(last_activity_str)
+            quiet_hours = (now - last_activity).total_seconds() / 3600
+
+            channel = guild.get_channel(ticket.get("channel_id"))
+            if channel is None:
+                continue
+
+            if quiet_hours >= close_hours:
+                try:
+                    await channel.send(f"🔒 This ticket has been inactive for over {close_hours} hour(s) and is being closed automatically.")
+                except discord.Forbidden:
+                    pass
+                await close_ticket(guild_id, int(ticket_id_str), bot.user.id)
+            elif quiet_hours >= reminder_hours and not ticket.get("reminded"):
+                try:
+                    await channel.send(
+                        f"👋 This ticket has been quiet for a while. Reply within "
+                        f"{close_hours - reminder_hours} hour(s) or it'll be closed automatically."
+                    )
+                except discord.Forbidden:
+                    pass
+                ticket["reminded"] = True
+                save_config(config)
+
+
+@bot.tree.command(name="setticketautoclose", description="Configure automatic reminders/closing for quiet tickets.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    enabled="Turn auto-reminder/auto-close on or off",
+    reminder_hours="Post a reminder after this many quiet hours",
+    close_hours="Auto-close after this many quiet hours (must be more than reminder_hours)",
+)
+async def setticketautoclose(interaction: discord.Interaction, enabled: bool, reminder_hours: int = 24, close_hours: int = 48):
+    if close_hours <= reminder_hours:
+        await interaction.response.send_message("❌ close_hours must be greater than reminder_hours.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    cfg["ticket_autoclose_enabled"] = enabled
+    cfg["ticket_reminder_hours"] = reminder_hours
+    cfg["ticket_autoclose_hours"] = close_hours
+    save_config(config)
+    if enabled:
+        await interaction.response.send_message(
+            f"✅ Quiet tickets get a reminder after {reminder_hours}h and auto-close after {close_hours}h.", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message("✅ Ticket auto-reminder/auto-close disabled.", ephemeral=True)
+
+
+async def web_set_ticket_autoclose(guild_id: int, enabled: bool, reminder_hours: int, close_hours: int, actor_id: int) -> str:
+    """Mirrors /setticketautoclose."""
+    if close_hours <= reminder_hours:
+        return "❌ Close hours must be greater than reminder hours."
+    cfg = get_guild_cfg(guild_id)
+    cfg["ticket_autoclose_enabled"] = enabled
+    cfg["ticket_reminder_hours"] = reminder_hours
+    cfg["ticket_autoclose_hours"] = close_hours
+    save_config(config)
+    if enabled:
+        return f"✅ Quiet tickets get a reminder after {reminder_hours}h and auto-close after {close_hours}h."
+    return "✅ Ticket auto-reminder/auto-close disabled."
 
 
 async def web_get_ticket_messages(guild_id: int, ticket_id: int, limit: int = 100) -> list:
@@ -4999,6 +5124,76 @@ def build_evaluation_embed(guild: discord.Guild, cfg: dict, top_n: int = 10) -> 
     return embed
 
 
+def build_voice_activity_embed(guild: discord.Guild, cfg: dict, top_n: int = 10) -> discord.Embed:
+    minutes_map = cfg.get("voice_minutes", {})
+    since_str = cfg.get("voice_minutes_since")
+    since = datetime.fromisoformat(since_str) if since_str else datetime.now(timezone.utc)
+
+    embed = discord.Embed(title="🎙️ Voice Activity", color=discord.Color.dark_purple())
+    embed.description = f"Counting voice time since <t:{int(since.timestamp())}:D> (<t:{int(since.timestamp())}:R>)"
+
+    if not minutes_map:
+        embed.description += "\n\nNo voice activity recorded yet this period."
+        return embed
+
+    ranked = sorted(minutes_map.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+    lines = []
+    for i, (user_id, mins) in enumerate(ranked, start=1):
+        member = guild.get_member(int(user_id))
+        name = member.mention if member else f"<@{user_id}> (left)"
+        hours, remainder_mins = divmod(int(mins), 60)
+        duration = f"{hours}h {remainder_mins}m" if hours else f"{remainder_mins}m"
+        medal = RANK_TIER_ICONS[i - 1] if i - 1 < len(RANK_TIER_ICONS) else "▪️"
+        lines.append(f"{medal} {name} — **{duration}**")
+    embed.add_field(name=f"Top {len(ranked)}", value="\n".join(lines), inline=False)
+    embed.set_footer(text=f"{len(minutes_map)} member(s) with recorded voice activity this period")
+    return embed
+
+
+@bot.tree.command(name="voiceactivity", description="Show voice channel activity — leaderboard or one person.")
+@app_commands.describe(user="Show just this person's voice time (omit for the leaderboard)")
+async def voiceactivity(interaction: discord.Interaction, user: discord.Member = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if user is None:
+        embed = build_voice_activity_embed(interaction.guild, cfg)
+        await interaction.response.send_message(embed=embed)
+        return
+
+    minutes_map = cfg.get("voice_minutes", {})
+    mins = minutes_map.get(str(user.id), 0)
+    hours, remainder_mins = divmod(int(mins), 60)
+    duration = f"{hours}h {remainder_mins}m" if hours else f"{remainder_mins}m"
+    await interaction.response.send_message(f"🎙️ {user.mention} has spent **{duration}** in voice channels this period.")
+
+
+@tasks.loop(hours=24)
+async def weekly_voice_activity_loop():
+    now = datetime.now(timezone.utc)
+    for guild in bot.guilds:
+        cfg = get_guild_cfg(guild.id)
+        since_str = cfg.get("voice_minutes_since")
+        if not since_str:
+            continue
+        since = datetime.fromisoformat(since_str)
+        if now - since < timedelta(days=7):
+            continue
+
+        log_channel_id = cfg.get("log_channel_id")
+        if log_channel_id:
+            channel = guild.get_channel(log_channel_id)
+            if channel:
+                embed = build_voice_activity_embed(guild, cfg)
+                embed.title = "🎙️ Weekly Voice Activity Report"
+                try:
+                    await channel.send(embed=embed)
+                except discord.Forbidden:
+                    pass
+
+        cfg["voice_minutes"] = {}
+        cfg["voice_minutes_since"] = now.isoformat()
+        save_config(config)
+
+
 @tasks.loop(hours=24)
 async def weekly_evaluation_loop():
     now = datetime.now(timezone.utc)
@@ -7038,6 +7233,10 @@ HELP_CATEGORIES = {
         ("/automod_settings", "(admin) Configure invites/spam/action/exempt role"),
         ("/automod_addword / _removeword / _listwords", "Manage the blocked word list"),
     ],
+    "🎙️ Voice & Tickets": [
+        ("/voiceactivity", "Voice channel activity leaderboard or one person"),
+        ("/setticketautoclose", "(admin) Auto-remind/close tickets that go quiet"),
+    ],
     "🔧 Utility": [
         ("/afk", "Mark yourself AFK"),
         ("/weblogin", "Get a one-time code to log into the web dashboard"),
@@ -7328,6 +7527,7 @@ bot.tree.add_command(showcase_group)
 @setpromotioncooldownrole.error
 @automod_toggle.error
 @automod_settings.error
+@setticketautoclose.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -7367,5 +7567,6 @@ if __name__ == "__main__":
         web_add_custom_command, web_remove_custom_command,
         web_refresh_roster,
         web_automod_toggle, web_automod_settings, web_automod_add_word, web_automod_remove_word,
+        web_set_ticket_autoclose,
     )
     bot.run(TOKEN)
