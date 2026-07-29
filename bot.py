@@ -2018,7 +2018,11 @@ async def refresh_ticket_panel(guild_id: int):
         pass
 
 
-@bot.tree.command(name="addticketcategory", description="Add a ticket type (e.g. 'Support', 'Report Player') with its own category.")
+ticketcategory_group = app_commands.Group(name="ticketcategory", description="Manage ticket types/categories")
+bot.tree.add_command(ticketcategory_group)
+
+
+@ticketcategory_group.command(name="add", description="Add a ticket type (e.g. 'Support', 'Report Player') with its own category.")
 @app_commands.describe(
     name="What this ticket type is called", category="The Discord category new ticket channels of this type go under",
     q1="Optional intake question 1", q2="Optional intake question 2", q3="Optional intake question 3",
@@ -2048,8 +2052,8 @@ async def addticketcategory(
     )
 
 
-@bot.tree.command(name="removeticketcategory", description="Remove a ticket type.")
-@app_commands.describe(index="The number shown in /listticketcategories")
+@ticketcategory_group.command(name="remove", description="Remove a ticket type.")
+@app_commands.describe(index="The number shown in /ticketcategory list")
 async def removeticketcategory(interaction: discord.Interaction, index: int):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
@@ -2059,7 +2063,7 @@ async def removeticketcategory(interaction: discord.Interaction, index: int):
     types = cfg.get("ticket_types", {})
     ids = list(types.keys())
     if index < 1 or index > len(ids):
-        await interaction.response.send_message("❌ Invalid index — check `/listticketcategories`.", ephemeral=True)
+        await interaction.response.send_message("❌ Invalid index — check `/ticketcategory list`.", ephemeral=True)
         return
     removed = types.pop(ids[index - 1])
     save_config(config)
@@ -2067,9 +2071,9 @@ async def removeticketcategory(interaction: discord.Interaction, index: int):
     await interaction.response.send_message(f"✅ Removed ticket type **{removed['name']}**.", ephemeral=True)
 
 
-@bot.tree.command(name="setticketquestions", description="Set or update the intake questions asked for a ticket type.")
+@ticketcategory_group.command(name="setquestions", description="Set or update the intake questions asked for a ticket type.")
 @app_commands.describe(
-    index="The number shown in /listticketcategories",
+    index="The number shown in /ticketcategory list",
     q1="Question 1 (leave all blank to remove questions)", q2="Question 2", q3="Question 3", q4="Question 4", q5="Question 5",
 )
 async def setticketquestions(
@@ -2084,7 +2088,7 @@ async def setticketquestions(
     types = cfg.get("ticket_types", {})
     ids = list(types.keys())
     if index < 1 or index > len(ids):
-        await interaction.response.send_message("❌ Invalid index — check `/listticketcategories`.", ephemeral=True)
+        await interaction.response.send_message("❌ Invalid index — check `/ticketcategory list`.", ephemeral=True)
         return
 
     questions = [q for q in [q1, q2, q3, q4, q5] if q]
@@ -2096,7 +2100,7 @@ async def setticketquestions(
     await interaction.response.send_message(f"✅ **{type_data['name']}**: {note}.", ephemeral=True)
 
 
-@bot.tree.command(name="listticketcategories", description="Show all configured ticket types.")
+@ticketcategory_group.command(name="list", description="Show all configured ticket types.")
 async def listticketcategories(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
     types = cfg.get("ticket_types", {})
@@ -5006,7 +5010,11 @@ def build_tournament_bracket_embed(name: str, data: dict) -> discord.Embed:
     return embed
 
 
-@bot.tree.command(name="tournament_create", description="Open sign-ups for a single-elimination tournament.")
+tournament_group = app_commands.Group(name="tournament", description="Run bracket tournaments")
+bot.tree.add_command(tournament_group)
+
+
+@tournament_group.command(name="create", description="Open sign-ups for a single-elimination tournament.")
 @app_commands.describe(name="A short name for this tournament")
 async def tournament_create(interaction: discord.Interaction, name: str):
     if not is_authorized(interaction):
@@ -5033,7 +5041,7 @@ async def tournament_create(interaction: discord.Interaction, name: str):
     save_config(config)
 
 
-@bot.tree.command(name="tournament_start", description="Lock sign-ups and generate the bracket.")
+@tournament_group.command(name="start", description="Lock sign-ups and generate the bracket.")
 @app_commands.describe(name="The tournament's name")
 async def tournament_start(interaction: discord.Interaction, name: str):
     if not is_authorized(interaction):
@@ -5056,7 +5064,7 @@ async def tournament_start(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(embed=build_tournament_bracket_embed(name, data))
 
 
-@bot.tree.command(name="tournament_report", description="Record the winner of a match.")
+@tournament_group.command(name="report", description="Record the winner of a match.")
 @app_commands.describe(name="The tournament's name", match="Match number in the current round", winner="Who won")
 async def tournament_report(interaction: discord.Interaction, name: str, match: int, winner: discord.Member):
     if not is_authorized(interaction):
@@ -5093,7 +5101,7 @@ async def tournament_report(interaction: discord.Interaction, name: str, match: 
     await interaction.response.send_message(embed=build_tournament_bracket_embed(name, data))
 
 
-@bot.tree.command(name="tournament_bracket", description="Show the current bracket for a tournament.")
+@tournament_group.command(name="bracket", description="Show the current bracket for a tournament.")
 @app_commands.describe(name="The tournament's name")
 async def tournament_bracket(interaction: discord.Interaction, name: str):
     cfg = get_guild_cfg(interaction.guild_id)
@@ -6357,18 +6365,23 @@ async def web_remove_custom_command(guild_id: int, trigger: str, actor_id: int) 
     return f"✅ Removed custom command `{trigger_key}`."
 
 
-@bot.tree.command(name="automod_toggle", description="Turn auto-moderation on or off.")
-@app_commands.checks.has_permissions(administrator=True)
+automod_group = app_commands.Group(name="automod", description="Auto-moderation settings")
+bot.tree.add_command(automod_group)
+
+
+@automod_group.command(name="toggle", description="Turn auto-moderation on or off.")
 @app_commands.describe(enabled="Turn auto-mod on or off")
 async def automod_toggle(interaction: discord.Interaction, enabled: bool):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     cfg["automod_enabled"] = enabled
     save_config(config)
     await interaction.response.send_message(f"✅ Auto-mod is now {'ON' if enabled else 'OFF'}.", ephemeral=True)
 
 
-@bot.tree.command(name="automod_settings", description="Configure auto-mod behavior.")
-@app_commands.checks.has_permissions(administrator=True)
+@automod_group.command(name="settings", description="Configure auto-mod behavior.")
 @app_commands.describe(
     block_invites="Automatically delete Discord invite links",
     block_spam="Automatically delete rapid repeated messages",
@@ -6384,6 +6397,9 @@ async def automod_settings(
     interaction: discord.Interaction, block_invites: bool = None, block_spam: bool = None,
     action: app_commands.Choice[str] = None, exempt_role: discord.Role = None,
 ):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     changes = []
     if block_invites is not None:
@@ -6405,7 +6421,7 @@ async def automod_settings(
     await interaction.response.send_message(f"✅ Updated: {', '.join(changes)}.", ephemeral=True)
 
 
-@bot.tree.command(name="automod_addword", description="Add a word to the auto-mod blocked word list.")
+@automod_group.command(name="addword", description="Add a word to the auto-mod blocked word list.")
 @app_commands.describe(word="The word to block")
 async def automod_addword(interaction: discord.Interaction, word: str):
     if not is_authorized(interaction):
@@ -6422,7 +6438,7 @@ async def automod_addword(interaction: discord.Interaction, word: str):
     await interaction.response.send_message(f"✅ Added `{word_lower}` to the blocked word list.", ephemeral=True)
 
 
-@bot.tree.command(name="automod_removeword", description="Remove a word from the auto-mod blocked word list.")
+@automod_group.command(name="removeword", description="Remove a word from the auto-mod blocked word list.")
 @app_commands.describe(word="The word to unblock")
 async def automod_removeword(interaction: discord.Interaction, word: str):
     if not is_authorized(interaction):
@@ -6439,7 +6455,7 @@ async def automod_removeword(interaction: discord.Interaction, word: str):
     await interaction.response.send_message(f"✅ Removed `{word_lower}` from the blocked word list.", ephemeral=True)
 
 
-@bot.tree.command(name="automod_listwords", description="Show the auto-mod blocked word list.")
+@automod_group.command(name="listwords", description="Show the auto-mod blocked word list.")
 async def automod_listwords(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
     words = cfg.get("automod_banned_words", [])
@@ -6498,10 +6514,16 @@ async def web_automod_remove_word(guild_id: int, word: str, actor_id: int) -> st
 
 
 
-@bot.tree.command(name="crosspost_add", description="Mirror messages from THIS channel to a channel in another server the bot is also in.")
-@app_commands.checks.has_permissions(administrator=True)
+crosspost_group = app_commands.Group(name="crosspost", description="Mirror messages between servers")
+bot.tree.add_command(crosspost_group)
+
+
+@crosspost_group.command(name="add", description="Mirror messages from THIS channel to a channel in another server the bot is also in.")
 @app_commands.describe(destination_channel_id="The channel ID to mirror into (right-click the channel in the other server → Copy Channel ID)")
 async def crosspost_add(interaction: discord.Interaction, destination_channel_id: str):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     try:
         dest_id = int(destination_channel_id)
     except ValueError:
@@ -6538,9 +6560,11 @@ async def crosspost_add(interaction: discord.Interaction, destination_channel_id
     )
 
 
-@bot.tree.command(name="crosspost_remove", description="Stop mirroring THIS channel to another server.")
-@app_commands.checks.has_permissions(administrator=True)
+@crosspost_group.command(name="remove", description="Stop mirroring THIS channel to another server.")
 async def crosspost_remove(interaction: discord.Interaction):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     crossposts = cfg.setdefault("crossposts", {})
     if str(interaction.channel_id) not in crossposts:
@@ -6552,9 +6576,11 @@ async def crosspost_remove(interaction: discord.Interaction):
     await interaction.response.send_message("✅ This channel will no longer be mirrored.", ephemeral=True)
 
 
-@bot.tree.command(name="crosspost_list", description="Show all cross-posting mirrors set up in this server.")
-@app_commands.checks.has_permissions(administrator=True)
+@crosspost_group.command(name="list", description="Show all cross-posting mirrors set up in this server.")
 async def crosspost_list(interaction: discord.Interaction):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     crossposts = cfg.get("crossposts", {})
 
@@ -7779,9 +7805,6 @@ bot.tree.add_command(showcase_group)
 @setcooldown.error
 @setinactivitydays.error
 @setstatschannel.error
-@crosspost_add.error
-@crosspost_remove.error
-@crosspost_list.error
 @backup.error
 @setbirthdayrole.error
 @setbirthdaychannel.error
@@ -7795,8 +7818,6 @@ bot.tree.add_command(showcase_group)
 @setbotstatus.error
 @setsuggestionschannel.error
 @setpromotioncooldownrole.error
-@automod_toggle.error
-@automod_settings.error
 @setticketautoclose.error
 @setreportschannel.error
 @setviewerrole.error
