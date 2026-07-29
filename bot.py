@@ -7052,6 +7052,7 @@ async def discordauditlog(interaction: discord.Interaction, limit: int = 20):
 
 
 
+@bot.tree.command(name="backup", description="Export this server's bot configuration as a downloadable file.")
 @app_commands.checks.has_permissions(administrator=True)
 async def backup(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
