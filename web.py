@@ -124,6 +124,7 @@ _automod_remove_word = None
 _set_ticket_autoclose = None
 _set_reports_channel = None
 _report_set_status = None
+_fetch_discord_audit_log = None
 
 
 # ---------- shared page chrome ----------
@@ -371,6 +372,7 @@ SIDENAV_SECTIONS = [
     ("Insight", [
         ("logs_page", "🗂️", "Logs"),
         ("activity_log_page", "🖱️", "Dashboard Activity"),
+        ("discord_audit_log_page", "🗂️", "Discord Audit Log"),
         ("login_history_page", "🔑", "Login History"),
         ("activity_page", "📈", "Activity"),
         ("growth_page", "📊", "Growth Analytics"),
@@ -607,6 +609,13 @@ def render_page(title: str, body: str, show_logout: bool = True, guild_id: int =
             href = url_for(endpoint, guild_id=guild_id)
             nav_html += f'<a class="{css_class}" href="{href}">{icon} {label}</a>'
 
+    _guild, _member, _level = _get_access_level(guild_id)
+    viewer_banner = (
+        '<div class="flash" style="background:rgba(139,150,179,0.12); border-color:rgba(139,150,179,0.35); color:#c3c9db;">'
+        '👁️ You have view-only access here — you can look around, but any changes you submit won\'t be saved.</div>'
+        if _level == "viewer" else ""
+    )
+
     return render_template_string(
         f"""
         <!doctype html><html><head><meta charset="utf-8">
@@ -615,7 +624,7 @@ def render_page(title: str, body: str, show_logout: bool = True, guild_id: int =
         <div class="topbar"><h1>🤖 Bot Dashboard</h1>{logout_link}</div>
         <div class="page-layout">
           <div class="sidenav">{{{{ nav|safe }}}}</div>
-          <div class="main-col">{{{{ body|safe }}}}</div>
+          <div class="main-col">{viewer_banner}{{{{ body|safe }}}}</div>
         </div>
         </div></body></html>
         """,
@@ -822,21 +831,38 @@ def guild_picker():
 
 # ---------- dashboard ----------
 
-def _check_access(guild_id: int):
-    """Returns (guild, member) if the logged-in user can manage this guild, else (None, None)."""
+def _get_access_level(guild_id: int):
+    """Returns (guild, member, level) where level is 'admin', 'manager', 'viewer',
+    or None. No side effects (no logging) — safe to call more than once per request."""
     if "user_id" not in session:
-        return None, None
+        return None, None, None
     guild = _bot.get_guild(guild_id)
     if guild is None:
-        return None, None
+        return None, None, None
     member = guild.get_member(session["user_id"])
     if member is None:
+        return None, None, None
+    cfg = _get_guild_cfg(guild.id)
+    if member.guild_permissions.administrator:
+        return guild, member, "admin"
+    manager_role_id = cfg.get("manager_role_id")
+    if manager_role_id and any(r.id == manager_role_id for r in member.roles):
+        return guild, member, "manager"
+    viewer_role_id = cfg.get("viewer_role_id")
+    if viewer_role_id and any(r.id == viewer_role_id for r in member.roles):
+        return guild, member, "viewer"
+    return guild, member, None
+
+
+def _check_access(guild_id: int):
+    """Returns (guild, member) if the logged-in user can access this guild's
+    dashboard at all — any tier, admin/manager/viewer — else (None, None).
+    Also logs POST actions to the dashboard activity log (viewers never reach
+    this as POST since a separate before_request hook blocks them earlier)."""
+    guild, member, level = _get_access_level(guild_id)
+    if level is None:
         return None, None
     cfg = _get_guild_cfg(guild.id)
-    manager_role_id = cfg.get("manager_role_id")
-    is_manager = manager_role_id and any(r.id == manager_role_id for r in member.roles)
-    if not (member.guild_permissions.administrator or is_manager):
-        return None, None
 
     if request.method == "POST":
         log = cfg.setdefault("dashboard_activity_log", [])
@@ -849,6 +875,23 @@ def _check_access(guild_id: int):
         _save_config(_config)
 
     return guild, member
+
+
+@app.before_request
+def _enforce_viewer_readonly():
+    """Viewers can open every page (handled normally by _check_access), but
+    can't submit any form. Checked here once, centrally, instead of adding a
+    guard to every individual POST route."""
+    if request.method != "POST" or not request.path.startswith("/dashboard/"):
+        return None
+    parts = request.path.split("/")
+    try:
+        guild_id = int(parts[2])
+    except (IndexError, ValueError):
+        return None
+    guild, member, level = _get_access_level(guild_id)
+    if level == "viewer":
+        return "❌ Your access to this dashboard is view-only — ask an admin for edit access to make changes.", 403
 
 
 def _channel_options(guild, selected_id, channel_type="text"):
@@ -1186,6 +1229,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/dm"><span>✉️</span>Direct Message</a>
         <a class="action-tile" href="/dashboard/{guild_id}/logs"><span>🗂️</span>Logs</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activitylog"><span>🖱️</span>Dashboard Activity</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/discordauditlog"><span>🗂️</span>Discord Audit Log</a>
         <a class="action-tile" href="/dashboard/{guild_id}/loginhistory"><span>🔑</span>Login History</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/growth"><span>📊</span>Growth Analytics</a>
@@ -1226,6 +1270,7 @@ def dashboard(guild_id):
           {_role_search_field("Birthday role", "birthday_role", guild, cfg.get('birthday_role_id'))}
           {_role_search_field("Who can run /weblogin (blank = everyone)", "weblogin_role", guild, cfg.get('weblogin_role_id'))}
           {_role_search_field("Promotion cooldown role (blocks promote/demote while worn)", "promotion_cooldown_role", guild, cfg.get('promotion_cooldown_role_id'))}
+          {_role_search_field("View-only dashboard access (can see everything, can't change anything)", "viewer_role", guild, cfg.get('viewer_role_id'))}
         </div>
       </div>
 
@@ -1284,6 +1329,7 @@ def dashboard_save(guild_id):
     set_or_clear("birthday_role_id", "birthday_role")
     set_or_clear("weblogin_role_id", "weblogin_role")
     set_or_clear("promotion_cooldown_role_id", "promotion_cooldown_role")
+    set_or_clear("viewer_role_id", "viewer_role")
 
     ranks = []
     for i in range(16):
@@ -5572,6 +5618,56 @@ def activity_log_page(guild_id):
     return render_page(f"{guild.name} — Dashboard Activity", body, guild_id=guild_id)
 
 
+@app.route("/dashboard/<int:guild_id>/discordauditlog")
+def discord_audit_log_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    result = _run_async(_fetch_discord_audit_log(guild_id, 100))
+    if result.get("error"):
+        rows_html = f'<div class="hint" style="color:#ff8080; padding:16px;">⚠️ {result["error"]}</div>'
+        table_html = ""
+    else:
+        entries = result.get("entries", [])
+        if entries:
+            rows = ""
+            for e in entries:
+                rows += f"""
+                <tr>
+                  <td>{html.escape(e['action'])}</td>
+                  <td>{html.escape(e['target'])}</td>
+                  <td>{html.escape(e['moderator'])}</td>
+                  <td class="hint">{html.escape(e.get('reason', '') or '—')}</td>
+                  <td class="hint">{_format_ts(e['timestamp'])}</td>
+                </tr>
+                """
+            rows_html = ""
+            table_html = f"""
+            {_table_search_box("discord-audit-table")}
+            <div class="log-wrap"><table class="log-table" id="discord-audit-table">
+              <tr><th>Action</th><th>Target</th><th>Moderator</th><th>Reason</th><th>When</th></tr>
+              {rows}
+            </table></div>
+            """
+        else:
+            rows_html = '<div class="hint" style="padding:16px;">No recent audit log entries.</div>'
+            table_html = ""
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">🗂️ Discord Audit Log</h1>
+    <div class="hint" style="margin-bottom:18px;">Discord's own native audit log — bans, kicks, channel/role changes, and more. Not limited to actions taken through this bot.</div>
+
+    <div class="card">
+      <h2>Recent activity</h2>
+      {rows_html}
+      {table_html}
+    </div>
+    """
+    return render_page(f"{guild.name} — Discord Audit Log", body, guild_id=guild_id)
+
+
 @app.route("/dashboard/<int:guild_id>/loginhistory")
 def login_history_page(guild_id):
     guild, member = _check_access(guild_id)
@@ -5651,6 +5747,7 @@ def start_web_app(
     automod_toggle, automod_settings, automod_add_word, automod_remove_word,
     set_ticket_autoclose,
     set_reports_channel, report_set_status,
+    fetch_discord_audit_log,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -5680,6 +5777,7 @@ def start_web_app(
     global _automod_toggle, _automod_settings, _automod_add_word, _automod_remove_word
     global _set_ticket_autoclose
     global _set_reports_channel, _report_set_status
+    global _fetch_discord_audit_log
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -5759,6 +5857,7 @@ def start_web_app(
     _set_ticket_autoclose = set_ticket_autoclose
     _set_reports_channel = set_reports_channel
     _report_set_status = report_set_status
+    _fetch_discord_audit_log = fetch_discord_audit_log
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

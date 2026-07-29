@@ -109,6 +109,8 @@ Commands:
   /namehistory [user]                     - show a member's nickname/username change history
   /report user:<member> reason:<text>     - privately report a member to staff
   /setreportschannel [channel]            - (admin only) set the private channel for member reports
+  /discordauditlog [limit]                - show Discord's own audit log (bans, kicks, channel/role changes)
+  /setviewerrole [role]                   - (admin only) role that gets view-only web dashboard access
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -3646,6 +3648,24 @@ async def setpromotioncooldownrole(interaction: discord.Interaction, role: disco
     )
 
 
+@bot.tree.command(name="setviewerrole", description="Set the role that gets view-only web dashboard access (can see everything, can't change anything).")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(role="The view-only role — omit to disable this feature")
+async def setviewerrole(interaction: discord.Interaction, role: discord.Role = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if role is None:
+        cfg.pop("viewer_role_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ View-only dashboard access disabled.", ephemeral=True)
+        return
+    cfg["viewer_role_id"] = role.id
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ Members with @{role.name} can now view the dashboard (read-only — they can't submit any changes).",
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="putoncooldown", description="Give a member the promotion cooldown role, blocking promotions/demotions for them.")
 @app_commands.describe(user="The member to put on cooldown")
 async def putoncooldown(interaction: discord.Interaction, user: discord.Member):
@@ -6925,7 +6945,87 @@ async def audit(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="backup", description="Export this server's bot configuration as a downloadable file.")
+DISCORD_AUDIT_ACTION_LABELS = {
+    discord.AuditLogAction.kick: "👢 Kick",
+    discord.AuditLogAction.ban: "🔨 Ban",
+    discord.AuditLogAction.unban: "✅ Unban",
+    discord.AuditLogAction.member_role_update: "🎭 Role Change",
+    discord.AuditLogAction.member_update: "✏️ Member Update",
+    discord.AuditLogAction.channel_create: "➕ Channel Created",
+    discord.AuditLogAction.channel_delete: "🗑️ Channel Deleted",
+    discord.AuditLogAction.channel_update: "✏️ Channel Updated",
+    discord.AuditLogAction.role_create: "➕ Role Created",
+    discord.AuditLogAction.role_delete: "🗑️ Role Deleted",
+    discord.AuditLogAction.role_update: "✏️ Role Updated",
+    discord.AuditLogAction.message_delete: "🗑️ Message Deleted",
+    discord.AuditLogAction.message_bulk_delete: "🗑️ Messages Bulk Deleted",
+    discord.AuditLogAction.invite_create: "🔗 Invite Created",
+    discord.AuditLogAction.invite_delete: "🔗 Invite Deleted",
+    discord.AuditLogAction.emoji_create: "😀 Emoji Added",
+    discord.AuditLogAction.emoji_delete: "😀 Emoji Removed",
+    discord.AuditLogAction.webhook_create: "🔌 Webhook Created",
+    discord.AuditLogAction.webhook_update: "🔌 Webhook Updated",
+    discord.AuditLogAction.bot_add: "🤖 Bot Added",
+}
+
+
+async def fetch_discord_audit_log(guild_id: int, limit: int = 50) -> dict:
+    """Pulls Discord's own native audit log — bans/kicks/channel changes/role
+    changes/etc — not just this bot's own action history. Returns
+    {"entries": [...], "error": None} or {"entries": [], "error": "..."}."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return {"entries": [], "error": "Server not found."}
+    if not guild.me.guild_permissions.view_audit_log:
+        return {"entries": [], "error": "I don't have the 'View Audit Log' permission in this server."}
+
+    try:
+        entries = []
+        async for entry in guild.audit_logs(limit=limit):
+            label = DISCORD_AUDIT_ACTION_LABELS.get(entry.action, str(entry.action).replace("AuditLogAction.", "").replace("_", " ").title())
+            target_label = str(entry.target) if entry.target else "—"
+            entries.append({
+                "action": label,
+                "moderator": str(entry.user) if entry.user else "Unknown",
+                "moderator_id": entry.user.id if entry.user else None,
+                "target": target_label,
+                "reason": entry.reason or "",
+                "timestamp": entry.created_at.isoformat(),
+            })
+        return {"entries": entries, "error": None}
+    except discord.Forbidden:
+        return {"entries": [], "error": "I don't have permission to view this server's audit log."}
+    except discord.HTTPException as e:
+        return {"entries": [], "error": str(e)}
+
+
+@bot.tree.command(name="discordauditlog", description="Show Discord's own audit log (bans, kicks, channel/role changes, etc).")
+@app_commands.describe(limit="How many entries to show (max 50)")
+async def discordauditlog(interaction: discord.Interaction, limit: int = 20):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await fetch_discord_audit_log(interaction.guild_id, min(limit, 50))
+    if result["error"]:
+        await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+        return
+
+    embed = discord.Embed(title="🗂️ Discord Audit Log", color=discord.Color.dark_grey())
+    if not result["entries"]:
+        embed.description = "No recent audit log entries."
+    else:
+        lines = []
+        for e in result["entries"][:20]:
+            ts = datetime.fromisoformat(e["timestamp"])
+            reason = f" — {e['reason']}" if e["reason"] else ""
+            lines.append(f"{e['action']} → **{e['target']}**{reason} • by {e['moderator']} • <t:{int(ts.timestamp())}:R>")
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"Showing {min(len(result['entries']), 20)} of {len(result['entries'])} fetched entries")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+
 @app_commands.checks.has_permissions(administrator=True)
 async def backup(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
@@ -7403,6 +7503,10 @@ HELP_CATEGORIES = {
         ("/report", "Privately report a member to staff"),
         ("/setreportschannel", "(admin) Set the private channel for reports"),
     ],
+    "🗂️ Discord Audit Log": [
+        ("/discordauditlog", "Show Discord's own audit log (bans, kicks, channel/role changes)"),
+        ("/setviewerrole", "(admin) Role that gets view-only web dashboard access"),
+    ],
     "🔧 Utility": [
         ("/afk", "Mark yourself AFK"),
         ("/weblogin", "Get a one-time code to log into the web dashboard"),
@@ -7695,6 +7799,7 @@ bot.tree.add_command(showcase_group)
 @automod_settings.error
 @setticketautoclose.error
 @setreportschannel.error
+@setviewerrole.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
@@ -7736,5 +7841,6 @@ if __name__ == "__main__":
         web_automod_toggle, web_automod_settings, web_automod_add_word, web_automod_remove_word,
         web_set_ticket_autoclose,
         web_set_reports_channel, web_report_set_status,
+        fetch_discord_audit_log,
     )
     bot.run(TOKEN)
