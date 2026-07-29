@@ -848,9 +848,14 @@ def _get_access_level(guild_id: int):
     manager_role_id = cfg.get("manager_role_id")
     if manager_role_id and any(r.id == manager_role_id for r in member.roles):
         return guild, member, "manager"
-    viewer_role_id = cfg.get("viewer_role_id")
-    if viewer_role_id and any(r.id == viewer_role_id for r in member.roles):
-        return guild, member, "viewer"
+    viewer_threshold_id = cfg.get("viewer_rank_threshold_id")
+    if viewer_threshold_id:
+        ranks = cfg.get("ranks", [])
+        if viewer_threshold_id in ranks:
+            idx = ranks.index(viewer_threshold_id)
+            eligible_rank_ids = set(ranks[idx:])  # that rank and every rank below it
+            if any(r.id in eligible_rank_ids for r in member.roles):
+                return guild, member, "viewer"
     return guild, member, None
 
 
@@ -1083,15 +1088,23 @@ def _rank_search_assets(guild, cfg):
     return f"<script>SEARCH_MAPS.rank = {json.dumps(mapping)};</script>"
 
 
-def _rank_search_field(label="Rank", field_name="rank_id"):
+def _rank_search_field(label="Rank", field_name="rank_id", guild=None, current_id=None):
+    """Pass guild+current_id to pre-fill an existing selection (e.g. on the settings page)."""
+    current_label = ""
+    current_value = ""
+    if guild is not None and current_id:
+        role = guild.get_role(current_id)
+        if role:
+            current_label = f"@{role.name}"
+            current_value = str(current_id)
     return f"""
     <div class="field">
       <label>{label}</label>
       <div class="search-wrap">
-        <input type="text" data-map="rank" placeholder="Type or click to browse..." autocomplete="off"
+        <input type="text" data-map="rank" value="{current_label}" placeholder="Type or click to browse..." autocomplete="off"
                oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
       </div>
-      <input type="hidden" name="{field_name}">
+      <input type="hidden" name="{field_name}" value="{current_value}">
     </div>
     """
 
@@ -1144,6 +1157,7 @@ def dashboard(guild_id):
     )
     role_assets = _role_search_assets(guild)
     channel_assets = _channel_search_assets(guild)
+    rank_picker_assets = _rank_search_assets(guild, cfg)
 
     roster_size = len(cfg.get("roster", []))
     open_tickets = sum(1 for t in cfg.get("tickets", {}).values() if t.get("status") == "open")
@@ -1195,6 +1209,7 @@ def dashboard(guild_id):
     {recent_activity_html}
     {role_assets}
     {channel_assets}
+    {rank_picker_assets}
 
     <div class="card">
       <h2>⚡ Actions</h2>
@@ -1270,7 +1285,7 @@ def dashboard(guild_id):
           {_role_search_field("Birthday role", "birthday_role", guild, cfg.get('birthday_role_id'))}
           {_role_search_field("Who can run /weblogin (blank = everyone)", "weblogin_role", guild, cfg.get('weblogin_role_id'))}
           {_role_search_field("Promotion cooldown role (blocks promote/demote while worn)", "promotion_cooldown_role", guild, cfg.get('promotion_cooldown_role_id'))}
-          {_role_search_field("View-only dashboard access (can see everything, can't change anything)", "viewer_role", guild, cfg.get('viewer_role_id'))}
+          {_rank_search_field("View-only dashboard access threshold (this rank and everything below it)", "viewer_rank_threshold", guild, cfg.get('viewer_rank_threshold_id'))}
         </div>
       </div>
 
@@ -1329,7 +1344,7 @@ def dashboard_save(guild_id):
     set_or_clear("birthday_role_id", "birthday_role")
     set_or_clear("weblogin_role_id", "weblogin_role")
     set_or_clear("promotion_cooldown_role_id", "promotion_cooldown_role")
-    set_or_clear("viewer_role_id", "viewer_role")
+    set_or_clear("viewer_rank_threshold_id", "viewer_rank_threshold")
 
     ranks = []
     for i in range(16):

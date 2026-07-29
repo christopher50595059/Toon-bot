@@ -3652,20 +3652,32 @@ async def setpromotioncooldownrole(interaction: discord.Interaction, role: disco
     )
 
 
-@bot.tree.command(name="setviewerrole", description="Set the role that gets view-only web dashboard access (can see everything, can't change anything).")
+@bot.tree.command(name="setviewerrole", description="Set the rank threshold for view-only web dashboard access — that rank and everyone below it.")
 @app_commands.checks.has_permissions(administrator=True)
-@app_commands.describe(role="The view-only role — omit to disable this feature")
-async def setviewerrole(interaction: discord.Interaction, role: discord.Role = None):
+@app_commands.describe(rank="A configured rank — this rank and every rank below it gets view-only access. Omit to disable.")
+async def setviewerrole(interaction: discord.Interaction, rank: discord.Role = None):
     cfg = get_guild_cfg(interaction.guild_id)
-    if role is None:
-        cfg.pop("viewer_role_id", None)
+    if rank is None:
+        cfg.pop("viewer_rank_threshold_id", None)
         save_config(config)
         await interaction.response.send_message("✅ View-only dashboard access disabled.", ephemeral=True)
         return
-    cfg["viewer_role_id"] = role.id
+
+    ranks = cfg.get("ranks", [])
+    if rank.id not in ranks:
+        valid_mentions = ", ".join(r.mention for rid in ranks if (r := interaction.guild.get_role(rid)))
+        await interaction.response.send_message(
+            f"❌ {rank.mention} isn't a configured rank. Choose from: {valid_mentions or '(none set — run /setranks first)'}",
+            ephemeral=True,
+        )
+        return
+
+    cfg["viewer_rank_threshold_id"] = rank.id
     save_config(config)
+    lower_ranks = ranks[ranks.index(rank.id):]
+    lower_mentions = ", ".join(f"<@&{rid}>" for rid in lower_ranks)
     await interaction.response.send_message(
-        f"✅ Members with @{role.name} can now view the dashboard (read-only — they can't submit any changes).",
+        f"✅ Members ranked {rank.mention} or below can now view the dashboard (read-only). That's: {lower_mentions}.",
         ephemeral=True,
     )
 
