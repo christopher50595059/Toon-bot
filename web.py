@@ -373,6 +373,7 @@ SIDENAV_SECTIONS = [
         ("activity_log_page", "🖱️", "Dashboard Activity"),
         ("login_history_page", "🔑", "Login History"),
         ("activity_page", "📈", "Activity"),
+        ("growth_page", "📊", "Growth Analytics"),
         ("trivia_page", "🧠", "Trivia Leaderboard"),
         ("voice_activity_page", "🎙️", "Voice Activity"),
         ("custom_commands_page", "💬", "Custom Commands"),
@@ -1187,6 +1188,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/activitylog"><span>🖱️</span>Dashboard Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/loginhistory"><span>🔑</span>Login History</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/growth"><span>📊</span>Growth Analytics</a>
         <a class="action-tile" href="/dashboard/{guild_id}/trivia"><span>🧠</span>Trivia</a>
         <a class="action-tile" href="/dashboard/{guild_id}/voiceactivity"><span>🎙️</span>Voice Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/customcommands"><span>💬</span>Custom Commands</a>
@@ -2693,6 +2695,106 @@ def activity_page(guild_id):
     </div>
     """
     return render_page(f"{guild.name} — Activity", body, guild_id=guild_id)
+
+
+def _build_growth_chart_svg(history):
+    """Renders a simple line chart as raw SVG — no JS charting library needed,
+    consistent with the rest of this dashboard."""
+    width, height = 780, 280
+    pad_left, pad_right, pad_top, pad_bottom = 50, 20, 20, 30
+
+    counts = [h["count"] for h in history]
+    min_count, max_count = min(counts), max(counts)
+    if min_count == max_count:
+        min_count -= 1
+        max_count += 1
+    span = max_count - min_count
+
+    plot_w = width - pad_left - pad_right
+    plot_h = height - pad_top - pad_bottom
+    n = len(history)
+
+    def x_at(i):
+        return pad_left + (i / (n - 1) * plot_w if n > 1 else plot_w / 2)
+
+    def y_at(count):
+        return pad_top + plot_h - ((count - min_count) / span * plot_h)
+
+    points = [(x_at(i), y_at(h["count"])) for i, h in enumerate(history)]
+    line_path = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+    area_path = line_path + f" L {points[-1][0]:.1f},{pad_top + plot_h} L {points[0][0]:.1f},{pad_top + plot_h} Z"
+
+    # Y-axis gridlines/labels — 4 evenly spaced steps
+    gridlines = ""
+    for step in range(5):
+        val = min_count + span * step / 4
+        y = y_at(val)
+        gridlines += f'<line x1="{pad_left}" y1="{y:.1f}" x2="{width - pad_right}" y2="{y:.1f}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>'
+        gridlines += f'<text x="{pad_left - 8}" y="{y:.1f}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="#8b96b3">{int(val)}</text>'
+
+    # X-axis labels — first, middle, last date only, to avoid clutter
+    label_indices = sorted(set([0, n // 2, n - 1])) if n > 1 else [0]
+    x_labels = ""
+    for i in label_indices:
+        x_labels += f'<text x="{x_at(i):.1f}" y="{height - pad_bottom + 18}" text-anchor="middle" font-size="11" fill="#8b96b3">{history[i]["date"]}</text>'
+
+    dots = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="#3b82f6"/>' for x, y in points) if n <= 60 else ""
+
+    return f"""
+    <svg viewBox="0 0 {width} {height}" style="width:100%; height:auto;">
+      <defs>
+        <linearGradient id="growthFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      {gridlines}
+      <path d="{area_path}" fill="url(#growthFill)"/>
+      <path d="{line_path}" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+      {dots}
+      {x_labels}
+    </svg>
+    """
+
+
+@app.route("/dashboard/<int:guild_id>/growth")
+def growth_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    history = cfg.get("member_count_history", [])
+
+    if len(history) < 2:
+        chart_html = f'<div class="hint" style="padding:24px 0;">Not enough data yet — this records one snapshot per day, so check back after a couple of days. Currently {len(history)} data point(s) recorded.</div>'
+        change_html = ""
+    else:
+        chart_html = _build_growth_chart_svg(history)
+        first, last = history[0]["count"], history[-1]["count"]
+        delta = last - first
+        sign = "+" if delta >= 0 else ""
+        change_html = f"""
+        <div class="stats-strip" style="margin-top:0;">
+          <div class="stat-tile"><div class="icon">👥</div><div class="num">{last}</div><div class="label">Current</div></div>
+          <div class="stat-tile{'' if delta >= 0 else ' magenta'}"><div class="icon">{'📈' if delta >= 0 else '📉'}</div><div class="num">{sign}{delta}</div><div class="label">Since {history[0]['date']}</div></div>
+          <div class="stat-tile grey"><div class="icon">🗓️</div><div class="num">{len(history)}</div><div class="label">Days Tracked</div></div>
+        </div>
+        """
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">📊 Growth Analytics</h1>
+    <div class="hint" style="margin-bottom:18px;">One member-count snapshot recorded per day, keeping roughly the last 6 months.</div>
+
+    {change_html}
+
+    <div class="card">
+      <h2>Member Count Over Time</h2>
+      {chart_html}
+    </div>
+    """
+    return render_page(f"{guild.name} — Growth Analytics", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/trivia")

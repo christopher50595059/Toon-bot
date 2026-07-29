@@ -239,6 +239,8 @@ async def on_ready():
         weekly_voice_activity_loop.start()
     if not ticket_autoclose_loop.is_running():
         ticket_autoclose_loop.start()
+    if not member_count_snapshot_loop.is_running():
+        member_count_snapshot_loop.start()
     if not birthday_check_loop.is_running():
         birthday_check_loop.start()
     if not rust_status_loop.is_running():
@@ -5335,6 +5337,22 @@ async def weekly_voice_activity_loop():
         cfg["voice_minutes"] = {}
         cfg["voice_minutes_since"] = now.isoformat()
         save_config(config)
+
+
+@tasks.loop(hours=24)
+async def member_count_snapshot_loop():
+    """Records one member-count data point per day per guild, for the growth
+    analytics chart. There's no historical data before this feature existed —
+    the chart naturally fills in day by day from whenever this first runs."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    for guild in bot.guilds:
+        cfg = get_guild_cfg(guild.id)
+        history = cfg.setdefault("member_count_history", [])
+        if history and history[-1]["date"] == today:
+            continue  # already recorded today
+        history.append({"date": today, "count": guild.member_count})
+        cfg["member_count_history"] = history[-180:]  # keep roughly the last 6 months
+    save_config(config)
 
 
 @tasks.loop(hours=24)
