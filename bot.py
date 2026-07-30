@@ -3161,6 +3161,57 @@ async def rustplayers(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+@rust_group.command(name="kick", description="Kick a player from the Rust server.")
+@app_commands.describe(steam_id="The player's SteamID64", reason="Why you're kicking them")
+async def rustkick(interaction: discord.Interaction, steam_id: str, reason: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await rust_kick_player(interaction.guild_id, steam_id, reason, interaction.user.id)
+    await interaction.followup.send(result, ephemeral=True)
+
+
+@rust_group.command(name="ban", description="Ban a player from the Rust server.")
+@app_commands.describe(steam_id="The player's SteamID64", reason="Why you're banning them")
+async def rustban(interaction: discord.Interaction, steam_id: str, reason: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await rust_ban_player(interaction.guild_id, steam_id, reason, interaction.user.id)
+    await interaction.followup.send(result, ephemeral=True)
+
+
+@rust_group.command(name="unban", description="Unban a player from the Rust server.")
+@app_commands.describe(steam_id="The player's SteamID64")
+async def rustunban(interaction: discord.Interaction, steam_id: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await rust_unban_player(interaction.guild_id, steam_id, interaction.user.id)
+    await interaction.followup.send(result, ephemeral=True)
+
+
+@rust_group.command(name="banlist", description="Show everyone currently banned from the Rust server.")
+async def rustbanlist(interaction: discord.Interaction):
+    data = await rust_get_banlist(interaction.guild_id)
+    if data.get("error"):
+        await interaction.response.send_message(f"❌ {data['error']}", ephemeral=True)
+        return
+    bans = data.get("bans", [])
+    embed = discord.Embed(title="🚫 Rust — Ban List", color=discord.Color.dark_red())
+    if not bans:
+        embed.description = "No bans on record."
+    else:
+        lines = [f"**{b.get('name', b.get('steam_id', 'Unknown'))}** — {b.get('reason', 'No reason given')}" for b in bans[:25]]
+        embed.description = "\n".join(lines)
+        if len(bans) > 25:
+            embed.set_footer(text=f"Showing 25 of {len(bans)} bans")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 bot.tree.add_command(rust_group)
 
 
