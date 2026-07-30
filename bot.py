@@ -114,6 +114,12 @@ Commands:
   /linksteam steamid:<text>               - link your SteamID for Rust whitelist auto-sync
   /linkminecraft username:<text>          - link your Minecraft username for whitelist auto-sync
   /setwhitelistsync [rank] [rust_command_template] [minecraft_enabled] - (admin only) auto-whitelist on Rust/Minecraft at a rank threshold
+  /addrankbonusrole rank:<role> bonus_role:<role> - auto-grant an extra role when someone reaches a rank
+  /removerankbonusrole rank:<role> bonus_role:<role> - stop auto-granting that extra role
+  /listrankbonusroles                     - show which extra roles get auto-granted at each rank
+  /setrustpopalert [role] [channel] [threshold] - (admin only) ping a role when Rust hits a population threshold
+  /setrustwipe [day] [hour] [channel]     - (admin only) schedule a weekly wipe countdown (24h/12h/1h announcements)
+  /rustwipe                               - show time until the next scheduled Rust wipe
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -812,6 +818,7 @@ async def web_roster_add(guild_id: int, user_id: int, rank_role_id: int, reason:
         await refresh_roster_message(guild)
         await refresh_server_stats_message(guild)
         await _maybe_sync_whitelist(guild_id, member.id)
+        await _sync_rank_bonus_roles(guild_id, member.id, rank.id)
         note = "" if dm_sent else " (couldn't DM them)"
         return f"✅ Moved {member.display_name} from {old_label} to @{rank.name}.{note}"
 
@@ -826,6 +833,7 @@ async def web_roster_add(guild_id: int, user_id: int, rank_role_id: int, reason:
     await refresh_roster_message(guild)
     await refresh_server_stats_message(guild)
     await _maybe_sync_whitelist(guild_id, member.id)
+    await _sync_rank_bonus_roles(guild_id, member.id, rank.id)
     note = "" if dm_sent else " (couldn't DM them)"
     return f"✅ Added {member.display_name} to the roster as @{rank.name}.{note}"
 
@@ -903,6 +911,7 @@ async def web_roster_add_all(guild_id: int, rank_role_id: int, actor_id: int) ->
                 record_history(guild_id, member.id, "Rank Changed", rank.mention, actor_id, "Bulk add-all via web")
                 moved += 1
             await _maybe_sync_whitelist(guild_id, member.id)
+            await _sync_rank_bonus_roles(guild_id, member.id, rank.id)
         except discord.HTTPException:
             role_failed += 1
             continue
@@ -1033,6 +1042,7 @@ async def _web_change_rank(guild_id: int, user_id: int, reason: str, actor_id: i
     await refresh_roster_message(guild)
     await refresh_server_stats_message(guild)
     await _maybe_sync_whitelist(guild_id, member.id)
+    await _sync_rank_bonus_roles(guild_id, member.id, new_role.id)
     note = "" if dm_sent else " (couldn't DM them)"
     return f"✅ {verb}d {member.display_name} from {old_label} to @{new_role.name}.{note}"
 
@@ -2325,7 +2335,7 @@ async def relay_rust_chat_to_discord(guild_id: int, raw_message: str):
         pass
 
 
-def build_rust_status_embed(server_name: str, info: dict = None, error: str = None) -> discord.Embed:
+def build_rust_status_embed(server_name: str, info: dict = None, error: str = None, seed: str = None, worldsize: str = None) -> discord.Embed:
     embed = discord.Embed(title=f"🦀 {server_name}", color=discord.Color.dark_orange())
     if error:
         embed.description = f"⚠️ Couldn't reach the server: {error}"
@@ -2333,9 +2343,28 @@ def build_rust_status_embed(server_name: str, info: dict = None, error: str = No
     embed.add_field(name="Server Name", value=info["name"], inline=False)
     embed.add_field(name="Map", value=info["map"], inline=True)
     embed.add_field(name="Players", value=f"{info['players']} / {info['max_players']}", inline=True)
+    if seed and worldsize:
+        embed.add_field(name="Seed / Size", value=f"{seed} / {worldsize}", inline=True)
+        embed.add_field(name="Map Viewer", value=f"[RustMaps](https://rustmaps.com/map/{worldsize}_{seed})", inline=True)
     embed.timestamp = discord.utils.utcnow()
     embed.set_footer(text="Last updated")
     return embed
+
+
+async def _get_rust_seed_worldsize(guild_id: int):
+    """Returns (seed, worldsize) strings via RCON, or (None, None) if RCON
+    isn't connected or the query fails."""
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return None, None
+    try:
+        seed_raw = await conn.send_command("server.seed")
+        size_raw = await conn.send_command("server.worldsize")
+        seed = "".join(c for c in seed_raw if c.isdigit())
+        worldsize = "".join(c for c in size_raw if c.isdigit())
+        return (seed or None), (worldsize or None)
+    except Exception:
+        return None, None
 
 
 async def refresh_rust_status_message(guild_id: int):
@@ -2354,7 +2383,8 @@ async def refresh_rust_status_message(guild_id: int):
 
     try:
         info = await query_rust_server(host, query_port)
-        embed = build_rust_status_embed(host, info=info)
+        seed, worldsize = await _get_rust_seed_worldsize(guild_id)
+        embed = build_rust_status_embed(host, info=info, seed=seed, worldsize=worldsize)
     except Exception as e:
         embed = build_rust_status_embed(host, error=str(e))
 
@@ -2409,6 +2439,152 @@ async def check_rust_downtime(guild_id: int):
             pass
 
 
+async def check_rust_population(guild_id: int):
+    """Pings a role when the server crosses a configured population
+    threshold — going from below to at/above it ('full'), or dropping back
+    below after having been at/above it ('opened up'). Independent of the
+    live status embed — uses its own alert channel."""
+    cfg = get_guild_cfg(guild_id)
+    alert_channel_id = cfg.get("rust_pop_alert_channel_id")
+    role_id = cfg.get("rust_pop_alert_role_id")
+    host = cfg.get("rust_host")
+    query_port = cfg.get("rust_query_port")
+    if not alert_channel_id or not role_id or not host or not query_port:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(alert_channel_id)
+    role = guild.get_role(role_id)
+    if channel is None or role is None:
+        return
+
+    try:
+        info = await query_rust_server(host, query_port)
+    except Exception:
+        return  # downtime is handled separately by check_rust_downtime
+
+    threshold = cfg.get("rust_pop_threshold") or info["max_players"]  # defaults to "full"
+    is_at_threshold = info["players"] >= threshold
+    was_at_threshold = cfg.get("rust_pop_was_at_threshold", False)
+
+    if is_at_threshold != was_at_threshold:
+        cfg["rust_pop_was_at_threshold"] = is_at_threshold
+        save_config(config)
+        try:
+            if is_at_threshold:
+                await channel.send(f"📢 {role.mention} **{host}** just hit {info['players']}/{info['max_players']} players!")
+            else:
+                await channel.send(f"📉 {role.mention} **{host}** dropped back below {threshold} players — room to hop in ({info['players']}/{info['max_players']}).")
+        except discord.Forbidden:
+            pass
+
+
+RUST_WIPE_ANNOUNCE_THRESHOLDS_HOURS = [24, 12, 1]
+
+
+def _next_rust_wipe_datetime(wipe_day: int, wipe_hour: int) -> datetime:
+    """wipe_day: 0=Monday ... 6=Sunday (matches datetime.weekday()). Returns
+    the next occurrence of that weekday+hour, in UTC."""
+    now = datetime.now(timezone.utc)
+    days_ahead = (wipe_day - now.weekday()) % 7
+    candidate = (now + timedelta(days=days_ahead)).replace(hour=wipe_hour, minute=0, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=7)
+    return candidate
+
+
+async def check_rust_wipe_countdown(guild_id: int):
+    """Posts a countdown announcement at 24h, 12h, and 1h before the
+    configured weekly wipe time."""
+    cfg = get_guild_cfg(guild_id)
+    wipe_day = cfg.get("rust_wipe_day")
+    wipe_hour = cfg.get("rust_wipe_hour")
+    channel_id = cfg.get("rust_wipe_channel_id")
+    if wipe_day is None or wipe_hour is None or not channel_id:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+
+    next_wipe = _next_rust_wipe_datetime(wipe_day, wipe_hour)
+    hours_left = (next_wipe - datetime.now(timezone.utc)).total_seconds() / 3600
+
+    announced = set(cfg.get("rust_wipe_announced", []))
+    if hours_left > 24 * 6:  # freshly recalculated to next week — a wipe just passed, reset tracking
+        if announced:
+            cfg["rust_wipe_announced"] = []
+            save_config(config)
+        announced = set()
+
+    for threshold in RUST_WIPE_ANNOUNCE_THRESHOLDS_HOURS:
+        if hours_left <= threshold and threshold not in announced:
+            try:
+                await channel.send(f"🔧 **Wipe in ~{threshold} hour(s)!** Get your last runs in. <t:{int(next_wipe.timestamp())}:R>")
+            except discord.Forbidden:
+                pass
+            announced.add(threshold)
+            cfg["rust_wipe_announced"] = list(announced)
+            save_config(config)
+
+
+@bot.tree.command(name="setrustwipe", description="Schedule a weekly wipe countdown — auto-announces at 24h, 12h, and 1h before.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(day="Day of the week the server wipes", hour="Hour of the wipe, 0-23 UTC", channel="Where to post countdown announcements")
+@app_commands.choices(day=[
+    app_commands.Choice(name="Monday", value=0), app_commands.Choice(name="Tuesday", value=1),
+    app_commands.Choice(name="Wednesday", value=2), app_commands.Choice(name="Thursday", value=3),
+    app_commands.Choice(name="Friday", value=4), app_commands.Choice(name="Saturday", value=5),
+    app_commands.Choice(name="Sunday", value=6),
+])
+async def setrustwipe(interaction: discord.Interaction, day: app_commands.Choice[int] = None, hour: int = None, channel: discord.TextChannel = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if day is None:
+        cfg.pop("rust_wipe_day", None)
+        cfg.pop("rust_wipe_hour", None)
+        cfg.pop("rust_wipe_channel_id", None)
+        cfg.pop("rust_wipe_announced", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Wipe countdown disabled.", ephemeral=True)
+        return
+    if hour is None or hour < 0 or hour > 23:
+        await interaction.response.send_message("❌ Give an hour between 0-23 (UTC).", ephemeral=True)
+        return
+    if channel is None:
+        await interaction.response.send_message("❌ Pick a channel too — that's where countdowns get posted.", ephemeral=True)
+        return
+
+    cfg["rust_wipe_day"] = day.value
+    cfg["rust_wipe_hour"] = hour
+    cfg["rust_wipe_channel_id"] = channel.id
+    cfg["rust_wipe_announced"] = []
+    save_config(config)
+
+    next_wipe = _next_rust_wipe_datetime(day.value, hour)
+    await interaction.response.send_message(
+        f"✅ Wipe scheduled for every **{day.name} at {hour:02d}:00 UTC**, with countdowns posted in {channel.mention}. "
+        f"Next wipe: <t:{int(next_wipe.timestamp())}:F> (<t:{int(next_wipe.timestamp())}:R>).",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="rustwipe", description="Show the time until the next scheduled Rust wipe.")
+async def rustwipe(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    wipe_day = cfg.get("rust_wipe_day")
+    wipe_hour = cfg.get("rust_wipe_hour")
+    if wipe_day is None or wipe_hour is None:
+        await interaction.response.send_message("❌ No wipe schedule set up yet. Ask an admin to run /setrustwipe.", ephemeral=True)
+        return
+    next_wipe = _next_rust_wipe_datetime(wipe_day, wipe_hour)
+    await interaction.response.send_message(
+        f"🔧 Next wipe: <t:{int(next_wipe.timestamp())}:F> (<t:{int(next_wipe.timestamp())}:R>)."
+    )
+
+
 @tasks.loop(minutes=2)
 async def rust_status_loop():
     for guild_id_str in list(config.keys()):
@@ -2421,6 +2597,10 @@ async def rust_status_loop():
             await refresh_rust_status_message(guild_id)
         if cfg.get("rust_alert_channel_id"):
             await check_rust_downtime(guild_id)
+        if cfg.get("rust_pop_alert_channel_id"):
+            await check_rust_population(guild_id)
+        if cfg.get("rust_wipe_channel_id"):
+            await check_rust_wipe_countdown(guild_id)
 
 
 @bot.tree.command(name="setrustserver", description="Connect this server to your Rust game server.")
@@ -2452,6 +2632,40 @@ async def setrustserver(
         msg += " RCON is connecting now — check `/ruststatus` in a moment to confirm."
 
     await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="setrustpopalert", description="Ping a role when your Rust server hits a population threshold.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    role="Role to ping when the threshold is crossed — omit to disable",
+    channel="Channel to post the alert in",
+    threshold="Player count that counts as 'full' — omit to use the server's actual max player count",
+)
+async def setrustpopalert(interaction: discord.Interaction, role: discord.Role = None, channel: discord.TextChannel = None, threshold: int = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if role is None:
+        cfg.pop("rust_pop_alert_role_id", None)
+        cfg.pop("rust_pop_alert_channel_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Rust population alerts disabled.", ephemeral=True)
+        return
+    if channel is None:
+        await interaction.response.send_message("❌ Pick a channel too — that's where the alert gets posted.", ephemeral=True)
+        return
+
+    cfg["rust_pop_alert_role_id"] = role.id
+    cfg["rust_pop_alert_channel_id"] = channel.id
+    if threshold is not None:
+        cfg["rust_pop_threshold"] = threshold
+    else:
+        cfg.pop("rust_pop_threshold", None)
+    save_config(config)
+
+    threshold_label = f"{threshold} players" if threshold is not None else "the server's max player count (full)"
+    await interaction.response.send_message(
+        f"✅ {role.mention} will be pinged in {channel.mention} when the server hits {threshold_label}.", ephemeral=True
+    )
+
 
 
 @bot.tree.command(name="setrustchatchannel", description="Bridge this channel's chat with your Rust server (both ways).")
@@ -2502,7 +2716,8 @@ async def ruststatus(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
         info = await query_rust_server(host, query_port)
-        embed = build_rust_status_embed(host, info=info)
+        seed, worldsize = await _get_rust_seed_worldsize(interaction.guild_id)
+        embed = build_rust_status_embed(host, info=info, seed=seed, worldsize=worldsize)
     except Exception as e:
         embed = build_rust_status_embed(host, error=str(e))
 
@@ -3920,6 +4135,100 @@ async def _maybe_sync_whitelist(guild_id: int, user_id: int):
                 print(f"⚠️ Whitelist sync failed for Minecraft ({guild_id}/{user_id}): {e}")
 
 
+# ---------- rank bonus roles (auto-grant extra roles at a rank) ----------
+
+@bot.tree.command(name="addrankbonusrole", description="When someone reaches a rank, automatically give them this extra role too.")
+@app_commands.describe(rank="A configured rank", bonus_role="The extra role to auto-grant at that rank")
+async def addrankbonusrole(interaction: discord.Interaction, rank: discord.Role, bonus_role: discord.Role):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    ranks = cfg.get("ranks", [])
+    if rank.id not in ranks:
+        valid_mentions = ", ".join(r.mention for rid in ranks if (r := interaction.guild.get_role(rid)))
+        await interaction.response.send_message(
+            f"❌ {rank.mention} isn't a configured rank. Choose from: {valid_mentions or '(none set — run /setranks first)'}",
+            ephemeral=True,
+        )
+        return
+    if bonus_role >= interaction.guild.me.top_role:
+        await interaction.response.send_message(f"❌ I can't assign {bonus_role.mention} — it's above my own role.", ephemeral=True)
+        return
+
+    bonus_map = cfg.setdefault("rank_bonus_roles", {})
+    bonus_list = bonus_map.setdefault(str(rank.id), [])
+    if bonus_role.id in bonus_list:
+        await interaction.response.send_message(f"ℹ️ {bonus_role.mention} is already a bonus role for {rank.mention}.", ephemeral=True)
+        return
+    bonus_list.append(bonus_role.id)
+    save_config(config)
+    await interaction.response.send_message(f"✅ Reaching {rank.mention} will now also grant {bonus_role.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="removerankbonusrole", description="Stop auto-granting an extra role at a rank.")
+@app_commands.describe(rank="A configured rank", bonus_role="The bonus role to remove")
+async def removerankbonusrole(interaction: discord.Interaction, rank: discord.Role, bonus_role: discord.Role):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    bonus_list = cfg.get("rank_bonus_roles", {}).get(str(rank.id), [])
+    if bonus_role.id not in bonus_list:
+        await interaction.response.send_message(f"❌ {bonus_role.mention} isn't a bonus role for {rank.mention}.", ephemeral=True)
+        return
+    bonus_list.remove(bonus_role.id)
+    save_config(config)
+    await interaction.response.send_message(f"✅ Removed {bonus_role.mention} as a bonus role for {rank.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="listrankbonusroles", description="Show which extra roles get auto-granted at each rank.")
+async def listrankbonusroles(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    bonus_map = cfg.get("rank_bonus_roles", {})
+    ranks = cfg.get("ranks", [])
+    if not bonus_map or not any(bonus_map.get(str(rid)) for rid in ranks):
+        await interaction.response.send_message("No rank bonus roles configured yet.", ephemeral=True)
+        return
+
+    lines = []
+    for rid in ranks:
+        bonus_list = bonus_map.get(str(rid), [])
+        if not bonus_list:
+            continue
+        rank_role = interaction.guild.get_role(rid)
+        rank_label = rank_role.mention if rank_role else f"(deleted rank {rid})"
+        bonus_mentions = ", ".join(f"<@&{bid}>" for bid in bonus_list)
+        lines.append(f"{rank_label} → {bonus_mentions}")
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+async def _sync_rank_bonus_roles(guild_id: int, user_id: int, new_rank_id: int):
+    """Called right after a member's rank is set to new_rank_id. Grants any
+    bonus roles configured for that rank — additive only, doesn't remove
+    bonus roles tied to a previous rank (so demoting someone never strips
+    roles they might still need for unrelated reasons)."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    member = guild.get_member(user_id)
+    if member is None:
+        return
+    cfg = get_guild_cfg(guild_id)
+    bonus_list = cfg.get("rank_bonus_roles", {}).get(str(new_rank_id), [])
+    if not bonus_list:
+        return
+
+    for bonus_role_id in bonus_list:
+        role = guild.get_role(bonus_role_id)
+        if role is None or role in member.roles or role >= guild.me.top_role:
+            continue
+        try:
+            await member.add_roles(role, reason=f"Rank bonus role for reaching rank {new_rank_id}")
+        except discord.Forbidden:
+            print(f"⚠️ Rank bonus role grant failed (no permission) for {guild_id}/{user_id}/{bonus_role_id}")
+
+
 
 def redeem_web_login_code(code: str):
     """Returns the Discord user ID if the code is valid and unexpired, else
@@ -4316,6 +4625,7 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
         await refresh_roster_message(interaction.guild)
         await refresh_server_stats_message(interaction.guild)
         await _maybe_sync_whitelist(interaction.guild_id, user.id)
+        await _sync_rank_bonus_roles(interaction.guild_id, user.id, rank.id)
         return
 
     roster.append({"user_id": user.id, "rank_role_id": rank.id})
@@ -4347,6 +4657,7 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
     await refresh_roster_message(interaction.guild)
     await refresh_server_stats_message(interaction.guild)
     await _maybe_sync_whitelist(interaction.guild_id, user.id)
+    await _sync_rank_bonus_roles(interaction.guild_id, user.id, rank.id)
 
 
 @bot.tree.command(name="rosterremove", description="Remove a member from the roster.")
@@ -4570,6 +4881,7 @@ async def _change_rank(interaction: discord.Interaction, user: discord.Member, r
     )
     await refresh_roster_message(interaction.guild)
     await _maybe_sync_whitelist(interaction.guild_id, user.id)
+    await _sync_rank_bonus_roles(interaction.guild_id, user.id, new_role.id)
 
 
 @bot.tree.command(name="promote", description="Move a member up one rank (toward the top of your /setranks list).")
@@ -4637,6 +4949,7 @@ async def rosterimport(interaction: discord.Interaction, rank: discord.Role):
             skipped += 1
             continue
         await _maybe_sync_whitelist(interaction.guild_id, member.id)
+        await _sync_rank_bonus_roles(interaction.guild_id, member.id, rank.id)
 
     save_config(config)
 
@@ -4744,6 +5057,7 @@ async def rosteraddall(interaction: discord.Interaction, rank: discord.Role):
                 record_history(interaction.guild_id, member.id, "Rank Changed", rank.mention, interaction.user.id, "Bulk add-all")
                 moved_members.append(member)
             await _maybe_sync_whitelist(interaction.guild_id, member.id)
+            await _sync_rank_bonus_roles(interaction.guild_id, member.id, rank.id)
         except discord.HTTPException:
             role_failed += 1
             continue
@@ -7602,9 +7916,11 @@ HELP_CATEGORIES = {
     "🦀 Rust Server": [
         ("/setrustserver", "Connect to your Rust server (status + optional RCON)"),
         ("/setrustchatchannel", "Bridge Discord chat with in-game chat"),
-        ("/setruststatuschannel", "Live server status embed"),
+        ("/setruststatuschannel", "Live server status embed (now includes seed/size/RustMaps link)"),
         ("/ruststatus", "Show current server status"),
         ("/rustcommand", "Run an RCON command on the server"),
+        ("/setrustpopalert", "(admin) Ping a role at a population threshold"),
+        ("/setrustwipe / rustwipe", "Schedule and check a weekly wipe countdown"),
     ],
     "⛏️ Minecraft Server": [
         ("/setminecraftserver", "Connect to your Minecraft server (status + optional RCON)"),
@@ -7700,6 +8016,11 @@ HELP_CATEGORIES = {
         ("/linksteam", "Link your SteamID for Rust whitelist auto-sync"),
         ("/linkminecraft", "Link your Minecraft username for whitelist auto-sync"),
         ("/setwhitelistsync", "(admin) Auto-whitelist on Rust/Minecraft at a rank threshold"),
+    ],
+    "🎁 Rank Bonus Roles": [
+        ("/addrankbonusrole", "Auto-grant an extra role when someone reaches a rank"),
+        ("/removerankbonusrole", "Stop auto-granting that extra role"),
+        ("/listrankbonusroles", "Show which extra roles get auto-granted at each rank"),
     ],
     "🔧 Utility": [
         ("/afk", "Mark yourself AFK"),
@@ -7990,6 +8311,8 @@ bot.tree.add_command(showcase_group)
 @setreportschannel.error
 @setviewerrole.error
 @setwhitelistsync.error
+@setrustpopalert.error
+@setrustwipe.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
