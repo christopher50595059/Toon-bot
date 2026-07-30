@@ -1100,6 +1100,7 @@ async def web_ban(guild_id: int, user_id: int, reason: str, delete_days: int, ac
     except discord.Forbidden:
         return "❌ I don't have permission to ban that member."
     await log_movement(guild, member=member, target="banned", reason=reason, moderator=actor)
+    await _maybe_sync_rust_ban(guild_id, user_id, reason)
     note = "" if dm_sent else " (couldn't DM them before banning)"
     return f"✅ Banned {member.display_name}.{note}"
 
@@ -3083,6 +3084,56 @@ async def rustmacrolist(interaction: discord.Interaction):
         return
     lines = [f"**{name}** → `{command}`" for name, command in macros.items()]
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@rust_group.command(name="setbansync", description="Auto-ban on Rust too whenever someone is Discord-banned (if they've linked their SteamID).")
+@app_commands.describe(
+    enabled="Turn ban sync on or off",
+    command_template="RCON command to run, with {steamid} and {reason} placeholders — omit to use the default",
+)
+async def rustsetbansync(interaction: discord.Interaction, enabled: bool, command_template: str = None):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    cfg["rust_ban_sync_enabled"] = enabled
+    if command_template:
+        cfg["rust_ban_sync_command_template"] = command_template
+    save_config(config)
+    if enabled:
+        template = cfg.get("rust_ban_sync_command_template", 'ban {steamid} "{reason}"')
+        await interaction.response.send_message(f"✅ Ban sync is ON. Command used: `{template}`", ephemeral=True)
+    else:
+        await interaction.response.send_message("✅ Ban sync is OFF.", ephemeral=True)
+
+
+async def _maybe_sync_rust_ban(guild_id: int, user_id: int, reason: str):
+    """Called after a Discord ban. Also bans on Rust if sync is enabled and
+    the member has a linked SteamID. Silent no-op otherwise — this runs
+    automatically in the background, not as something the banning staff
+    member needs to babysit."""
+    cfg = get_guild_cfg(guild_id)
+    if not cfg.get("rust_ban_sync_enabled"):
+        return
+    steamid = cfg.get("linked_steam_ids", {}).get(str(user_id))
+    if not steamid:
+        return
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return
+
+    template = cfg.get("rust_ban_sync_command_template", 'ban {steamid} "{reason}"')
+    try:
+        command = template.format(steamid=steamid, reason=reason)
+        await conn.send_command(command)
+        guild = bot.get_guild(guild_id)
+        log_channel_id = cfg.get("log_channel_id")
+        if guild and log_channel_id:
+            log_channel = guild.get_channel(log_channel_id)
+            if log_channel:
+                await log_channel.send(f"🦀 Also banned on Rust (SteamID `{steamid}`) as part of the Discord ban.")
+    except Exception as e:
+        print(f"⚠️ Rust ban sync failed ({guild_id}/{user_id}): {e}")
 
 
 bot.tree.add_command(rust_group)
@@ -7507,6 +7558,7 @@ async def ban(interaction: discord.Interaction, user: discord.Member, reason: st
     note = "\n\n*(couldn't DM them before banning)*" if not dm_sent else ""
     await interaction.edit_original_response(content=f"✅ Banned {user.mention}. Reason: {reason}{note}", view=None)
     await log_movement(interaction.guild, member=user, target="banned", reason=reason, moderator=interaction.user)
+    await _maybe_sync_rust_ban(interaction.guild_id, user.id, reason)
 
 
 @bot.tree.command(name="timeout", description="Temporarily mute a member.")
