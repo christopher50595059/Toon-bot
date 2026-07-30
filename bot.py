@@ -3002,6 +3002,89 @@ async def check_rust_recurring_announcements(guild_id: int):
         save_config(config)
 
 
+@rust_group.command(name="macroadd", description="Save a named RCON command shortcut, so you don't have to retype it every time.")
+@app_commands.describe(
+    name="A short name for this macro",
+    command="The RCON command to run — use {player} anywhere you want a target's SteamID substituted in",
+)
+async def rustmacroadd(interaction: discord.Interaction, name: str, command: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    macros = cfg.setdefault("rust_macros", {})
+    name_key = name.lower().strip()
+    is_update = name_key in macros
+    macros[name_key] = command
+    save_config(config)
+    verb = "Updated" if is_update else "Saved"
+    await interaction.response.send_message(f"✅ {verb} macro `{name_key}`: `{command}`", ephemeral=True)
+
+
+@rust_group.command(name="macrorun", description="Run a saved RCON macro.")
+@app_commands.describe(name="The macro's name", player="SteamID to substitute for {player} in the macro, if it uses that placeholder")
+async def rustmacrorun(interaction: discord.Interaction, name: str, player: str = None):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    macros = cfg.get("rust_macros", {})
+    name_key = name.lower().strip()
+    if name_key not in macros:
+        await interaction.response.send_message(f"❌ No macro named `{name_key}`. Check `/rust macrolist`.", ephemeral=True)
+        return
+    conn = rust_connections.get(interaction.guild_id)
+    if conn is None or not conn.connected:
+        await interaction.response.send_message("❌ RCON isn't connected. Run `/rust setserver` with your RCON port and password first.", ephemeral=True)
+        return
+
+    command = macros[name_key]
+    if "{player}" in command:
+        if not player:
+            await interaction.response.send_message(f"❌ This macro needs a `player` value — it uses the {{player}} placeholder.", ephemeral=True)
+            return
+        command = command.format(player=player)
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        response = await conn.send_command(command)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Macro failed: {e}", ephemeral=True)
+        return
+    display = response.strip() if response and response.strip() else "*(no output)*"
+    if len(display) > 1700:
+        display = display[:1700] + "\n... (truncated)"
+    await interaction.followup.send(f"✅ Ran `{name_key}`:\n```\n{display}\n```", ephemeral=True)
+
+
+@rust_group.command(name="macroremove", description="Remove a saved RCON macro.")
+@app_commands.describe(name="The macro's name")
+async def rustmacroremove(interaction: discord.Interaction, name: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    macros = cfg.get("rust_macros", {})
+    name_key = name.lower().strip()
+    if name_key not in macros:
+        await interaction.response.send_message(f"❌ No macro named `{name_key}`.", ephemeral=True)
+        return
+    del macros[name_key]
+    save_config(config)
+    await interaction.response.send_message(f"✅ Removed macro `{name_key}`.", ephemeral=True)
+
+
+@rust_group.command(name="macrolist", description="Show all saved RCON macros.")
+async def rustmacrolist(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    macros = cfg.get("rust_macros", {})
+    if not macros:
+        await interaction.response.send_message("No macros saved yet.", ephemeral=True)
+        return
+    lines = [f"**{name}** → `{command}`" for name, command in macros.items()]
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
 bot.tree.add_command(rust_group)
 
 
