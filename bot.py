@@ -3212,6 +3212,45 @@ async def rustbanlist(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+@rust_group.command(name="setrules", description="Save server rules/info text shown by /rust info.")
+@app_commands.describe(text="Your server rules or info — supports multiple lines")
+async def rustsetrules(interaction: discord.Interaction, text: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    cfg["rust_rules_text"] = text
+    save_config(config)
+    await interaction.response.send_message("✅ Rules/info text saved. Run `/rust info` to see how it looks.", ephemeral=True)
+
+
+@rust_group.command(name="info", description="Post a static server info card — rules, wipe schedule, and a connect button.")
+async def rustinfo(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    host = cfg.get("rust_host")
+    if not host:
+        await interaction.response.send_message("❌ No Rust server set up yet. Run `/rust setserver` first.", ephemeral=True)
+        return
+
+    embed = discord.Embed(title=f"🦀 {host}", color=discord.Color.dark_orange())
+    rules_text = cfg.get("rust_rules_text")
+    if rules_text:
+        embed.add_field(name="📋 Rules", value=rules_text[:1024], inline=False)
+
+    wipe_day = cfg.get("rust_wipe_day")
+    wipe_hour = cfg.get("rust_wipe_hour")
+    if wipe_day is not None and wipe_hour is not None:
+        next_wipe = _next_rust_wipe_datetime(wipe_day, wipe_hour)
+        embed.add_field(name="🔧 Wipe Schedule", value=f"<t:{int(next_wipe.timestamp())}:F> (<t:{int(next_wipe.timestamp())}:R>)", inline=False)
+
+    if not rules_text and wipe_day is None:
+        embed.description = "No rules or wipe schedule set up yet — this will still show a Connect button below."
+
+    connect_port = cfg.get("rust_connect_port") or cfg.get("rust_query_port")
+    view = RustConnectView(host, connect_port) if connect_port else None
+    await interaction.response.send_message(embed=embed, view=view)
+
+
 bot.tree.add_command(rust_group)
 
 
