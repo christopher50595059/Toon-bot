@@ -111,6 +111,9 @@ Commands:
   /setreportschannel [channel]            - (admin only) set the private channel for member reports
   /discordauditlog [limit]                - show Discord's own audit log (bans, kicks, channel/role changes)
   /setviewerrole [role]                   - (admin only) role that gets view-only web dashboard access
+  /linksteam steamid:<text>               - link your SteamID for Rust whitelist auto-sync
+  /linkminecraft username:<text>          - link your Minecraft username for whitelist auto-sync
+  /setwhitelistsync [rank] [rust_command_template] [minecraft_enabled] - (admin only) auto-whitelist on Rust/Minecraft at a rank threshold
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -808,6 +811,7 @@ async def web_roster_add(guild_id: int, user_id: int, rank_role_id: int, reason:
         record_history(guild_id, member.id, "Rank Changed", f"{old_label} → {rank.mention}", actor_id, reason)
         await refresh_roster_message(guild)
         await refresh_server_stats_message(guild)
+        await _maybe_sync_whitelist(guild_id, member.id)
         note = "" if dm_sent else " (couldn't DM them)"
         return f"✅ Moved {member.display_name} from {old_label} to @{rank.name}.{note}"
 
@@ -821,6 +825,7 @@ async def web_roster_add(guild_id: int, user_id: int, rank_role_id: int, reason:
     record_history(guild_id, member.id, "Added to Roster", rank.mention, actor_id, reason)
     await refresh_roster_message(guild)
     await refresh_server_stats_message(guild)
+    await _maybe_sync_whitelist(guild_id, member.id)
     note = "" if dm_sent else " (couldn't DM them)"
     return f"✅ Added {member.display_name} to the roster as @{rank.name}.{note}"
 
@@ -897,6 +902,7 @@ async def web_roster_add_all(guild_id: int, rank_role_id: int, actor_id: int) ->
                 existing["rank_role_id"] = rank.id
                 record_history(guild_id, member.id, "Rank Changed", rank.mention, actor_id, "Bulk add-all via web")
                 moved += 1
+            await _maybe_sync_whitelist(guild_id, member.id)
         except discord.HTTPException:
             role_failed += 1
             continue
@@ -1026,6 +1032,7 @@ async def _web_change_rank(guild_id: int, user_id: int, reason: str, actor_id: i
     record_history(guild_id, member.id, f"{verb}d", f"{old_label} → {new_role.mention}", actor_id, reason)
     await refresh_roster_message(guild)
     await refresh_server_stats_message(guild)
+    await _maybe_sync_whitelist(guild_id, member.id)
     note = "" if dm_sent else " (couldn't DM them)"
     return f"✅ {verb}d {member.display_name} from {old_label} to @{new_role.name}.{note}"
 
@@ -3777,6 +3784,143 @@ async def web_remove_cooldown(guild_id: int, user_id: int, actor_id: int) -> str
     return f"✅ {member.display_name} is off promotion cooldown."
 
 
+# ---------- game account linking + whitelist auto-sync ----------
+
+@bot.tree.command(name="linksteam", description="Link your Steam ID, so reaching the right rank can auto-whitelist you on Rust.")
+@app_commands.describe(steamid="Your 17-digit SteamID64 (find it at steamid.io)")
+async def linksteam(interaction: discord.Interaction, steamid: str):
+    steamid = steamid.strip()
+    if not steamid.isdigit() or len(steamid) != 17:
+        await interaction.response.send_message("❌ That doesn't look like a SteamID64 — it should be exactly 17 digits. You can look yours up at steamid.io.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    links = cfg.setdefault("linked_steam_ids", {})
+    links[str(interaction.user.id)] = steamid
+    save_config(config)
+    await interaction.response.send_message(f"✅ Linked SteamID `{steamid}` to your account.", ephemeral=True)
+    await _maybe_sync_whitelist(interaction.guild_id, interaction.user.id)
+
+
+@bot.tree.command(name="linkminecraft", description="Link your Minecraft username, so reaching the right rank can auto-whitelist you.")
+@app_commands.describe(username="Your exact Minecraft username")
+async def linkminecraft(interaction: discord.Interaction, username: str):
+    username = username.strip()
+    if not username or len(username) > 16:
+        await interaction.response.send_message("❌ That doesn't look like a valid Minecraft username.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    links = cfg.setdefault("linked_minecraft_names", {})
+    links[str(interaction.user.id)] = username
+    save_config(config)
+    await interaction.response.send_message(f"✅ Linked Minecraft username `{username}` to your account.", ephemeral=True)
+    await _maybe_sync_whitelist(interaction.guild_id, interaction.user.id)
+
+
+@bot.tree.command(name="setwhitelistsync", description="Auto-whitelist members on Rust/Minecraft once they reach a certain rank.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    rank="Reaching this rank or higher triggers whitelisting — omit to disable",
+    rust_command_template="RCON command to run for Rust, with {steamid} as a placeholder (e.g. 'whitelist add {steamid}' or your plugin's command)",
+    minecraft_enabled="Also whitelist on Minecraft using its built-in whitelist command",
+)
+async def setwhitelistsync(
+    interaction: discord.Interaction, rank: discord.Role = None,
+    rust_command_template: str = None, minecraft_enabled: bool = None,
+):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if rank is None and rust_command_template is None and minecraft_enabled is None:
+        cfg.pop("whitelist_sync_rank_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Whitelist auto-sync disabled.", ephemeral=True)
+        return
+
+    if rank is not None:
+        ranks = cfg.get("ranks", [])
+        if rank.id not in ranks:
+            valid_mentions = ", ".join(r.mention for rid in ranks if (r := interaction.guild.get_role(rid)))
+            await interaction.response.send_message(
+                f"❌ {rank.mention} isn't a configured rank. Choose from: {valid_mentions or '(none set — run /setranks first)'}",
+                ephemeral=True,
+            )
+            return
+        cfg["whitelist_sync_rank_id"] = rank.id
+    if rust_command_template is not None:
+        cfg["whitelist_rust_command_template"] = rust_command_template
+    if minecraft_enabled is not None:
+        cfg["whitelist_minecraft_enabled"] = minecraft_enabled
+    save_config(config)
+
+    parts = []
+    if rank is not None:
+        parts.append(f"rank threshold: {rank.mention} or higher")
+    if rust_command_template is not None:
+        parts.append(f"Rust command: `{rust_command_template}`")
+    if minecraft_enabled is not None:
+        parts.append(f"Minecraft: {'on' if minecraft_enabled else 'off'}")
+    await interaction.response.send_message(f"✅ Whitelist sync updated — {', '.join(parts)}.", ephemeral=True)
+
+
+async def _maybe_sync_whitelist(guild_id: int, user_id: int):
+    """Called after any rank change/roster addition. Whitelists the member on
+    Rust/Minecraft if they've reached the configured threshold rank and have
+    a linked game account. Silently does nothing if sync isn't set up, the
+    member hasn't reached the threshold, or they haven't linked an account —
+    this is meant to run automatically in the background, not report errors
+    to whoever triggered the rank change."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    cfg = get_guild_cfg(guild_id)
+    threshold_id = cfg.get("whitelist_sync_rank_id")
+    if not threshold_id:
+        return
+    ranks = cfg.get("ranks", [])
+    if threshold_id not in ranks:
+        return
+
+    roster = cfg.get("roster", [])
+    entry = next((e for e in roster if e["user_id"] == user_id), None)
+    if not entry or entry.get("rank_role_id") not in ranks:
+        return
+    # Lower index = higher rank. "Reached the threshold" means at or above it.
+    if ranks.index(entry["rank_role_id"]) > ranks.index(threshold_id):
+        return
+
+    member = guild.get_member(user_id)
+    if member is None:
+        return
+
+    rust_template = cfg.get("whitelist_rust_command_template")
+    if rust_template and cfg.get("rust_host") and cfg.get("rust_rcon_port"):
+        steamid = cfg.get("linked_steam_ids", {}).get(str(user_id))
+        conn = rust_connections.get(guild_id)
+        if steamid and conn is not None and conn.connected:
+            try:
+                command = rust_template.format(steamid=steamid)
+                await conn.send_command(command)
+                log_channel_id = cfg.get("log_channel_id")
+                if log_channel_id:
+                    log_channel = guild.get_channel(log_channel_id)
+                    if log_channel:
+                        await log_channel.send(f"🦀 Auto-whitelisted {member.mention} on Rust (SteamID `{steamid}`).")
+            except Exception as e:
+                print(f"⚠️ Whitelist sync failed for Rust ({guild_id}/{user_id}): {e}")
+
+    if cfg.get("whitelist_minecraft_enabled") and cfg.get("mc_host") and cfg.get("mc_rcon_port"):
+        mc_username = cfg.get("linked_minecraft_names", {}).get(str(user_id))
+        if mc_username:
+            try:
+                await minecraft_rcon_command(cfg["mc_host"], cfg["mc_rcon_port"], cfg.get("mc_rcon_password", ""), f"whitelist add {mc_username}")
+                log_channel_id = cfg.get("log_channel_id")
+                if log_channel_id:
+                    log_channel = guild.get_channel(log_channel_id)
+                    if log_channel:
+                        await log_channel.send(f"⛏️ Auto-whitelisted {member.mention} on Minecraft (`{mc_username}`).")
+            except Exception as e:
+                print(f"⚠️ Whitelist sync failed for Minecraft ({guild_id}/{user_id}): {e}")
+
+
+
 def redeem_web_login_code(code: str):
     """Returns the Discord user ID if the code is valid and unexpired, else
     None. One-time use — the code is removed either way once checked."""
@@ -4171,6 +4315,7 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
         )
         await refresh_roster_message(interaction.guild)
         await refresh_server_stats_message(interaction.guild)
+        await _maybe_sync_whitelist(interaction.guild_id, user.id)
         return
 
     roster.append({"user_id": user.id, "rank_role_id": rank.id})
@@ -4201,6 +4346,7 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
     record_history(interaction.guild_id, user.id, "Added to Roster", rank.mention, interaction.user.id, reason)
     await refresh_roster_message(interaction.guild)
     await refresh_server_stats_message(interaction.guild)
+    await _maybe_sync_whitelist(interaction.guild_id, user.id)
 
 
 @bot.tree.command(name="rosterremove", description="Remove a member from the roster.")
@@ -4423,6 +4569,7 @@ async def _change_rank(interaction: discord.Interaction, user: discord.Member, r
         interaction.user.id, reason,
     )
     await refresh_roster_message(interaction.guild)
+    await _maybe_sync_whitelist(interaction.guild_id, user.id)
 
 
 @bot.tree.command(name="promote", description="Move a member up one rank (toward the top of your /setranks list).")
@@ -4488,6 +4635,8 @@ async def rosterimport(interaction: discord.Interaction, rank: discord.Role):
             moved_members.append(member)
         else:
             skipped += 1
+            continue
+        await _maybe_sync_whitelist(interaction.guild_id, member.id)
 
     save_config(config)
 
@@ -4594,6 +4743,7 @@ async def rosteraddall(interaction: discord.Interaction, rank: discord.Role):
                 existing["rank_role_id"] = rank.id
                 record_history(interaction.guild_id, member.id, "Rank Changed", rank.mention, interaction.user.id, "Bulk add-all")
                 moved_members.append(member)
+            await _maybe_sync_whitelist(interaction.guild_id, member.id)
         except discord.HTTPException:
             role_failed += 1
             continue
@@ -7546,6 +7696,11 @@ HELP_CATEGORIES = {
         ("/discordauditlog", "Show Discord's own audit log (bans, kicks, channel/role changes)"),
         ("/setviewerrole", "(admin) Role that gets view-only web dashboard access"),
     ],
+    "🎮 Whitelist Auto-Sync": [
+        ("/linksteam", "Link your SteamID for Rust whitelist auto-sync"),
+        ("/linkminecraft", "Link your Minecraft username for whitelist auto-sync"),
+        ("/setwhitelistsync", "(admin) Auto-whitelist on Rust/Minecraft at a rank threshold"),
+    ],
     "🔧 Utility": [
         ("/afk", "Mark yourself AFK"),
         ("/weblogin", "Get a one-time code to log into the web dashboard"),
@@ -7834,6 +7989,7 @@ bot.tree.add_command(showcase_group)
 @setticketautoclose.error
 @setreportschannel.error
 @setviewerrole.error
+@setwhitelistsync.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
