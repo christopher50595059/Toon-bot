@@ -862,6 +862,11 @@ def _get_access_level(guild_id: int):
     manager_role_id = cfg.get("manager_role_id")
     if manager_role_id and any(r.id == manager_role_id for r in member.roles):
         return guild, member, "manager"
+    ban_role_threshold_id = cfg.get("ban_role_threshold_id")
+    if ban_role_threshold_id:
+        threshold_role = guild.get_role(ban_role_threshold_id)
+        if threshold_role and member.top_role >= threshold_role:
+            return guild, member, "manager"  # same access level as manager — see /setbanrole
     viewer_threshold_id = cfg.get("viewer_rank_threshold_id")
     if viewer_threshold_id:
         ranks = cfg.get("ranks", [])
@@ -1301,6 +1306,7 @@ def dashboard(guild_id):
           {_role_search_field("Who can run /weblogin (blank = everyone)", "weblogin_role", guild, cfg.get('weblogin_role_id'))}
           {_role_search_field("Promotion cooldown role (blocks promote/demote while worn)", "promotion_cooldown_role", guild, cfg.get('promotion_cooldown_role_id'))}
           {_rank_search_field("View-only dashboard access threshold (this rank and everything below it)", "viewer_rank_threshold", guild, cfg.get('viewer_rank_threshold_id'))}
+          {_role_search_field("Who can use /ban — this role or higher in Server Settings (Discord + web)", "ban_role_threshold", guild, cfg.get('ban_role_threshold_id'))}
         </div>
       </div>
 
@@ -1360,6 +1366,7 @@ def dashboard_save(guild_id):
     set_or_clear("weblogin_role_id", "weblogin_role")
     set_or_clear("promotion_cooldown_role_id", "promotion_cooldown_role")
     set_or_clear("viewer_rank_threshold_id", "viewer_rank_threshold")
+    set_or_clear("ban_role_threshold_id", "ban_role_threshold")
 
     ranks = []
     for i in range(16):

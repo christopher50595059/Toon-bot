@@ -114,6 +114,7 @@ Commands:
   /setreportschannel [channel]            - (admin only) set the private channel for member reports
   /discordauditlog [limit]                - show Discord's own audit log (bans, kicks, channel/role changes)
   /setviewerrole [role]                   - (admin only) role that gets view-only web dashboard access
+  /setbanrole [role]                      - (admin only) role threshold for using /ban (Discord + web)
   /linksteam steamid:<text>               - link your SteamID for Rust whitelist auto-sync
   /linkminecraft username:<text>          - link your Minecraft username for whitelist auto-sync
   /setwhitelistsync [rank] [rust_command_template] [minecraft_enabled] - (admin only) auto-whitelist on Rust/Minecraft at a rank threshold
@@ -1088,6 +1089,8 @@ async def web_ban(guild_id: int, user_id: int, reason: str, delete_days: int, ac
     actor = guild.get_member(actor_id)
     if member is None or actor is None:
         return "❌ Couldn't find that member or your account in this server."
+    if not can_use_ban(guild_id, actor):
+        return "❌ You don't have permission to ban members."
     if not guild.me.guild_permissions.ban_members:
         return "❌ I don't have permission to ban members."
     if member.top_role >= guild.me.top_role:
@@ -4503,6 +4506,26 @@ def is_authorized(interaction: discord.Interaction) -> bool:
     return any(r.id == manager_role_id for r in member.roles)
 
 
+def can_use_ban(guild_id: int, member: discord.Member) -> bool:
+    """True if this member can use /ban (Discord or web) — admins and the
+    manager role always can, same as everything else. On top of that, a
+    separate configurable role threshold: anyone whose top role is at or
+    above the chosen role in Server Settings > Roles can also ban, even
+    without the manager role. Set via /setbanrole or the web dashboard."""
+    if member.guild_permissions.administrator:
+        return True
+    cfg = get_guild_cfg(guild_id)
+    manager_role_id = cfg.get("manager_role_id")
+    if manager_role_id and any(r.id == manager_role_id for r in member.roles):
+        return True
+    ban_role_id = cfg.get("ban_role_threshold_id")
+    if ban_role_id:
+        threshold_role = member.guild.get_role(ban_role_id)
+        if threshold_role and member.top_role >= threshold_role:
+            return True
+    return False
+
+
 # ---------- web dashboard login codes (fallback when Discord OAuth doesn't work) ----------
 #
 # A one-time, short-lived code generated via a slash command, redeemable on
@@ -4595,6 +4618,27 @@ async def setviewerrole(interaction: discord.Interaction, rank: discord.Role = N
     lower_mentions = ", ".join(f"<@&{rid}>" for rid in lower_ranks)
     await interaction.response.send_message(
         f"✅ Members ranked {rank.mention} or below can now view the dashboard (read-only). That's: {lower_mentions}.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="setbanrole", description="Set the role threshold for using /ban — that role and anyone above it in Server Settings > Roles.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(role="The threshold role — omit to disable (admins/managers can always still ban)")
+async def setbanrole(interaction: discord.Interaction, role: discord.Role = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if role is None:
+        cfg.pop("ban_role_threshold_id", None)
+        save_config(config)
+        await interaction.response.send_message(
+            "✅ Ban role threshold disabled. Only admins and the manager role can use /ban now.", ephemeral=True
+        )
+        return
+    cfg["ban_role_threshold_id"] = role.id
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ Anyone whose top role is {role.mention} or higher (in Server Settings > Roles) can now use /ban, "
+        "both in Discord and on the web dashboard — same access level as your manager role.",
         ephemeral=True,
     )
 
@@ -7820,7 +7864,7 @@ async def kick(interaction: discord.Interaction, user: discord.Member, reason: s
 @bot.tree.command(name="ban", description="Ban a member from the server.")
 @app_commands.describe(user="The member to ban", reason="Why you're banning them", delete_days="Days of their message history to delete (0-7)")
 async def ban(interaction: discord.Interaction, user: discord.Member, reason: str, delete_days: int = 0):
-    if not is_authorized(interaction):
+    if not can_use_ban(interaction.guild_id, interaction.user):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
     if not interaction.guild.me.guild_permissions.ban_members:
@@ -9001,6 +9045,7 @@ bot.tree.add_command(showcase_group)
 @setticketautoclose.error
 @setreportschannel.error
 @setviewerrole.error
+@setbanrole.error
 @setwhitelistsync.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
