@@ -2276,6 +2276,8 @@ class RustRconConnection:
 
         if data.get("Type") == "Chat":
             await relay_rust_chat_to_discord(self.guild_id, data.get("Message", ""))
+        elif data.get("Type") == "Generic":
+            await relay_rust_joinleave_to_discord(self.guild_id, data.get("Message", ""))
 
     async def send_command(self, command: str, timeout: float = 10.0) -> str:
         if self.ws is None or not self.connected:
@@ -2331,6 +2333,43 @@ async def relay_rust_chat_to_discord(guild_id: int, raw_message: str):
         return
     try:
         await channel.send(f"🎮 **{username}**: {text}")
+    except discord.Forbidden:
+        pass
+
+
+async def relay_rust_joinleave_to_discord(guild_id: int, raw_message: str):
+    """Rust's console broadcasts join/disconnect notices as 'Generic' RCON
+    messages, wording varies a bit by server version (e.g. Facepunch vs
+    Carbon/Oxide), so this matches loosely on keywords rather than a strict
+    format. Anything that doesn't look like a join/leave line is ignored."""
+    if not raw_message:
+        return
+    text = raw_message.strip()
+    text_lower = text.lower()
+    if "joined" not in text_lower and "disconnecting" not in text_lower and "disconnected" not in text_lower:
+        return
+
+    cfg = get_guild_cfg(guild_id)
+    channel_id = cfg.get("rust_joinleave_channel_id")
+    if not channel_id:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+
+    # Typical formats: "PlayerName/76561198000000000/1.2.3.4 joined [...]"
+    # or "PlayerName/76561198000000000/1.2.3.4 disconnecting: reason"
+    name_part = text.split("/")[0].strip() if "/" in text else text.split(" ")[0]
+    is_join = "joined" in text_lower
+
+    try:
+        if is_join:
+            await channel.send(f"🟢 **{name_part}** joined the server.")
+        else:
+            await channel.send(f"🔴 **{name_part}** left the server.")
     except discord.Forbidden:
         pass
 
@@ -2723,6 +2762,27 @@ async def setrustchatchannel(interaction: discord.Interaction, channel: discord.
     save_config(config)
     await interaction.response.send_message(
         f"✅ {channel.mention} is now bridged with your Rust server's in-game chat. Requires RCON to be connected (see `/rust setserver`).",
+        ephemeral=True,
+    )
+
+
+@rust_group.command(name="setjoinleavechannel", description="Post an announcement whenever someone joins or leaves the Rust server.")
+@app_commands.describe(channel="The channel for join/leave announcements (omit to disable)")
+async def setrustjoinleavechannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    if channel is None:
+        cfg.pop("rust_joinleave_channel_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Join/leave announcements disabled.", ephemeral=True)
+        return
+    cfg["rust_joinleave_channel_id"] = channel.id
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ Join/leave announcements will now post in {channel.mention}. Requires RCON to be connected (see `/rust setserver`). "
+        "Note: exact message wording from the server varies a bit by version, so this uses best-effort matching.",
         ephemeral=True,
     )
 
