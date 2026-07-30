@@ -3136,6 +3136,31 @@ async def _maybe_sync_rust_ban(guild_id: int, user_id: int, reason: str):
         print(f"⚠️ Rust ban sync failed ({guild_id}/{user_id}): {e}")
 
 
+@rust_group.command(name="players", description="Show who's currently online on the Rust server.")
+async def rustplayers(interaction: discord.Interaction):
+    data = await rust_get_players(interaction.guild_id)
+    if data.get("error"):
+        await interaction.response.send_message(f"❌ {data['error']}", ephemeral=True)
+        return
+
+    players = data.get("players", [])
+    embed = discord.Embed(title="🎮 Rust — Online Now", color=discord.Color.dark_orange())
+    if not players:
+        embed.description = "Nobody online right now."
+    else:
+        lines = []
+        for p in players[:25]:  # embed field limits — keep it reasonable
+            name = p.get("DisplayName", "Unknown")
+            ping = p.get("Ping", "—")
+            connected = p.get("ConnectedSeconds", 0)
+            mins = connected // 60 if isinstance(connected, int) else "—"
+            lines.append(f"**{name}** — {ping}ms, {mins}m online")
+        embed.description = "\n".join(lines)
+        if len(players) > 25:
+            embed.set_footer(text=f"Showing 25 of {len(players)} online")
+    await interaction.response.send_message(embed=embed)
+
+
 bot.tree.add_command(rust_group)
 
 
