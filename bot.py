@@ -2335,6 +2335,14 @@ async def relay_rust_chat_to_discord(guild_id: int, raw_message: str):
         pass
 
 
+class RustConnectView(discord.ui.View):
+    """A single link-style button that opens Steam and connects straight to
+    the server — no callback needed, Discord handles link buttons natively."""
+    def __init__(self, host: str, connect_port: int):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(label="🔗 Connect", style=discord.ButtonStyle.link, url=f"steam://connect/{host}:{connect_port}"))
+
+
 def build_rust_status_embed(server_name: str, info: dict = None, error: str = None, seed: str = None, worldsize: str = None, fps: str = None) -> discord.Embed:
     embed = discord.Embed(title=f"🦀 {server_name}", color=discord.Color.dark_orange())
     if error:
@@ -2405,16 +2413,19 @@ async def refresh_rust_status_message(guild_id: int):
     except Exception as e:
         embed = build_rust_status_embed(host, error=str(e))
 
+    connect_port = cfg.get("rust_connect_port") or query_port
+    view = RustConnectView(host, connect_port)
+
     message_id = cfg.get("rust_status_message_id")
     if message_id:
         try:
             message = await channel.fetch_message(message_id)
-            await message.edit(embed=embed)
+            await message.edit(embed=embed, view=view)
             return
         except (discord.NotFound, discord.Forbidden):
             pass
     try:
-        message = await channel.send(embed=embed)
+        message = await channel.send(embed=embed, view=view)
         cfg["rust_status_message_id"] = message.id
         save_config(config)
     except discord.Forbidden:
@@ -2631,6 +2642,7 @@ async def rust_status_loop():
     query_port="Steam query port for live status (often the same as your game port)",
     rcon_port="RCON WebSocket port (optional — needed for chat bridge and commands)",
     rcon_password="RCON password (optional — needed for chat bridge and commands)",
+    connect_port="Game port players actually connect on, for the one-click Connect button (omit to use query_port)",
 )
 async def setrustserver(
     interaction: discord.Interaction,
@@ -2638,6 +2650,7 @@ async def setrustserver(
     query_port: int,
     rcon_port: int = None,
     rcon_password: str = None,
+    connect_port: int = None,
 ):
     if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
@@ -2645,6 +2658,7 @@ async def setrustserver(
     cfg = get_guild_cfg(interaction.guild_id)
     cfg["rust_host"] = host
     cfg["rust_query_port"] = query_port
+    cfg["rust_connect_port"] = connect_port or query_port
     save_config(config)
 
     msg = f"✅ Rust server set: `{host}:{query_port}`."
@@ -2754,7 +2768,8 @@ async def ruststatus(interaction: discord.Interaction):
     conn = rust_connections.get(interaction.guild_id)
     rcon_status = "🟢 Connected" if (conn and conn.connected) else ("🔴 Not connected" if cfg.get("rust_rcon_port") else "— Not configured")
     embed.add_field(name="RCON", value=rcon_status, inline=True)
-    await interaction.followup.send(embed=embed)
+    connect_port = cfg.get("rust_connect_port") or query_port
+    await interaction.followup.send(embed=embed, view=RustConnectView(host, connect_port))
 
 
 @rust_group.command(name="command", description="Run a command on the Rust server via RCON.")
