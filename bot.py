@@ -3875,11 +3875,12 @@ async def relay_incoming_webhook(guild_id: int, payload: dict) -> bool:
         return False
 
 
-async def web_set_rust_server(guild_id: int, host: str, query_port: int, rcon_port, rcon_password, actor_id: int) -> str:
-    """Mirrors /setrustserver."""
+async def web_set_rust_server(guild_id: int, host: str, query_port: int, rcon_port, rcon_password, actor_id: int, connect_port=None) -> str:
+    """Mirrors /rust setserver."""
     cfg = get_guild_cfg(guild_id)
     cfg["rust_host"] = host
     cfg["rust_query_port"] = query_port
+    cfg["rust_connect_port"] = connect_port or query_port
     save_config(config)
 
     msg = f"✅ Rust server set: {host}:{query_port}."
@@ -3947,7 +3948,7 @@ async def web_get_rust_status(guild_id: int) -> dict:
 
 
 async def web_rust_command(guild_id: int, cmd: str, actor_id: int) -> str:
-    """Mirrors /rustcommand."""
+    """Mirrors /rust command."""
     conn = rust_connections.get(guild_id)
     if conn is None or not conn.connected:
         return "❌ RCON isn't connected. Set up your RCON port and password first."
@@ -3956,6 +3957,186 @@ async def web_rust_command(guild_id: int, cmd: str, actor_id: int) -> str:
     except Exception as e:
         return f"❌ Command failed: {e}"
     return response.strip() if response and response.strip() else "(no output)"
+
+
+async def web_rust_set_wipe(guild_id: int, day, hour, channel_id, actor_id: int) -> str:
+    """Mirrors /rust setwipe."""
+    cfg = get_guild_cfg(guild_id)
+    if day is None:
+        cfg.pop("rust_wipe_day", None)
+        cfg.pop("rust_wipe_hour", None)
+        cfg.pop("rust_wipe_channel_id", None)
+        cfg.pop("rust_wipe_announced", None)
+        save_config(config)
+        return "✅ Wipe countdown disabled."
+    if hour is None or hour < 0 or hour > 23 or channel_id is None:
+        return "❌ Pick a day, an hour (0-23 UTC), and a channel."
+    cfg["rust_wipe_day"] = day
+    cfg["rust_wipe_hour"] = hour
+    cfg["rust_wipe_channel_id"] = channel_id
+    cfg["rust_wipe_announced"] = []
+    save_config(config)
+    next_wipe = _next_rust_wipe_datetime(day, hour)
+    return f"✅ Wipe scheduled. Next wipe: <t:{int(next_wipe.timestamp())}:F>."
+
+
+async def web_rust_set_popalert(guild_id: int, role_id, channel_id, threshold, actor_id: int) -> str:
+    """Mirrors /rust setpopalert."""
+    cfg = get_guild_cfg(guild_id)
+    if role_id is None:
+        cfg.pop("rust_pop_alert_role_id", None)
+        cfg.pop("rust_pop_alert_channel_id", None)
+        save_config(config)
+        return "✅ Rust population alerts disabled."
+    if channel_id is None:
+        return "❌ Pick a channel too."
+    cfg["rust_pop_alert_role_id"] = role_id
+    cfg["rust_pop_alert_channel_id"] = channel_id
+    if threshold is not None:
+        cfg["rust_pop_threshold"] = threshold
+    else:
+        cfg.pop("rust_pop_threshold", None)
+    save_config(config)
+    return "✅ Population alerts configured."
+
+
+async def web_rust_set_joinleave_channel(guild_id: int, channel_id, actor_id: int) -> str:
+    """Mirrors /rust setjoinleavechannel."""
+    cfg = get_guild_cfg(guild_id)
+    if channel_id is None:
+        cfg.pop("rust_joinleave_channel_id", None)
+        save_config(config)
+        return "✅ Join/leave announcements disabled."
+    cfg["rust_joinleave_channel_id"] = channel_id
+    save_config(config)
+    return "✅ Join/leave announcements enabled."
+
+
+async def web_rust_set_bansync(guild_id: int, enabled: bool, command_template, actor_id: int) -> str:
+    """Mirrors /rust setbansync."""
+    cfg = get_guild_cfg(guild_id)
+    cfg["rust_ban_sync_enabled"] = enabled
+    if command_template:
+        cfg["rust_ban_sync_command_template"] = command_template
+    save_config(config)
+    return f"✅ Ban sync is {'ON' if enabled else 'OFF'}."
+
+
+async def web_rust_set_rules(guild_id: int, text: str, actor_id: int) -> str:
+    """Mirrors /rust setrules."""
+    cfg = get_guild_cfg(guild_id)
+    cfg["rust_rules_text"] = text
+    save_config(config)
+    return "✅ Rules/info text saved."
+
+
+async def web_rust_save(guild_id: int, actor_id: int) -> str:
+    """Mirrors /rust save."""
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return "❌ RCON isn't connected."
+    try:
+        await conn.send_command("server.save")
+    except Exception as e:
+        return f"❌ Save failed: {e}"
+    return "✅ Server save triggered."
+
+
+async def web_rust_restart(guild_id: int, seconds: int, actor_id: int) -> str:
+    """Mirrors /rust restart — no confirmation step, submitting the web form is the confirmation."""
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return "❌ RCON isn't connected."
+    if seconds < 10:
+        return "❌ Give players at least 10 seconds of warning."
+    try:
+        await conn.send_command(f"restart {seconds}")
+    except Exception as e:
+        return f"❌ Restart failed: {e}"
+    return f"✅ Restart scheduled in {seconds} seconds."
+
+
+async def web_rust_announce(guild_id: int, message: str, actor_id: int) -> str:
+    """Mirrors /rust announce."""
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return "❌ RCON isn't connected."
+    try:
+        await conn.send_command(f'say "{message}"')
+    except Exception as e:
+        return f"❌ Announce failed: {e}"
+    return f"✅ Broadcasted: {message}"
+
+
+async def web_rust_macro_add(guild_id: int, name: str, command: str, actor_id: int) -> str:
+    """Mirrors /rustmacro macroadd."""
+    cfg = get_guild_cfg(guild_id)
+    macros = cfg.setdefault("rust_macros", {})
+    name_key = name.lower().strip()
+    is_update = name_key in macros
+    macros[name_key] = command
+    save_config(config)
+    return f"✅ {'Updated' if is_update else 'Saved'} macro `{name_key}`."
+
+
+async def web_rust_macro_remove(guild_id: int, name: str, actor_id: int) -> str:
+    """Mirrors /rustmacro macroremove."""
+    cfg = get_guild_cfg(guild_id)
+    macros = cfg.get("rust_macros", {})
+    name_key = name.lower().strip()
+    if name_key not in macros:
+        return f"❌ No macro named `{name_key}`."
+    del macros[name_key]
+    save_config(config)
+    return f"✅ Removed macro `{name_key}`."
+
+
+async def web_rust_macro_run(guild_id: int, name: str, player, actor_id: int) -> str:
+    """Mirrors /rustmacro macrorun."""
+    cfg = get_guild_cfg(guild_id)
+    macros = cfg.get("rust_macros", {})
+    name_key = name.lower().strip()
+    if name_key not in macros:
+        return f"❌ No macro named `{name_key}`."
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return "❌ RCON isn't connected."
+    command = macros[name_key]
+    if "{player}" in command:
+        if not player:
+            return "❌ This macro needs a player value."
+        command = command.format(player=player)
+    try:
+        response = await conn.send_command(command)
+    except Exception as e:
+        return f"❌ Macro failed: {e}"
+    display = response.strip() if response and response.strip() else "(no output)"
+    return f"✅ Ran `{name_key}`: {display}"
+
+
+async def web_rust_announcement_add(guild_id: int, message: str, interval_minutes: int, actor_id: int) -> str:
+    """Mirrors /rustmacro addannouncement."""
+    if interval_minutes < 5:
+        return "❌ Minimum interval is 5 minutes."
+    cfg = get_guild_cfg(guild_id)
+    announcements = cfg.setdefault("rust_recurring_announcements", [])
+    announcements.append({
+        "message": message, "interval_minutes": interval_minutes,
+        "last_sent": datetime.now(timezone.utc).isoformat(),
+    })
+    save_config(config)
+    return f"✅ Added — every {interval_minutes} minute(s): \"{message}\""
+
+
+async def web_rust_announcement_remove(guild_id: int, index: int, actor_id: int) -> str:
+    """Mirrors /rustmacro removeannouncement."""
+    cfg = get_guild_cfg(guild_id)
+    announcements = cfg.get("rust_recurring_announcements", [])
+    if index < 1 or index > len(announcements):
+        return "❌ Invalid index."
+    removed = announcements.pop(index - 1)
+    save_config(config)
+    return f"✅ Removed: \"{removed['message']}\""
 
 
 async def rust_get_players(guild_id: int) -> dict:
@@ -8863,5 +9044,9 @@ if __name__ == "__main__":
         web_set_ticket_autoclose,
         web_set_reports_channel, web_report_set_status,
         fetch_discord_audit_log,
+        web_rust_set_wipe, web_rust_set_popalert, web_rust_set_joinleave_channel, web_rust_set_bansync,
+        web_rust_set_rules, web_rust_save, web_rust_restart, web_rust_announce,
+        web_rust_macro_add, web_rust_macro_remove, web_rust_macro_run,
+        web_rust_announcement_add, web_rust_announcement_remove,
     )
     bot.run(TOKEN)

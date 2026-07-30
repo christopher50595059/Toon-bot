@@ -125,6 +125,19 @@ _set_ticket_autoclose = None
 _set_reports_channel = None
 _report_set_status = None
 _fetch_discord_audit_log = None
+_rust_set_wipe = None
+_rust_set_popalert = None
+_rust_set_joinleave_channel = None
+_rust_set_bansync = None
+_rust_set_rules = None
+_rust_save = None
+_rust_restart = None
+_rust_announce = None
+_rust_macro_add = None
+_rust_macro_remove = None
+_rust_macro_run = None
+_rust_announcement_add = None
+_rust_announcement_remove = None
 
 
 # ---------- shared page chrome ----------
@@ -348,6 +361,7 @@ SIDENAV_SECTIONS = [
         ("rust_page", "🦀", "Rust: Overview"),
         ("rust_players_page", "🎮", "Rust: Players"),
         ("rust_bans_page", "🚫", "Rust: Bans"),
+        ("rust_macros_page", "⚡", "Rust: Macros"),
         ("minecraft_page", "⛏️", "Minecraft: Overview"),
         ("minecraft_players_page", "🎮", "Minecraft: Players"),
         ("minecraft_bans_page", "🚫", "Minecraft: Bans"),
@@ -1224,6 +1238,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/setup"><span>🧭</span>Setup Wizard</a>
         <a class="action-tile" href="/dashboard/{guild_id}/gameservers"><span>🕹️</span>Game Servers</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust"><span>🦀</span>Rust Server</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/rust/macros"><span>⚡</span>Rust Macros</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/players"><span>🎮</span>Rust Players</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/bans"><span>🚫</span>Rust Bans</a>
         <a class="action-tile" href="/dashboard/{guild_id}/minecraft"><span>⛏️</span>Minecraft Server</a>
@@ -3863,6 +3878,7 @@ def rust_page(guild_id):
           <div class="field"><label>RCON Port (optional)</label><input type="number" name="rcon_port" value="{cfg.get('rust_rcon_port', '')}" placeholder="28016"></div>
           <div class="field"><label>RCON Password (optional)</label><input type="password" name="rcon_password" placeholder="Leave blank to keep unchanged"></div>
         </div>
+        <div class="field"><label>Connect Port (for the one-click Connect button — blank = same as Query Port)</label><input type="number" name="connect_port" value="{cfg.get('rust_connect_port', '')}" placeholder="28015"></div>
         <button class="btn" type="submit">Save & Connect</button>
       </form>
     </div>
@@ -3902,6 +3918,96 @@ def rust_page(guild_id):
         <button class="btn btn-secondary" type="submit">Run</button>
       </form>
     </div>
+
+    <div class="card-row">
+      <div class="card">
+        <h2>💾 Quick Save</h2>
+        <div class="hint" style="margin-bottom:12px;">Trigger an immediate server save.</div>
+        <form method="post" action="/dashboard/{guild_id}/rust/save">
+          <button class="btn btn-secondary" type="submit">Save Now</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>🔄 Restart</h2>
+        <div class="hint" style="margin-bottom:12px;">Schedules a restart with a countdown warning to players.</div>
+        <form method="post" action="/dashboard/{guild_id}/rust/restart">
+          <div class="field"><label>Seconds</label><input type="number" name="seconds" value="60" min="10" required></div>
+          <button class="btn btn-secondary" type="submit">Restart Server</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>📢 Broadcast</h2>
+        <div class="hint" style="margin-bottom:12px;">Send a one-off message to everyone in-game.</div>
+        <form method="post" action="/dashboard/{guild_id}/rust/announce">
+          <div class="field"><label>Message</label><input type="text" name="message" placeholder="Server restarting soon!" required></div>
+          <button class="btn btn-secondary" type="submit">Broadcast</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>🔧 Wipe Schedule</h2>
+      <div class="hint" style="margin-bottom:12px;">Auto-announces a countdown at 24h, 12h, and 1h before wipe.
+        {"<br>Currently scheduled." if cfg.get("rust_wipe_day") is not None else "<br>Not scheduled."}</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/wipe">
+        <div class="grid-2">
+          <div class="field">
+            <label>Day (UTC)</label>
+            <select name="day">
+              <option value="">— Disabled —</option>
+              {"".join(f'<option value="{i}" {"selected" if cfg.get("rust_wipe_day") == i else ""}>{d}</option>' for i, d in enumerate(["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]))}
+            </select>
+          </div>
+          <div class="field"><label>Hour (0-23 UTC)</label><input type="number" name="hour" min="0" max="23" value="{cfg.get('rust_wipe_hour', '')}"></div>
+        </div>
+        {_channel_search_field("Announcement channel", "channel_id", guild, cfg.get("rust_wipe_channel_id"))}
+        <button class="btn" type="submit">Save Wipe Schedule</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>📊 Population Alerts</h2>
+      <div class="hint" style="margin-bottom:12px;">Pings a role when the server hits a player threshold (defaults to full).
+        {"<br>Currently ON." if cfg.get("rust_pop_alert_role_id") else "<br>Currently OFF."}</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/popalert">
+        {_role_search_field("Role to ping", "role_id", guild, cfg.get("rust_pop_alert_role_id"))}
+        {_channel_search_field("Alert channel", "channel_id", guild, cfg.get("rust_pop_alert_channel_id"))}
+        <div class="field"><label>Threshold (blank = server's max player count)</label><input type="number" name="threshold" value="{cfg.get('rust_pop_threshold', '')}"></div>
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🟢🔴 Join/Leave Announcements</h2>
+      <div class="hint" style="margin-bottom:12px;">Posts when someone connects or disconnects. Best-effort message parsing — wording varies slightly by server version.
+        {"<br>Currently ON." if cfg.get("rust_joinleave_channel_id") else "<br>Currently OFF."}</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/joinleave">
+        {_channel_search_field("Channel", "channel_id", guild, cfg.get("rust_joinleave_channel_id"))}
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🔨 Ban Sync</h2>
+      <div class="hint" style="margin-bottom:12px;">Auto-bans on Rust too whenever someone is Discord-banned (requires a linked SteamID via /linksteam).
+        {"<br>Currently ON." if cfg.get("rust_ban_sync_enabled") else "<br>Currently OFF."}</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/bansync">
+        <input type="hidden" name="enabled" value="{'false' if cfg.get('rust_ban_sync_enabled') else 'true'}">
+        <div class="field"><label>Command template (optional)</label><input type="text" name="command_template" placeholder='ban {{steamid}} "{{reason}}"' value="{cfg.get('rust_ban_sync_command_template', '')}"></div>
+        <button class="btn" type="submit">{"Turn Off" if cfg.get("rust_ban_sync_enabled") else "Turn On"}</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>📋 Server Info / Rules</h2>
+      <div class="hint" style="margin-bottom:12px;">Shown to members via /rust info, alongside a Connect button and your wipe schedule.</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/rules">
+        <div class="field"><label>Rules / info text</label><textarea name="text" rows="5" style="width:100%; background:#0e1016; border:1px solid var(--border); color:var(--text); padding:9px 11px; border-radius:8px; font-family:inherit; font-size:14px;">{html.escape(cfg.get('rust_rules_text', ''))}</textarea></div>
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
     """
     return render_page(f"{guild.name} — Rust Server", body, guild_id=guild_id)
 
@@ -3932,7 +4038,14 @@ def rust_connect_route(guild_id):
     if rcon_port and not rcon_password:
         rcon_password = cfg.get("rust_rcon_password")
 
-    result = _run_async(_set_rust_server(guild_id, host, query_port, rcon_port, rcon_password, session["user_id"]))
+    connect_port = None
+    if request.form.get("connect_port"):
+        try:
+            connect_port = int(request.form["connect_port"])
+        except ValueError:
+            connect_port = None
+
+    result = _run_async(_set_rust_server(guild_id, host, query_port, rcon_port, rcon_password, session["user_id"], connect_port))
     return redirect(url_for("rust_page", guild_id=guild_id, result=result))
 
 
@@ -3990,6 +4103,102 @@ def rust_command_route(guild_id):
         return redirect(url_for("rust_page", guild_id=guild_id, result="❌ Enter a command."))
     result = _run_async(_rust_command(guild_id, cmd, session["user_id"]))
     return redirect(url_for("rust_page", guild_id=guild_id, result=f"📟 {result}"))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/save", methods=["POST"])
+def rust_save_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    result = _run_async(_rust_save(guild_id, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/restart", methods=["POST"])
+def rust_restart_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        seconds = int(request.form.get("seconds", 60))
+    except ValueError:
+        seconds = 60
+    result = _run_async(_rust_restart(guild_id, seconds, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/announce", methods=["POST"])
+def rust_announce_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    message = request.form.get("message", "").strip()
+    if not message:
+        return redirect(url_for("rust_page", guild_id=guild_id, result="❌ Enter a message."))
+    result = _run_async(_rust_announce(guild_id, message, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/wipe", methods=["POST"])
+def rust_wipe_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw_day = request.form.get("day", "")
+    day = int(raw_day) if raw_day != "" else None
+    raw_hour = request.form.get("hour", "")
+    hour = int(raw_hour) if raw_hour != "" else None
+    raw_channel = request.form.get("channel_id", "")
+    channel_id = int(raw_channel) if raw_channel else None
+    result = _run_async(_rust_set_wipe(guild_id, day, hour, channel_id, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/popalert", methods=["POST"])
+def rust_popalert_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw_role = request.form.get("role_id", "")
+    role_id = int(raw_role) if raw_role else None
+    raw_channel = request.form.get("channel_id", "")
+    channel_id = int(raw_channel) if raw_channel else None
+    raw_threshold = request.form.get("threshold", "")
+    threshold = int(raw_threshold) if raw_threshold else None
+    result = _run_async(_rust_set_popalert(guild_id, role_id, channel_id, threshold, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/joinleave", methods=["POST"])
+def rust_joinleave_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw = request.form.get("channel_id", "")
+    channel_id = int(raw) if raw else None
+    result = _run_async(_rust_set_joinleave_channel(guild_id, channel_id, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/bansync", methods=["POST"])
+def rust_bansync_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    enabled = request.form.get("enabled", "false") == "true"
+    command_template = request.form.get("command_template", "").strip() or None
+    result = _run_async(_rust_set_bansync(guild_id, enabled, command_template, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/rules", methods=["POST"])
+def rust_rules_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    text = request.form.get("text", "").strip()
+    result = _run_async(_rust_set_rules(guild_id, text, session["user_id"]))
+    return redirect(url_for("rust_page", guild_id=guild_id, result=result))
 
 
 @app.route("/dashboard/<int:guild_id>/rust/players")
@@ -4226,6 +4435,174 @@ def rust_bans_unban_route(guild_id):
         return redirect(url_for("rust_bans_page", guild_id=guild_id, result="❌ Missing SteamID."))
     result = _run_async(_rust_unban_player(guild_id, steam_id, session["user_id"]))
     return redirect(url_for("rust_bans_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/macros")
+def rust_macros_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    macros = cfg.get("rust_macros", {})
+    macro_rows = ""
+    if macros:
+        for name, command in macros.items():
+            safe_name = html.escape(name)
+            macro_rows += f"""
+            <tr>
+              <td>{safe_name}</td>
+              <td class="hint">{html.escape(command)}</td>
+              <td style="white-space:nowrap;">
+                <form method="post" action="/dashboard/{guild_id}/rust/macros/run" style="display:inline;">
+                  <input type="hidden" name="name" value="{safe_name}">
+                  <input type="text" name="player" placeholder="SteamID (if needed)" style="width:140px; display:inline-block;">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Run</button>
+                </form>
+                <form method="post" action="/dashboard/{guild_id}/rust/macros/remove" style="display:inline;">
+                  <input type="hidden" name="name" value="{safe_name}">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        macro_rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No macros saved yet.</td></tr>'
+
+    announcements = cfg.get("rust_recurring_announcements", [])
+    announcement_rows = ""
+    if announcements:
+        for i, a in enumerate(announcements, start=1):
+            announcement_rows += f"""
+            <tr>
+              <td>{i}</td>
+              <td>{html.escape(a.get('message', ''))}</td>
+              <td>{a.get('interval_minutes', '')} min</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/rust/macros/announcements/remove" style="margin:0;">
+                  <input type="hidden" name="index" value="{i}">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        announcement_rows = '<tr><td colspan="4" class="hint" style="padding:16px;">No recurring announcements yet.</td></tr>'
+
+    body = f"""
+    <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
+    <h1 style="margin-top:18px;">⚡ Rust Macros & Announcements</h1>
+    {result_html}
+
+    <div class="card">
+      <h2>➕ Save a macro</h2>
+      <div class="hint" style="margin-bottom:12px;">Use <code>{{player}}</code> anywhere you want a SteamID substituted in when the macro runs.</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/macros/add">
+        <div class="grid-2">
+          <div class="field"><label>Name</label><input type="text" name="name" placeholder="starterkit" required></div>
+          <div class="field"><label>RCON command</label><input type="text" name="command" placeholder="inventory.give {{player}} rifle.ak 1" required></div>
+        </div>
+        <button class="btn" type="submit">Save Macro</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Saved macros</h2>
+      {_table_search_box("rust-macros-table")}
+      <div class="log-wrap"><table class="log-table" id="rust-macros-table">
+        <tr><th>Name</th><th>Command</th><th></th></tr>
+        {macro_rows}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>➕ Add a recurring announcement</h2>
+      <form method="post" action="/dashboard/{guild_id}/rust/macros/announcements/add">
+        <div class="field"><label>Message</label><input type="text" name="message" placeholder="Vote for the server at..." required></div>
+        <div class="field"><label>Repeat every (minutes, min 5)</label><input type="number" name="interval_minutes" min="5" value="60" required></div>
+        <button class="btn" type="submit">Add</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Recurring announcements</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>#</th><th>Message</th><th>Interval</th><th></th></tr>
+        {announcement_rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Rust Macros", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/rust/macros/add", methods=["POST"])
+def rust_macros_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    command = request.form.get("command", "").strip()
+    if not name or not command:
+        return redirect(url_for("rust_macros_page", guild_id=guild_id, result="❌ Fill in both fields."))
+    result = _run_async(_rust_macro_add(guild_id, name, command, session["user_id"]))
+    return redirect(url_for("rust_macros_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/macros/remove", methods=["POST"])
+def rust_macros_remove_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    if not name:
+        return redirect(url_for("rust_macros_page", guild_id=guild_id, result="❌ Missing macro name."))
+    result = _run_async(_rust_macro_remove(guild_id, name, session["user_id"]))
+    return redirect(url_for("rust_macros_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/macros/run", methods=["POST"])
+def rust_macros_run_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    player = request.form.get("player", "").strip() or None
+    if not name:
+        return redirect(url_for("rust_macros_page", guild_id=guild_id, result="❌ Missing macro name."))
+    result = _run_async(_rust_macro_run(guild_id, name, player, session["user_id"]))
+    return redirect(url_for("rust_macros_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/macros/announcements/add", methods=["POST"])
+def rust_announcements_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    message = request.form.get("message", "").strip()
+    try:
+        interval_minutes = int(request.form.get("interval_minutes", 60))
+    except ValueError:
+        interval_minutes = 60
+    if not message:
+        return redirect(url_for("rust_macros_page", guild_id=guild_id, result="❌ Enter a message."))
+    result = _run_async(_rust_announcement_add(guild_id, message, interval_minutes, session["user_id"]))
+    return redirect(url_for("rust_macros_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/macros/announcements/remove", methods=["POST"])
+def rust_announcements_remove_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        index = int(request.form.get("index", 0))
+    except ValueError:
+        index = 0
+    result = _run_async(_rust_announcement_remove(guild_id, index, session["user_id"]))
+    return redirect(url_for("rust_macros_page", guild_id=guild_id, result=result))
 
 
 # ---------- Minecraft server integration ----------
@@ -5763,6 +6140,10 @@ def start_web_app(
     set_ticket_autoclose,
     set_reports_channel, report_set_status,
     fetch_discord_audit_log,
+    rust_set_wipe, rust_set_popalert, rust_set_joinleave_channel, rust_set_bansync,
+    rust_set_rules, rust_save, rust_restart, rust_announce,
+    rust_macro_add, rust_macro_remove, rust_macro_run,
+    rust_announcement_add, rust_announcement_remove,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -5793,6 +6174,10 @@ def start_web_app(
     global _set_ticket_autoclose
     global _set_reports_channel, _report_set_status
     global _fetch_discord_audit_log
+    global _rust_set_wipe, _rust_set_popalert, _rust_set_joinleave_channel, _rust_set_bansync
+    global _rust_set_rules, _rust_save, _rust_restart, _rust_announce
+    global _rust_macro_add, _rust_macro_remove, _rust_macro_run
+    global _rust_announcement_add, _rust_announcement_remove
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -5873,6 +6258,19 @@ def start_web_app(
     _set_reports_channel = set_reports_channel
     _report_set_status = report_set_status
     _fetch_discord_audit_log = fetch_discord_audit_log
+    _rust_set_wipe = rust_set_wipe
+    _rust_set_popalert = rust_set_popalert
+    _rust_set_joinleave_channel = rust_set_joinleave_channel
+    _rust_set_bansync = rust_set_bansync
+    _rust_set_rules = rust_set_rules
+    _rust_save = rust_save
+    _rust_restart = rust_restart
+    _rust_announce = rust_announce
+    _rust_macro_add = rust_macro_add
+    _rust_macro_remove = rust_macro_remove
+    _rust_macro_run = rust_macro_run
+    _rust_announcement_add = rust_announcement_add
+    _rust_announcement_remove = rust_announcement_remove
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 
