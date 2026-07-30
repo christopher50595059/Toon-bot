@@ -2931,7 +2931,10 @@ async def rustannounce(interaction: discord.Interaction, message: str):
     await interaction.followup.send(f"✅ Broadcasted to the server: {message}", ephemeral=True)
 
 
-@rust_group.command(name="addannouncement", description="Add a message that auto-broadcasts to the server on a repeating timer.")
+rustmacro_group = app_commands.Group(name="rustmacro", description="Recurring announcements and saved RCON macros for Rust")
+
+
+@rustmacro_group.command(name="addannouncement", description="Add a message that auto-broadcasts to the server on a repeating timer.")
 @app_commands.describe(message="What to broadcast", interval_minutes="How often to repeat it, in minutes")
 async def rustaddannouncement(interaction: discord.Interaction, message: str, interval_minutes: int):
     if not is_authorized(interaction):
@@ -2952,8 +2955,8 @@ async def rustaddannouncement(interaction: discord.Interaction, message: str, in
     )
 
 
-@rust_group.command(name="removeannouncement", description="Remove a recurring announcement.")
-@app_commands.describe(index="The number shown in /rust listannouncements")
+@rustmacro_group.command(name="removeannouncement", description="Remove a recurring announcement.")
+@app_commands.describe(index="The number shown in /rustmacro listannouncements")
 async def rustremoveannouncement(interaction: discord.Interaction, index: int):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
@@ -2961,14 +2964,14 @@ async def rustremoveannouncement(interaction: discord.Interaction, index: int):
     cfg = get_guild_cfg(interaction.guild_id)
     announcements = cfg.get("rust_recurring_announcements", [])
     if index < 1 or index > len(announcements):
-        await interaction.response.send_message("❌ Invalid index — check `/rust listannouncements`.", ephemeral=True)
+        await interaction.response.send_message("❌ Invalid index — check `/rustmacro listannouncements`.", ephemeral=True)
         return
     removed = announcements.pop(index - 1)
     save_config(config)
     await interaction.response.send_message(f"✅ Removed: \"{removed['message']}\"", ephemeral=True)
 
 
-@rust_group.command(name="listannouncements", description="Show all recurring announcements.")
+@rustmacro_group.command(name="listannouncements", description="Show all recurring announcements.")
 async def rustlistannouncements(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
     announcements = cfg.get("rust_recurring_announcements", [])
@@ -3003,7 +3006,7 @@ async def check_rust_recurring_announcements(guild_id: int):
         save_config(config)
 
 
-@rust_group.command(name="macroadd", description="Save a named RCON command shortcut, so you don't have to retype it every time.")
+@rustmacro_group.command(name="macroadd", description="Save a named RCON command shortcut, so you don't have to retype it every time.")
 @app_commands.describe(
     name="A short name for this macro",
     command="The RCON command to run — use {player} anywhere you want a target's SteamID substituted in",
@@ -3022,7 +3025,7 @@ async def rustmacroadd(interaction: discord.Interaction, name: str, command: str
     await interaction.response.send_message(f"✅ {verb} macro `{name_key}`: `{command}`", ephemeral=True)
 
 
-@rust_group.command(name="macrorun", description="Run a saved RCON macro.")
+@rustmacro_group.command(name="macrorun", description="Run a saved RCON macro.")
 @app_commands.describe(name="The macro's name", player="SteamID to substitute for {player} in the macro, if it uses that placeholder")
 async def rustmacrorun(interaction: discord.Interaction, name: str, player: str = None):
     if not is_authorized(interaction):
@@ -3032,7 +3035,7 @@ async def rustmacrorun(interaction: discord.Interaction, name: str, player: str 
     macros = cfg.get("rust_macros", {})
     name_key = name.lower().strip()
     if name_key not in macros:
-        await interaction.response.send_message(f"❌ No macro named `{name_key}`. Check `/rust macrolist`.", ephemeral=True)
+        await interaction.response.send_message(f"❌ No macro named `{name_key}`. Check `/rustmacro macrolist`.", ephemeral=True)
         return
     conn = rust_connections.get(interaction.guild_id)
     if conn is None or not conn.connected:
@@ -3058,7 +3061,7 @@ async def rustmacrorun(interaction: discord.Interaction, name: str, player: str 
     await interaction.followup.send(f"✅ Ran `{name_key}`:\n```\n{display}\n```", ephemeral=True)
 
 
-@rust_group.command(name="macroremove", description="Remove a saved RCON macro.")
+@rustmacro_group.command(name="macroremove", description="Remove a saved RCON macro.")
 @app_commands.describe(name="The macro's name")
 async def rustmacroremove(interaction: discord.Interaction, name: str):
     if not is_authorized(interaction):
@@ -3075,7 +3078,7 @@ async def rustmacroremove(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(f"✅ Removed macro `{name_key}`.", ephemeral=True)
 
 
-@rust_group.command(name="macrolist", description="Show all saved RCON macros.")
+@rustmacro_group.command(name="macrolist", description="Show all saved RCON macros.")
 async def rustmacrolist(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
     macros = cfg.get("rust_macros", {})
@@ -3084,6 +3087,9 @@ async def rustmacrolist(interaction: discord.Interaction):
         return
     lines = [f"**{name}** → `{command}`" for name, command in macros.items()]
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+bot.tree.add_command(rustmacro_group)
 
 
 @rust_group.command(name="setbansync", description="Auto-ban on Rust too whenever someone is Discord-banned (if they've linked their SteamID).")
