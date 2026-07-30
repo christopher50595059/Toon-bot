@@ -68,15 +68,18 @@ Commands:
   /setticketquestions index:<int> [q1..q5] - set intake questions asked before that ticket type opens
   /listticketcategories                   - show all configured ticket types
   /ticket                                 - open a private support ticket with staff
-  /setrustserver host:<ip> query_port:<int> [rcon_port] [rcon_password] - (admin only) connect to your Rust server
-  /setrustchatchannel [channel]           - (admin only) bridge Discord chat with in-game chat (needs RCON)
-  /setruststatuschannel [channel]         - (admin only) post a live Rust server status embed
-  /ruststatus                             - show current Rust server status
-  /rustcommand cmd:<text>                 - run an RCON command on the Rust server
-  /setminecraftserver host:<ip> [port] [rcon_port] [rcon_password] - (admin only) connect to your Minecraft server
-  /setminecraftstatuschannel [channel]    - (admin only) post a live Minecraft server status embed
-  /minecraftstatus                        - show current Minecraft server status
-  /minecraftcommand cmd:<text>            - run an RCON command on the Minecraft server
+  /rust setserver host:<ip> query_port:<int> [rcon_port] [rcon_password] - (admin only) connect to your Rust server
+  /rust setchatchannel [channel]          - (admin only) bridge Discord chat with in-game chat (needs RCON)
+  /rust setstatuschannel [channel]        - (admin only) post a live Rust server status embed
+  /rust status                            - show current Rust server status
+  /rust command cmd:<text>                - run an RCON command on the Rust server
+  /rust setpopalert [role] [channel] [threshold] - (admin only) ping a role at a population threshold
+  /rust setwipe [day] [hour] [channel]    - (admin only) schedule a weekly wipe countdown (24h/12h/1h announcements)
+  /rust wipe                              - show time until the next scheduled Rust wipe
+  /minecraft setserver host:<ip> [port] [rcon_port] [rcon_password] - (admin only) connect to your Minecraft server
+  /minecraft setstatuschannel [channel]   - (admin only) post a live Minecraft server status embed
+  /minecraft status                       - show current Minecraft server status
+  /minecraft command cmd:<text>           - run an RCON command on the Minecraft server
   /evaluate [user]                        - show message activity for the current week (leaderboard or one person); auto-resets weekly
   /setbirthday month:<1-12> day:<1-31>    - set your own birthday
   /removebirthday                         - remove your saved birthday
@@ -117,9 +120,6 @@ Commands:
   /addrankbonusrole rank:<role> bonus_role:<role> - auto-grant an extra role when someone reaches a rank
   /removerankbonusrole rank:<role> bonus_role:<role> - stop auto-granting that extra role
   /listrankbonusroles                     - show which extra roles get auto-granted at each rank
-  /setrustpopalert [role] [channel] [threshold] - (admin only) ping a role when Rust hits a population threshold
-  /setrustwipe [day] [hour] [channel]     - (admin only) schedule a weekly wipe countdown (24h/12h/1h announcements)
-  /rustwipe                               - show time until the next scheduled Rust wipe
   /help                                   - show every command, grouped by category
 
 Only server admins can run the "set" commands. Only members with the
@@ -2531,8 +2531,10 @@ async def check_rust_wipe_countdown(guild_id: int):
             save_config(config)
 
 
-@bot.tree.command(name="setrustwipe", description="Schedule a weekly wipe countdown — auto-announces at 24h, 12h, and 1h before.")
-@app_commands.checks.has_permissions(administrator=True)
+rust_group = app_commands.Group(name="rust", description="Rust server integration")
+
+
+@rust_group.command(name="setwipe", description="Schedule a weekly wipe countdown — auto-announces at 24h, 12h, and 1h before.")
 @app_commands.describe(day="Day of the week the server wipes", hour="Hour of the wipe, 0-23 UTC", channel="Where to post countdown announcements")
 @app_commands.choices(day=[
     app_commands.Choice(name="Monday", value=0), app_commands.Choice(name="Tuesday", value=1),
@@ -2541,6 +2543,9 @@ async def check_rust_wipe_countdown(guild_id: int):
     app_commands.Choice(name="Sunday", value=6),
 ])
 async def setrustwipe(interaction: discord.Interaction, day: app_commands.Choice[int] = None, hour: int = None, channel: discord.TextChannel = None):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     if day is None:
         cfg.pop("rust_wipe_day", None)
@@ -2571,13 +2576,13 @@ async def setrustwipe(interaction: discord.Interaction, day: app_commands.Choice
     )
 
 
-@bot.tree.command(name="rustwipe", description="Show the time until the next scheduled Rust wipe.")
+@rust_group.command(name="wipe", description="Show the time until the next scheduled Rust wipe.")
 async def rustwipe(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
     wipe_day = cfg.get("rust_wipe_day")
     wipe_hour = cfg.get("rust_wipe_hour")
     if wipe_day is None or wipe_hour is None:
-        await interaction.response.send_message("❌ No wipe schedule set up yet. Ask an admin to run /setrustwipe.", ephemeral=True)
+        await interaction.response.send_message("❌ No wipe schedule set up yet. Ask an admin to run /rust setwipe.", ephemeral=True)
         return
     next_wipe = _next_rust_wipe_datetime(wipe_day, wipe_hour)
     await interaction.response.send_message(
@@ -2603,8 +2608,7 @@ async def rust_status_loop():
             await check_rust_wipe_countdown(guild_id)
 
 
-@bot.tree.command(name="setrustserver", description="Connect this server to your Rust game server.")
-@app_commands.checks.has_permissions(administrator=True)
+@rust_group.command(name="setserver", description="Connect this server to your Rust game server.")
 @app_commands.describe(
     host="Your Rust server's IP address or domain (no port)",
     query_port="Steam query port for live status (often the same as your game port)",
@@ -2618,6 +2622,9 @@ async def setrustserver(
     rcon_port: int = None,
     rcon_password: str = None,
 ):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     cfg["rust_host"] = host
     cfg["rust_query_port"] = query_port
@@ -2629,19 +2636,21 @@ async def setrustserver(
         cfg["rust_rcon_password"] = rcon_password
         save_config(config)
         start_rust_connection(interaction.guild_id, host, rcon_port, rcon_password)
-        msg += " RCON is connecting now — check `/ruststatus` in a moment to confirm."
+        msg += " RCON is connecting now — check `/rust status` in a moment to confirm."
 
     await interaction.response.send_message(msg, ephemeral=True)
 
 
-@bot.tree.command(name="setrustpopalert", description="Ping a role when your Rust server hits a population threshold.")
-@app_commands.checks.has_permissions(administrator=True)
+@rust_group.command(name="setpopalert", description="Ping a role when your Rust server hits a population threshold.")
 @app_commands.describe(
     role="Role to ping when the threshold is crossed — omit to disable",
     channel="Channel to post the alert in",
     threshold="Player count that counts as 'full' — omit to use the server's actual max player count",
 )
 async def setrustpopalert(interaction: discord.Interaction, role: discord.Role = None, channel: discord.TextChannel = None, threshold: int = None):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     if role is None:
         cfg.pop("rust_pop_alert_role_id", None)
@@ -2667,11 +2676,12 @@ async def setrustpopalert(interaction: discord.Interaction, role: discord.Role =
     )
 
 
-
-@bot.tree.command(name="setrustchatchannel", description="Bridge this channel's chat with your Rust server (both ways).")
-@app_commands.checks.has_permissions(administrator=True)
+@rust_group.command(name="setchatchannel", description="Bridge this channel's chat with your Rust server (both ways).")
 @app_commands.describe(channel="The channel to bridge (omit to disable)")
 async def setrustchatchannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     if channel is None:
         cfg.pop("rust_chat_channel_id", None)
@@ -2681,15 +2691,17 @@ async def setrustchatchannel(interaction: discord.Interaction, channel: discord.
     cfg["rust_chat_channel_id"] = channel.id
     save_config(config)
     await interaction.response.send_message(
-        f"✅ {channel.mention} is now bridged with your Rust server's in-game chat. Requires RCON to be connected (see `/setrustserver`).",
+        f"✅ {channel.mention} is now bridged with your Rust server's in-game chat. Requires RCON to be connected (see `/rust setserver`).",
         ephemeral=True,
     )
 
 
-@bot.tree.command(name="setruststatuschannel", description="Post a live server status embed in this channel.")
-@app_commands.checks.has_permissions(administrator=True)
+@rust_group.command(name="setstatuschannel", description="Post a live server status embed in this channel.")
 @app_commands.describe(channel="The channel to post live status in (omit to disable)")
 async def setruststatuschannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     if channel is None:
         cfg.pop("rust_status_channel_id", None)
@@ -2704,13 +2716,13 @@ async def setruststatuschannel(interaction: discord.Interaction, channel: discor
     await refresh_rust_status_message(interaction.guild_id)
 
 
-@bot.tree.command(name="ruststatus", description="Show the Rust server's current status.")
+@rust_group.command(name="status", description="Show the Rust server's current status.")
 async def ruststatus(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
     host = cfg.get("rust_host")
     query_port = cfg.get("rust_query_port")
     if not host or not query_port:
-        await interaction.response.send_message("❌ No Rust server set up yet. Run `/setrustserver` first.", ephemeral=True)
+        await interaction.response.send_message("❌ No Rust server set up yet. Run `/rust setserver` first.", ephemeral=True)
         return
 
     await interaction.response.defer()
@@ -2727,7 +2739,7 @@ async def ruststatus(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
-@bot.tree.command(name="rustcommand", description="Run a command on the Rust server via RCON.")
+@rust_group.command(name="command", description="Run a command on the Rust server via RCON.")
 @app_commands.describe(cmd="The RCON command to run")
 async def rustcommand(interaction: discord.Interaction, cmd: str):
     if not is_authorized(interaction):
@@ -2737,7 +2749,7 @@ async def rustcommand(interaction: discord.Interaction, cmd: str):
     conn = rust_connections.get(interaction.guild_id)
     if conn is None or not conn.connected:
         await interaction.response.send_message(
-            "❌ RCON isn't connected. Run `/setrustserver` with your RCON port and password first.", ephemeral=True
+            "❌ RCON isn't connected. Run `/rust setserver` with your RCON port and password first.", ephemeral=True
         )
         return
 
@@ -2752,6 +2764,9 @@ async def rustcommand(interaction: discord.Interaction, cmd: str):
     if len(display) > 1800:
         display = display[:1800] + "\n... (truncated)"
     await interaction.followup.send(f"```\n{display}\n```", ephemeral=True)
+
+
+bot.tree.add_command(rust_group)
 
 
 # ---------- Minecraft server integration ----------
@@ -3164,8 +3179,11 @@ async def web_set_bot_status(guild_id: int, enabled: bool, actor_id: int) -> str
     return "✅ Disabled — this server's stats won't feed into the bot's status anymore."
 
 
-@bot.tree.command(name="setminecraftserver", description="Connect this server to your Minecraft server.")
-@app_commands.checks.has_permissions(administrator=True)
+minecraft_group = app_commands.Group(name="minecraft", description="Minecraft server integration")
+bot.tree.add_command(minecraft_group)
+
+
+@minecraft_group.command(name="setserver", description="Connect this server to your Minecraft server.")
 @app_commands.describe(
     host="Your Minecraft server's IP address or domain (no port)",
     port="Server port (default 25565)",
@@ -3179,6 +3197,9 @@ async def setminecraftserver(
     rcon_port: int = None,
     rcon_password: str = None,
 ):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     cfg["mc_host"] = host
     cfg["mc_port"] = port
@@ -3189,10 +3210,12 @@ async def setminecraftserver(
     await interaction.response.send_message(f"✅ Minecraft server set: `{host}:{port}`.", ephemeral=True)
 
 
-@bot.tree.command(name="setminecraftstatuschannel", description="Post a live Minecraft server status embed in this channel.")
-@app_commands.checks.has_permissions(administrator=True)
+@minecraft_group.command(name="setstatuschannel", description="Post a live Minecraft server status embed in this channel.")
 @app_commands.describe(channel="The channel to post live status in (omit to disable)")
 async def setminecraftstatuschannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
     cfg = get_guild_cfg(interaction.guild_id)
     if channel is None:
         cfg.pop("mc_status_channel_id", None)
@@ -3207,13 +3230,13 @@ async def setminecraftstatuschannel(interaction: discord.Interaction, channel: d
     await refresh_minecraft_status_message(interaction.guild_id)
 
 
-@bot.tree.command(name="minecraftstatus", description="Show the Minecraft server's current status.")
+@minecraft_group.command(name="status", description="Show the Minecraft server's current status.")
 async def minecraftstatus(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
     host = cfg.get("mc_host")
     port = cfg.get("mc_port")
     if not host or not port:
-        await interaction.response.send_message("❌ No Minecraft server set up yet. Run `/setminecraftserver` first.", ephemeral=True)
+        await interaction.response.send_message("❌ No Minecraft server set up yet. Run `/minecraft setserver` first.", ephemeral=True)
         return
     await interaction.response.defer()
     try:
@@ -3224,7 +3247,7 @@ async def minecraftstatus(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
-@bot.tree.command(name="minecraftcommand", description="Run a command on the Minecraft server via RCON.")
+@minecraft_group.command(name="command", description="Run a command on the Minecraft server via RCON.")
 @app_commands.describe(cmd="The command to run (without the leading /)")
 async def minecraftcommand(interaction: discord.Interaction, cmd: str):
     if not is_authorized(interaction):
@@ -3236,7 +3259,7 @@ async def minecraftcommand(interaction: discord.Interaction, cmd: str):
     rcon_password = cfg.get("mc_rcon_password")
     if not host or not rcon_port or not rcon_password:
         await interaction.response.send_message(
-            "❌ RCON isn't set up. Run `/setminecraftserver` with an RCON port and password first.", ephemeral=True
+            "❌ RCON isn't set up. Run `/minecraft setserver` with an RCON port and password first.", ephemeral=True
         )
         return
 
@@ -7914,19 +7937,19 @@ async def afk(interaction: discord.Interaction, reason: str = "AFK"):
 
 HELP_CATEGORIES = {
     "🦀 Rust Server": [
-        ("/setrustserver", "Connect to your Rust server (status + optional RCON)"),
-        ("/setrustchatchannel", "Bridge Discord chat with in-game chat"),
-        ("/setruststatuschannel", "Live server status embed (now includes seed/size/RustMaps link)"),
-        ("/ruststatus", "Show current server status"),
-        ("/rustcommand", "Run an RCON command on the server"),
-        ("/setrustpopalert", "(admin) Ping a role at a population threshold"),
-        ("/setrustwipe / rustwipe", "Schedule and check a weekly wipe countdown"),
+        ("/rust setserver", "Connect to your Rust server (status + optional RCON)"),
+        ("/rust setchatchannel", "Bridge Discord chat with in-game chat"),
+        ("/rust setstatuschannel", "Live server status embed (includes seed/size/RustMaps link)"),
+        ("/rust status", "Show current server status"),
+        ("/rust command", "Run an RCON command on the server"),
+        ("/rust setpopalert", "(admin) Ping a role at a population threshold"),
+        ("/rust setwipe / wipe", "Schedule and check a weekly wipe countdown"),
     ],
     "⛏️ Minecraft Server": [
-        ("/setminecraftserver", "Connect to your Minecraft server (status + optional RCON)"),
-        ("/setminecraftstatuschannel", "Live server status embed"),
-        ("/minecraftstatus", "Show current server status"),
-        ("/minecraftcommand", "Run an RCON command on the server"),
+        ("/minecraft setserver", "Connect to your Minecraft server (status + optional RCON)"),
+        ("/minecraft setstatuschannel", "Live server status embed"),
+        ("/minecraft status", "Show current server status"),
+        ("/minecraft command", "Run an RCON command on the server"),
     ],
     "🎭 Roles": [
         ("/addrole", "Give a role to a member"),
@@ -8298,11 +8321,6 @@ bot.tree.add_command(showcase_group)
 @setbirthdayrole.error
 @setbirthdaychannel.error
 @setticketchannel.error
-@setrustserver.error
-@setrustchatchannel.error
-@setruststatuschannel.error
-@setminecraftserver.error
-@setminecraftstatuschannel.error
 @setweblogincommandrole.error
 @setbotstatus.error
 @setsuggestionschannel.error
@@ -8311,8 +8329,6 @@ bot.tree.add_command(showcase_group)
 @setreportschannel.error
 @setviewerrole.error
 @setwhitelistsync.error
-@setrustpopalert.error
-@setrustwipe.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
