@@ -2335,7 +2335,7 @@ async def relay_rust_chat_to_discord(guild_id: int, raw_message: str):
         pass
 
 
-def build_rust_status_embed(server_name: str, info: dict = None, error: str = None, seed: str = None, worldsize: str = None) -> discord.Embed:
+def build_rust_status_embed(server_name: str, info: dict = None, error: str = None, seed: str = None, worldsize: str = None, fps: str = None) -> discord.Embed:
     embed = discord.Embed(title=f"🦀 {server_name}", color=discord.Color.dark_orange())
     if error:
         embed.description = f"⚠️ Couldn't reach the server: {error}"
@@ -2343,6 +2343,8 @@ def build_rust_status_embed(server_name: str, info: dict = None, error: str = No
     embed.add_field(name="Server Name", value=info["name"], inline=False)
     embed.add_field(name="Map", value=info["map"], inline=True)
     embed.add_field(name="Players", value=f"{info['players']} / {info['max_players']}", inline=True)
+    if fps:
+        embed.add_field(name="FPS", value=fps, inline=True)
     if seed and worldsize:
         embed.add_field(name="Seed / Size", value=f"{seed} / {worldsize}", inline=True)
         embed.add_field(name="Map Viewer", value=f"[RustMaps](https://rustmaps.com/map/{worldsize}_{seed})", inline=True)
@@ -2367,6 +2369,20 @@ async def _get_rust_seed_worldsize(guild_id: int):
         return None, None
 
 
+async def _get_rust_fps(guild_id: int):
+    """Returns the server's current FPS as a string via RCON, or None if
+    RCON isn't connected, the query fails, or the output can't be parsed."""
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return None
+    try:
+        raw = await conn.send_command("server.fps")
+        digits = "".join(c for c in raw if c.isdigit())
+        return digits or None
+    except Exception:
+        return None
+
+
 async def refresh_rust_status_message(guild_id: int):
     cfg = get_guild_cfg(guild_id)
     channel_id = cfg.get("rust_status_channel_id")
@@ -2384,7 +2400,8 @@ async def refresh_rust_status_message(guild_id: int):
     try:
         info = await query_rust_server(host, query_port)
         seed, worldsize = await _get_rust_seed_worldsize(guild_id)
-        embed = build_rust_status_embed(host, info=info, seed=seed, worldsize=worldsize)
+        fps = await _get_rust_fps(guild_id)
+        embed = build_rust_status_embed(host, info=info, seed=seed, worldsize=worldsize, fps=fps)
     except Exception as e:
         embed = build_rust_status_embed(host, error=str(e))
 
@@ -2729,7 +2746,8 @@ async def ruststatus(interaction: discord.Interaction):
     try:
         info = await query_rust_server(host, query_port)
         seed, worldsize = await _get_rust_seed_worldsize(interaction.guild_id)
-        embed = build_rust_status_embed(host, info=info, seed=seed, worldsize=worldsize)
+        fps = await _get_rust_fps(interaction.guild_id)
+        embed = build_rust_status_embed(host, info=info, seed=seed, worldsize=worldsize, fps=fps)
     except Exception as e:
         embed = build_rust_status_embed(host, error=str(e))
 
@@ -2764,6 +2782,75 @@ async def rustcommand(interaction: discord.Interaction, cmd: str):
     if len(display) > 1800:
         display = display[:1800] + "\n... (truncated)"
     await interaction.followup.send(f"```\n{display}\n```", ephemeral=True)
+
+
+@rust_group.command(name="save", description="Force an immediate server save.")
+async def rustsave(interaction: discord.Interaction):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    conn = rust_connections.get(interaction.guild_id)
+    if conn is None or not conn.connected:
+        await interaction.response.send_message("❌ RCON isn't connected. Run `/rust setserver` with your RCON port and password first.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await conn.send_command("server.save")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Save failed: {e}", ephemeral=True)
+        return
+    await interaction.followup.send("✅ Server save triggered.", ephemeral=True)
+
+
+@rust_group.command(name="restart", description="Schedule a server restart with a countdown warning — asks for confirmation.")
+@app_commands.describe(seconds="How many seconds until restart (players get a countdown warning)")
+async def rustrestart(interaction: discord.Interaction, seconds: int = 60):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    conn = rust_connections.get(interaction.guild_id)
+    if conn is None or not conn.connected:
+        await interaction.response.send_message("❌ RCON isn't connected. Run `/rust setserver` with your RCON port and password first.", ephemeral=True)
+        return
+    if seconds < 10:
+        await interaction.response.send_message("❌ Give players at least 10 seconds of warning.", ephemeral=True)
+        return
+
+    view = ConfirmView(interaction.user.id)
+    await interaction.response.send_message(
+        f"⚠️ Restart the Rust server in {seconds} seconds? This kicks everyone offline briefly.",
+        view=view, ephemeral=True,
+    )
+    await view.wait()
+    if not view.confirmed:
+        await interaction.edit_original_response(content="❌ Cancelled — no restart scheduled." if view.confirmed is False else "⏱️ Timed out — no restart scheduled.", view=None)
+        return
+
+    try:
+        await conn.send_command(f"restart {seconds}")
+    except Exception as e:
+        await interaction.edit_original_response(content=f"❌ Restart command failed: {e}", view=None)
+        return
+    await interaction.edit_original_response(content=f"✅ Restart scheduled — server will restart in {seconds} seconds.", view=None)
+
+
+@rust_group.command(name="announce", description="Broadcast a message to everyone in-game.")
+@app_commands.describe(message="What to broadcast in Rust's chat")
+async def rustannounce(interaction: discord.Interaction, message: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    conn = rust_connections.get(interaction.guild_id)
+    if conn is None or not conn.connected:
+        await interaction.response.send_message("❌ RCON isn't connected. Run `/rust setserver` with your RCON port and password first.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await conn.send_command(f'say "{message}"')
+    except Exception as e:
+        await interaction.followup.send(f"❌ Announce failed: {e}", ephemeral=True)
+        return
+    await interaction.followup.send(f"✅ Broadcasted to the server: {message}", ephemeral=True)
 
 
 bot.tree.add_command(rust_group)
