@@ -2673,6 +2673,8 @@ async def rust_status_loop():
             await check_rust_population(guild_id)
         if cfg.get("rust_wipe_channel_id"):
             await check_rust_wipe_countdown(guild_id)
+        if cfg.get("rust_recurring_announcements"):
+            await check_rust_recurring_announcements(guild_id)
 
 
 @rust_group.command(name="setserver", description="Connect this server to your Rust game server.")
@@ -2926,6 +2928,78 @@ async def rustannounce(interaction: discord.Interaction, message: str):
         await interaction.followup.send(f"❌ Announce failed: {e}", ephemeral=True)
         return
     await interaction.followup.send(f"✅ Broadcasted to the server: {message}", ephemeral=True)
+
+
+@rust_group.command(name="addannouncement", description="Add a message that auto-broadcasts to the server on a repeating timer.")
+@app_commands.describe(message="What to broadcast", interval_minutes="How often to repeat it, in minutes")
+async def rustaddannouncement(interaction: discord.Interaction, message: str, interval_minutes: int):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if interval_minutes < 5:
+        await interaction.response.send_message("❌ Minimum interval is 5 minutes.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    announcements = cfg.setdefault("rust_recurring_announcements", [])
+    announcements.append({
+        "message": message, "interval_minutes": interval_minutes,
+        "last_sent": datetime.now(timezone.utc).isoformat(),
+    })
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ Added — will broadcast every {interval_minutes} minute(s): \"{message}\"", ephemeral=True
+    )
+
+
+@rust_group.command(name="removeannouncement", description="Remove a recurring announcement.")
+@app_commands.describe(index="The number shown in /rust listannouncements")
+async def rustremoveannouncement(interaction: discord.Interaction, index: int):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    announcements = cfg.get("rust_recurring_announcements", [])
+    if index < 1 or index > len(announcements):
+        await interaction.response.send_message("❌ Invalid index — check `/rust listannouncements`.", ephemeral=True)
+        return
+    removed = announcements.pop(index - 1)
+    save_config(config)
+    await interaction.response.send_message(f"✅ Removed: \"{removed['message']}\"", ephemeral=True)
+
+
+@rust_group.command(name="listannouncements", description="Show all recurring announcements.")
+async def rustlistannouncements(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    announcements = cfg.get("rust_recurring_announcements", [])
+    if not announcements:
+        await interaction.response.send_message("No recurring announcements configured yet.", ephemeral=True)
+        return
+    lines = [f"{i}. Every {a['interval_minutes']}min — \"{a['message']}\"" for i, a in enumerate(announcements, start=1)]
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+async def check_rust_recurring_announcements(guild_id: int):
+    cfg = get_guild_cfg(guild_id)
+    announcements = cfg.get("rust_recurring_announcements", [])
+    if not announcements:
+        return
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return
+
+    now = datetime.now(timezone.utc)
+    changed = False
+    for a in announcements:
+        last_sent = datetime.fromisoformat(a["last_sent"])
+        if (now - last_sent).total_seconds() / 60 >= a["interval_minutes"]:
+            try:
+                await conn.send_command(f'say "{a["message"]}"')
+                a["last_sent"] = now.isoformat()
+                changed = True
+            except Exception as e:
+                print(f"⚠️ Recurring Rust announcement failed ({guild_id}): {e}")
+    if changed:
+        save_config(config)
 
 
 bot.tree.add_command(rust_group)
