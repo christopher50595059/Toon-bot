@@ -5070,6 +5070,254 @@ class ConfirmView(discord.ui.View):
         await interaction.response.defer()
 
 
+# ---------- web command console ----------
+#
+# Lets an admin run (almost) any slash command from the web dashboard by
+# introspecting the bot's actual command tree, instead of hand-building a
+# form for every single command. Two safety properties that matter here:
+#
+# 1. Commands that use ConfirmView (a real Discord button someone has to
+#    click) are excluded entirely — that flow can't be faked from a web
+#    form POST, so those keep using their existing dedicated pages.
+# 2. This whole feature is gated to genuine server Administrators, checked
+#    independently here AND on the web page. That's stricter than several
+#    individual commands' own internal checks (some just require the
+#    manager role) — necessary because calling a command's underlying
+#    function directly bypasses any @app_commands.checks.has_permissions(...)
+#    decorator, which normally only Discord's own invocation path enforces.
+
+CONSOLE_CONFIRMATION_REQUIRED = {
+    "rust restart", "rosterremove", "promote", "demote", "rosteraddall",
+    "kick", "ban", "massrename", "massaddrole", "massremoverole",
+}
+CONSOLE_DEDICATED_PAGES = {
+    "rust restart": "rust_page", "rosterremove": "roster_page", "promote": "roster_page",
+    "demote": "roster_page", "rosteraddall": "roster_page", "kick": "moderation_page",
+    "ban": "moderation_page", "massrename": "mass_page", "massaddrole": "mass_page",
+    "massremoverole": "mass_page",
+}
+def _build_console_type_map():
+    """Built defensively — if discord.py's enum reference path is ever
+    different than expected, this falls back to an empty map (meaning every
+    parameter just gets treated as a plain string) instead of crashing the
+    entire bot at import time."""
+    try:
+        return {
+            discord.AppCommandOptionType.string: "string",
+            discord.AppCommandOptionType.integer: "integer",
+            discord.AppCommandOptionType.number: "number",
+            discord.AppCommandOptionType.boolean: "boolean",
+            discord.AppCommandOptionType.user: "user",
+            discord.AppCommandOptionType.channel: "channel",
+            discord.AppCommandOptionType.role: "role",
+        }
+    except AttributeError as e:
+        print(f"⚠️ Command console: couldn't build type map ({e}) — all parameters will be treated as plain text.")
+        return {}
+
+
+CONSOLE_TYPE_MAP = _build_console_type_map()
+
+
+def get_console_commands() -> list:
+    """Walks the entire live command tree (including subcommands inside
+    groups) and returns a flat, sorted list of every runnable command with
+    enough metadata to build a dynamic form for it."""
+    results = []
+
+    def walk(cmd, prefix=""):
+        full_name = f"{prefix}{cmd.name}".strip()
+        if isinstance(cmd, app_commands.Group):
+            for sub in cmd.commands:
+                walk(sub, prefix=f"{full_name} ")
+            return
+        params = []
+        for p in cmd.parameters:
+            choices = [{"name": c.name, "value": c.value} for c in p.choices] if p.choices else None
+            params.append({
+                "name": p.name,
+                "description": p.description or "",
+                "type": CONSOLE_TYPE_MAP.get(p.type, "string"),
+                "required": p.required,
+                "choices": choices,
+            })
+        results.append({
+            "name": full_name,
+            "description": cmd.description or "",
+            "parameters": params,
+            "requires_confirmation": full_name in CONSOLE_CONFIRMATION_REQUIRED,
+            "dedicated_page": CONSOLE_DEDICATED_PAGES.get(full_name),
+        })
+
+    for cmd in bot.tree.get_commands():
+        walk(cmd)
+    return sorted(results, key=lambda c: c["name"])
+
+
+def _resolve_console_command_object(full_name: str):
+    """Finds the actual app_commands.Command object for a dotted console name
+    like 'rust setwipe', so its .callback can be invoked directly."""
+    parts = full_name.split(" ")
+    commands_list = bot.tree.get_commands()
+    obj = None
+    for i, part in enumerate(parts):
+        obj = discord.utils.get(commands_list, name=part)
+        if obj is None:
+            return None
+        if i < len(parts) - 1:
+            if not isinstance(obj, app_commands.Group):
+                return None
+            commands_list = obj.commands
+    return obj
+
+
+class _ConsoleFakeResponse:
+    def __init__(self, fake_interaction):
+        self._fi = fake_interaction
+        self._done = False
+
+    async def send_message(self, content=None, *, embed=None, embeds=None, view=None, ephemeral=False, **kwargs):
+        self._done = True
+        await self._fi._handle_output(content, embed, embeds, view, ephemeral)
+
+    async def defer(self, *, ephemeral=False, thinking=False):
+        self._done = True
+
+    def is_done(self):
+        return self._done
+
+
+class _ConsoleFakeFollowup:
+    def __init__(self, fake_interaction):
+        self._fi = fake_interaction
+
+    async def send(self, content=None, *, embed=None, embeds=None, view=None, ephemeral=False, **kwargs):
+        await self._fi._handle_output(content, embed, embeds, view, ephemeral)
+
+
+class ConsoleFakeInteraction:
+    """Mimics enough of discord.Interaction's surface for non-confirmation
+    slash commands to run correctly when triggered from the web console."""
+    def __init__(self, guild: discord.Guild, user: discord.Member, output_channel=None):
+        self.guild = guild
+        self.guild_id = guild.id
+        self.user = user
+        self.channel = output_channel
+        self.channel_id = output_channel.id if output_channel else None
+        self.response = _ConsoleFakeResponse(self)
+        self.followup = _ConsoleFakeFollowup(self)
+        self.result_texts = []
+        self._last_sent_message = None
+        self.client = bot
+
+    async def _handle_output(self, content, embed, embeds, view, ephemeral):
+        # A command posting something WITH an interactive view (a real
+        # button UI — giveaway entry, tournament sign-up, etc.) needs a real,
+        # trackable Discord message — send it for real to the chosen channel.
+        if view is not None and not ephemeral:
+            if self.channel is None:
+                self.result_texts.append(
+                    "⚠️ This command wants to post an interactive message, but no output channel was selected — nothing was sent."
+                )
+                return
+            try:
+                msg = await self.channel.send(content=content, embed=embed, view=view)
+                self._last_sent_message = msg
+                self.result_texts.append(f"✅ Posted to #{self.channel.name} (with an interactive component attached).")
+            except discord.Forbidden:
+                self.result_texts.append(f"❌ I don't have permission to post in #{self.channel.name}.")
+            return
+        if content:
+            self.result_texts.append(content)
+        if embed:
+            self.result_texts.append(f"**{embed.title or ''}**\n{embed.description or ''}".strip())
+        if embeds:
+            for e in embeds:
+                self.result_texts.append(f"**{e.title or ''}**\n{e.description or ''}".strip())
+
+    async def original_response(self):
+        if self._last_sent_message:
+            return self._last_sent_message
+        class _Dummy:
+            id = None
+        return _Dummy()
+
+    async def edit_original_response(self, *, content=None, embed=None, view=None, **kwargs):
+        await self._handle_output(content, embed, None, view, False)
+
+
+async def run_console_command(guild_id: int, command_full_name: str, raw_params: dict, actor_id: int, output_channel_id=None) -> dict:
+    """Runs a slash command from the web console. Returns
+    {"success": bool, "messages": [str, ...]}. Requires the acting member to
+    be a genuine server Administrator — see the module note above for why."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return {"success": False, "messages": ["❌ Server not found."]}
+    actor = guild.get_member(actor_id)
+    if actor is None:
+        return {"success": False, "messages": ["❌ Couldn't find your account in this server."]}
+    if not actor.guild_permissions.administrator:
+        return {"success": False, "messages": ["❌ The command console requires Administrator permission."]}
+
+    all_commands = get_console_commands()
+    cmd_info = next((c for c in all_commands if c["name"] == command_full_name), None)
+    if cmd_info is None:
+        return {"success": False, "messages": [f"❌ Unknown command: {command_full_name}"]}
+    if cmd_info["requires_confirmation"]:
+        return {"success": False, "messages": [
+            f"❌ /{command_full_name} requires interactive Discord confirmation and can't run from the console — "
+            "use its dedicated dashboard page instead."
+        ]}
+
+    cmd_obj = _resolve_console_command_object(command_full_name)
+    if cmd_obj is None:
+        return {"success": False, "messages": [f"❌ Couldn't resolve command: {command_full_name}"]}
+
+    kwargs = {}
+    for p in cmd_info["parameters"]:
+        raw_value = (raw_params.get(p["name"]) or "").strip()
+        if not raw_value:
+            if p["required"]:
+                return {"success": False, "messages": [f"❌ Missing required parameter: {p['name']}"]}
+            continue
+        try:
+            if p["type"] == "integer":
+                kwargs[p["name"]] = int(raw_value)
+            elif p["type"] == "number":
+                kwargs[p["name"]] = float(raw_value)
+            elif p["type"] == "boolean":
+                kwargs[p["name"]] = raw_value.lower() in ("true", "1", "yes")
+            elif p["type"] == "user":
+                member = guild.get_member(int(raw_value))
+                if member is None:
+                    return {"success": False, "messages": [f"❌ Couldn't find a member with ID {raw_value}."]}
+                kwargs[p["name"]] = member
+            elif p["type"] == "role":
+                role = guild.get_role(int(raw_value))
+                if role is None:
+                    return {"success": False, "messages": [f"❌ Couldn't find a role with ID {raw_value}."]}
+                kwargs[p["name"]] = role
+            elif p["type"] == "channel":
+                channel = guild.get_channel(int(raw_value))
+                if channel is None:
+                    return {"success": False, "messages": [f"❌ Couldn't find a channel with ID {raw_value}."]}
+                kwargs[p["name"]] = channel
+            else:
+                kwargs[p["name"]] = raw_value
+        except ValueError:
+            return {"success": False, "messages": [f"❌ Invalid value for {p['name']}: {raw_value}"]}
+
+    output_channel = guild.get_channel(output_channel_id) if output_channel_id else None
+    fake_interaction = ConsoleFakeInteraction(guild, actor, output_channel)
+
+    try:
+        await cmd_obj.callback(fake_interaction, **kwargs)
+    except Exception as e:
+        return {"success": False, "messages": [f"❌ Command raised an error: {e}"]}
+
+    return {"success": True, "messages": fake_interaction.result_texts or ["✅ Command ran (no reply was produced)."]}
+
+
 # ---------- admin config commands ----------
 
 @bot.tree.command(name="setlogchannel", description="Set the channel where role changes are logged.")
@@ -9154,5 +9402,6 @@ if __name__ == "__main__":
         web_rust_announcement_add, web_rust_announcement_remove,
         web_add_rank_bonus_role, web_remove_rank_bonus_role,
         web_set_whitelist_sync,
+        get_console_commands, run_console_command,
     )
     bot.run(TOKEN)

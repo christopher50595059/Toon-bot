@@ -141,6 +141,8 @@ _rust_announcement_remove = None
 _add_rank_bonus_role = None
 _remove_rank_bonus_role = None
 _set_whitelist_sync = None
+_get_console_commands = None
+_run_console_command = None
 
 
 # ---------- shared page chrome ----------
@@ -405,6 +407,7 @@ SIDENAV_SECTIONS = [
         ("afk_page", "💤", "AFK Status"),
         ("backup_download", "💾", "Backup"),
         ("backups_page", "🗄️", "Auto Backups"),
+        ("console_page", "🖥️", "Command Console"),
     ]),
 ]
 
@@ -1311,6 +1314,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/afk"><span>💤</span>AFK Status</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backups"><span>🗄️</span>Auto Backups</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/console"><span>🖥️</span>Command Console</a>
       </div>
     </div>
 
@@ -6319,6 +6323,184 @@ def login_history_page(guild_id):
     return render_page(f"{guild.name} — Login History", body, guild_id=guild_id)
 
 
+# ---------- command console ----------
+
+@app.route("/dashboard/<int:guild_id>/console")
+def console_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    if not member.guild_permissions.administrator:
+        return render_page(
+            f"{guild.name} — Command Console",
+            '<h1>🖥️ Command Console</h1><div class="card"><div class="hint">'
+            'This requires genuine server Administrator permission — not just manager access. '
+            'Running commands directly bypasses some of their normal permission checks, so this stays '
+            'restricted to admins only.</div></div>',
+            guild_id=guild_id,
+        )
+
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    commands_list = _get_console_commands()
+    console_data = {}
+    for cmd in commands_list:
+        entry = dict(cmd)
+        if cmd.get("dedicated_page"):
+            try:
+                entry["dedicated_page_url"] = url_for(cmd["dedicated_page"], guild_id=guild_id)
+            except Exception:
+                entry["dedicated_page_url"] = None
+        else:
+            entry["dedicated_page_url"] = None
+        console_data[cmd["name"]] = entry
+
+    options_html = "".join(f'<option value="{html.escape(c["name"])}">/{html.escape(c["name"])}</option>' for c in commands_list)
+    channel_assets = _channel_search_assets(guild)
+
+    body = f"""
+    <h1>🖥️ Command Console</h1>
+    <div class="hint" style="margin-bottom:18px;">
+      Run (almost) any bot command directly from the web — no need to be in Discord. A handful of commands that
+      require clicking a confirmation button in Discord aren't available here; they'll show a link to their
+      normal dashboard page instead. Members/roles/channels are entered as their numeric ID (right-click →
+      Copy ID, with Developer Mode on in Discord).
+    </div>
+    {result_html}
+    {channel_assets}
+
+    <script>window._consoleData = {json.dumps(console_data)};</script>
+
+    <div class="card">
+      <h2>Run a command</h2>
+      <form method="post" action="/dashboard/{guild_id}/console/run" id="consoleForm">
+        <div class="field">
+          <label>Command</label>
+          <select id="consoleCommandSelect" name="command_name" onchange="onConsoleCommandChange()" required>
+            <option value="">— Choose a command —</option>
+            {options_html}
+          </select>
+        </div>
+        <div id="consoleDescription" class="hint" style="margin-bottom:12px;"></div>
+        <div id="consoleParams"></div>
+        <div class="field" id="consoleOutputChannelField" style="display:none;">
+          <label>Output channel (only needed for commands that post a message — e.g. giveaways, tournaments, trivia)</label>
+          <div class="search-wrap">
+            <input type="text" data-map="channel" placeholder="Type or click to browse..." autocomplete="off"
+                   oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
+          </div>
+          <input type="hidden" name="output_channel_id">
+        </div>
+        <button class="btn" type="submit" id="consoleRunBtn" disabled>Run Command</button>
+      </form>
+    </div>
+
+    <script>
+      function onConsoleCommandChange() {{
+        const select = document.getElementById('consoleCommandSelect');
+        const cmd = window._consoleData[select.value];
+        const paramsBox = document.getElementById('consoleParams');
+        const descBox = document.getElementById('consoleDescription');
+        const runBtn = document.getElementById('consoleRunBtn');
+        const outputField = document.getElementById('consoleOutputChannelField');
+        paramsBox.innerHTML = '';
+        outputField.style.display = 'none';
+
+        if (!cmd) {{
+          descBox.textContent = '';
+          runBtn.disabled = true;
+          return;
+        }}
+        descBox.textContent = cmd.description || '';
+
+        if (cmd.requires_confirmation) {{
+          const link = cmd.dedicated_page_url
+            ? `<a href="${{cmd.dedicated_page_url}}">Go to its dashboard page instead →</a>`
+            : 'Use the matching Discord command instead.';
+          paramsBox.innerHTML = `<div class="hint" style="color:#ff8080; margin-bottom:12px;">⚠️ This command requires clicking a confirmation button in Discord and can't run from the console. ${{link}}</div>`;
+          runBtn.disabled = true;
+          return;
+        }}
+
+        runBtn.disabled = false;
+        let needsChannel = false;
+        cmd.parameters.forEach(p => {{
+          if (p.type === 'channel') needsChannel = true;
+          const div = document.createElement('div');
+          div.className = 'field';
+          const label = document.createElement('label');
+          label.textContent = p.name + (p.required ? ' *' : ' (optional)') + (p.description ? ' — ' + p.description : '');
+          div.appendChild(label);
+
+          if (p.choices && p.choices.length) {{
+            const select2 = document.createElement('select');
+            select2.name = 'param_' + p.name;
+            if (!p.required) {{
+              const blank = document.createElement('option');
+              blank.value = ''; blank.textContent = '— none —';
+              select2.appendChild(blank);
+            }}
+            p.choices.forEach(c => {{
+              const opt = document.createElement('option');
+              opt.value = c.value; opt.textContent = c.name;
+              select2.appendChild(opt);
+            }});
+            div.appendChild(select2);
+          }} else if (p.type === 'boolean') {{
+            const select2 = document.createElement('select');
+            select2.name = 'param_' + p.name;
+            select2.innerHTML = '<option value="">— none —</option><option value="true">True</option><option value="false">False</option>';
+            div.appendChild(select2);
+          }} else {{
+            const input = document.createElement('input');
+            input.type = (p.type === 'integer' || p.type === 'number') ? 'number' : 'text';
+            input.name = 'param_' + p.name;
+            input.placeholder = (p.type === 'user' || p.type === 'role' || p.type === 'channel') ? 'Numeric Discord ID' : '';
+            if (p.required) input.required = true;
+            div.appendChild(input);
+          }}
+          paramsBox.appendChild(div);
+        }});
+
+        if (needsChannel) {{
+          outputField.style.display = '';
+        }}
+      }}
+    </script>
+    """
+    return render_page(f"{guild.name} — Command Console", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/console/run", methods=["POST"])
+def console_run_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    if not member.guild_permissions.administrator:
+        return redirect(url_for("console_page", guild_id=guild_id, result="❌ Administrator permission required."))
+
+    command_name = request.form.get("command_name", "").strip()
+    if not command_name:
+        return redirect(url_for("console_page", guild_id=guild_id, result="❌ Pick a command."))
+
+    raw_channel = request.form.get("output_channel_id", "")
+    output_channel_id = int(raw_channel) if raw_channel else None
+
+    raw_params = {}
+    for key, value in request.form.items():
+        if key.startswith("param_"):
+            raw_params[key[len("param_"):]] = value
+
+    outcome = _run_async(_run_console_command(guild_id, command_name, raw_params, session["user_id"], output_channel_id), timeout=30)
+    if isinstance(outcome, str):
+        # _run_async's own generic error path (e.g. it timed out) returns a plain string
+        result_text = outcome
+    else:
+        result_text = " / ".join(outcome.get("messages", []))
+    return redirect(url_for("console_page", guild_id=guild_id, result=result_text))
+
+
 # ---------- entrypoint ----------
 
 def _run(port: int):
@@ -6366,6 +6548,7 @@ def start_web_app(
     rust_announcement_add, rust_announcement_remove,
     add_rank_bonus_role, remove_rank_bonus_role,
     set_whitelist_sync,
+    get_console_commands, run_console_command,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -6402,6 +6585,7 @@ def start_web_app(
     global _rust_announcement_add, _rust_announcement_remove
     global _add_rank_bonus_role, _remove_rank_bonus_role
     global _set_whitelist_sync
+    global _get_console_commands, _run_console_command
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -6498,6 +6682,8 @@ def start_web_app(
     _add_rank_bonus_role = add_rank_bonus_role
     _remove_rank_bonus_role = remove_rank_bonus_role
     _set_whitelist_sync = set_whitelist_sync
+    _get_console_commands = get_console_commands
+    _run_console_command = run_console_command
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 
