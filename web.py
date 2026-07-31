@@ -409,6 +409,7 @@ SIDENAV_SECTIONS = [
         ("backup_download", "💾", "Backup"),
         ("backups_page", "🗄️", "Auto Backups"),
         ("console_page", "🖥️", "Command Console"),
+        ("health_page", "🩺", "System Health"),
     ]),
 ]
 
@@ -1321,6 +1322,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backups"><span>🗄️</span>Auto Backups</a>
         <a class="action-tile" href="/dashboard/{guild_id}/console"><span>🖥️</span>Command Console</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/health"><span>🩺</span>System Health</a>
       </div>
     </div>
 
@@ -6435,6 +6437,133 @@ def global_search_page(guild_id):
     {sections_html}
     """
     return render_page(f"{guild.name} — Search", body, guild_id=guild_id)
+# ---------- system health ----------
+
+@app.route("/dashboard/<int:guild_id>/health")
+def health_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    checks = []  # (ok: bool, label: str, detail: str)
+
+    def check(ok, label, detail=""):
+        checks.append((ok, label, detail))
+
+    # ---- core setup ----
+    log_channel_id = cfg.get("log_channel_id")
+    if log_channel_id:
+        check(guild.get_channel(log_channel_id) is not None, "Log channel", "Configured channel no longer exists.")
+    else:
+        check(False, "Log channel", "Not set up — moderation/role actions aren't being logged anywhere.")
+
+    manager_role_id = cfg.get("manager_role_id")
+    if manager_role_id:
+        check(guild.get_role(manager_role_id) is not None, "Manager role", "Configured role no longer exists.")
+    else:
+        check(None, "Manager role", "Not set — only Administrators can use staff commands right now.")
+
+    roster_channel_id = cfg.get("roster_channel_id")
+    if roster_channel_id:
+        check(guild.get_channel(roster_channel_id) is not None, "Roster channel", "Configured channel no longer exists.")
+
+    stats_channel_id = cfg.get("stats_channel_id")
+    if stats_channel_id:
+        check(guild.get_channel(stats_channel_id) is not None, "Stats channel", "Configured channel no longer exists.")
+
+    # ---- ranks ----
+    ranks = cfg.get("ranks", [])
+    if ranks:
+        broken_ranks = [rid for rid in ranks if guild.get_role(rid) is None]
+        check(not broken_ranks, "Configured ranks", f"{len(broken_ranks)} rank(s) point to a deleted role." if broken_ranks else f"{len(ranks)} rank(s) all valid.")
+    else:
+        check(None, "Configured ranks", "No ranks set up yet — roster/promotion features need this.")
+
+    # ---- rank bonus roles ----
+    bonus_map = cfg.get("rank_bonus_roles", {})
+    if bonus_map:
+        broken_bonus = sum(1 for bonus_list in bonus_map.values() for rid in bonus_list if guild.get_role(rid) is None)
+        check(broken_bonus == 0, "Rank bonus roles", f"{broken_bonus} bonus role reference(s) point to a deleted role." if broken_bonus else "All valid.")
+
+    # ---- bot role hierarchy ----
+    if ranks:
+        top_rank_role = next((guild.get_role(rid) for rid in ranks if guild.get_role(rid)), None)
+        if top_rank_role:
+            check(guild.me.top_role > top_rank_role, "Bot role position", "My role needs to be ABOVE your highest rank to manage it — check Server Settings > Roles." if guild.me.top_role <= top_rank_role else "Correctly positioned above your ranks.")
+
+    check(guild.me.guild_permissions.ban_members, "Ban permission", "I don't have the Ban Members permission.")
+    check(guild.me.guild_permissions.kick_members, "Kick permission", "I don't have the Kick Members permission.")
+    check(guild.me.guild_permissions.manage_roles, "Manage Roles permission", "I don't have the Manage Roles permission.")
+
+    # ---- Rust ----
+    if cfg.get("rust_host"):
+        if cfg.get("rust_rcon_port"):
+            conn = rust_connections.get(guild_id)
+            check(conn is not None and conn.connected, "Rust RCON connection", "Configured but not currently connected — chat bridge/commands/macros won't work until it reconnects.")
+        rust_status_channel_id = cfg.get("rust_status_channel_id")
+        if rust_status_channel_id:
+            check(guild.get_channel(rust_status_channel_id) is not None, "Rust status channel", "Configured channel no longer exists.")
+
+    # ---- Minecraft ----
+    if cfg.get("mc_host"):
+        mc_status_channel_id = cfg.get("mc_status_channel_id")
+        if mc_status_channel_id:
+            check(guild.get_channel(mc_status_channel_id) is not None, "Minecraft status channel", "Configured channel no longer exists.")
+
+    # ---- tickets ----
+    open_tickets = [t for t in cfg.get("tickets", {}).values() if t.get("status") == "open"]
+    stale_tickets = 0
+    for t in open_tickets:
+        last = t.get("last_activity") or t.get("created_at")
+        if last:
+            try:
+                age_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() / 3600
+                if age_hours > 72:
+                    stale_tickets += 1
+            except ValueError:
+                pass
+    if open_tickets:
+        check(stale_tickets == 0, "Open tickets", f"{stale_tickets} ticket(s) quiet for 3+ days with no auto-close configured." if (stale_tickets and not cfg.get("ticket_autoclose_enabled")) else f"{len(open_tickets)} open, all reasonably active." if stale_tickets == 0 else f"{stale_tickets} quiet ticket(s), but auto-close is on so they'll be handled.")
+
+    # ---- reports/suggestions channels ----
+    for key, label in [("reports_channel_id", "Reports channel"), ("suggestions_channel_id", "Suggestions channel")]:
+        cid = cfg.get(key)
+        if cid:
+            check(guild.get_channel(cid) is not None, label, "Configured channel no longer exists.")
+
+    ok_count = sum(1 for ok, _, _ in checks if ok is True)
+    warn_count = sum(1 for ok, _, _ in checks if ok is None)
+    fail_count = sum(1 for ok, _, _ in checks if ok is False)
+
+    rows = ""
+    for ok, label, detail in checks:
+        if ok is True:
+            icon, color = "✅", "#22c55e"
+        elif ok is None:
+            icon, color = "ℹ️", "#8b96b3"
+        else:
+            icon, color = "❌", "#f87171"
+        rows += f'<tr><td>{icon}</td><td>{html.escape(label)}</td><td style="color:{color};">{html.escape(detail)}</td></tr>'
+
+    body = f"""
+    <h1>🩺 System Health</h1>
+    <div class="hint" style="margin-bottom:18px;">Checks your configuration for broken references, disconnected integrations, and missing setup — a quick way to catch problems before they cause confusion.</div>
+
+    <div class="stats-strip" style="margin-top:0;">
+      <div class="stat-tile"><div class="icon">✅</div><div class="num">{ok_count}</div><div class="label">Healthy</div></div>
+      <div class="stat-tile grey"><div class="icon">ℹ️</div><div class="num">{warn_count}</div><div class="label">Not Set Up</div></div>
+      <div class="stat-tile magenta"><div class="icon">❌</div><div class="num">{fail_count}</div><div class="label">Needs Attention</div></div>
+    </div>
+
+    <div class="card">
+      <div class="log-wrap"><table class="log-table">
+        <tr><th></th><th>Check</th><th>Detail</th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — System Health", body, guild_id=guild_id)
 
 
 # ---------- command console ----------
