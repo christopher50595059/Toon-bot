@@ -113,6 +113,7 @@ Commands:
   /report user:<member> reason:<text>     - privately report a member to staff
   /setreportschannel [channel]            - (admin only) set the private channel for member reports
   /discordauditlog [limit]                - show Discord's own audit log (bans, kicks, channel/role changes)
+  /ping                                    - check if the bot is up and responding
   /setviewerrole [role]                   - (admin only) role that gets view-only web dashboard access
   /setbanrole [role]                      - (admin only) role threshold for using /ban (Discord + web)
   /linksteam steamid:<text>               - link your SteamID for Rust whitelist auto-sync
@@ -8605,6 +8606,12 @@ async def fetch_discord_audit_log(guild_id: int, limit: int = 50) -> dict:
         return {"entries": [], "error": str(e)}
 
 
+@bot.tree.command(name="ping", description="Check if the bot is up and responding.")
+async def ping(interaction: discord.Interaction):
+    latency_ms = round(bot.latency * 1000)
+    await interaction.response.send_message(f"🏓 Pong! ({latency_ms}ms)")
+
+
 @bot.tree.command(name="discordauditlog", description="Show Discord's own audit log (bans, kicks, channel/role changes, etc).")
 @app_commands.describe(limit="How many entries to show (max 50)")
 async def discordauditlog(interaction: discord.Interaction, limit: int = 20):
@@ -9127,6 +9134,7 @@ HELP_CATEGORIES = {
         ("/listrankbonusroles", "Show which extra roles get auto-granted at each rank"),
     ],
     "🔧 Utility": [
+        ("/ping", "Check if the bot is up and responding"),
         ("/afk", "Mark yourself AFK"),
         ("/weblogin", "Get a one-time code to log into the web dashboard"),
         ("/setweblogincommandrole", "(admin) Restrict who can run /weblogin"),
