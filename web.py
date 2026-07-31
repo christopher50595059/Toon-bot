@@ -354,30 +354,33 @@ SIDENAV_SECTIONS = [
         ("lookup_page", "🔎", "Member Lookup"),
         ("roles_page", "🎭", "Roles"),
         ("roster_page", "📋", "Roster"),
+    ]),
+    ("Moderation", [
         ("moderation_page", "🛡️", "Moderation"),
         ("automod_page", "🚨", "Auto-Moderation"),
         ("warnings_page", "⚠️", "Warnings"),
         ("reports_page", "🚩", "Reports"),
     ]),
-    ("Integrations", [
-        ("game_servers_page", "🕹️", "Game Servers"),
+    ("Game Servers", [
+        ("game_servers_page", "🕹️", "Overview"),
         ("rust_page", "🦀", "Rust: Overview"),
         ("rust_players_page", "🎮", "Rust: Players"),
         ("rust_bans_page", "🚫", "Rust: Bans"),
         ("rust_macros_page", "⚡", "Rust: Macros"),
-        ("whitelist_sync_page", "🎮", "Whitelist Sync"),
-        ("rank_bonus_roles_page", "🎁", "Rank Bonus Roles"),
         ("minecraft_page", "⛏️", "Minecraft: Overview"),
         ("minecraft_players_page", "🎮", "Minecraft: Players"),
         ("minecraft_bans_page", "🚫", "Minecraft: Bans"),
-        ("webhooks_page", "🔌", "Webhooks"),
+        ("whitelist_sync_page", "🔗", "Whitelist Sync"),
     ]),
-    ("Events", [
+    ("Community", [
         ("tournaments_page", "🏆", "Tournaments"),
         ("gamenights_page", "🎮", "Game Nights"),
         ("mvp_page", "⭐", "MVP Voting"),
         ("suggestions_page", "💡", "Suggestions"),
         ("giveaways_page", "🎉", "Giveaways"),
+        ("trivia_page", "🧠", "Trivia Leaderboard"),
+        ("rank_bonus_roles_page", "🎁", "Rank Bonus Roles"),
+        ("custom_commands_page", "💬", "Custom Commands"),
     ]),
     ("Bulk & Broadcast", [
         ("mass_page", "🧰", "Mass Actions"),
@@ -387,17 +390,18 @@ SIDENAV_SECTIONS = [
         ("greetings_page", "🔊", "VC Greetings"),
         ("tickets_page", "🎫", "Tickets"),
         ("dm_page", "✉️", "Direct Message"),
+        ("webhooks_page", "🔌", "Webhooks"),
     ]),
-    ("Insight", [
+    ("Insight & Logs", [
         ("logs_page", "🗂️", "Logs"),
         ("activity_log_page", "🖱️", "Dashboard Activity"),
         ("discord_audit_log_page", "🗂️", "Discord Audit Log"),
         ("login_history_page", "🔑", "Login History"),
-        ("activity_page", "📈", "Activity"),
-        ("growth_page", "📊", "Growth Analytics"),
-        ("trivia_page", "🧠", "Trivia Leaderboard"),
+        ("activity_page", "📈", "Message Activity"),
         ("voice_activity_page", "🎙️", "Voice Activity"),
-        ("custom_commands_page", "💬", "Custom Commands"),
+        ("growth_page", "📊", "Growth Analytics"),
+    ]),
+    ("System", [
         ("afk_page", "💤", "AFK Status"),
         ("backup_download", "💾", "Backup"),
         ("backups_page", "🗄️", "Auto Backups"),
@@ -1237,31 +1241,50 @@ def dashboard(guild_id):
 
     <div class="card">
       <h2>⚡ Actions</h2>
-      <div class="action-grid">
+
+      <div class="hint" style="font-weight:600; text-transform:uppercase; letter-spacing:0.5px; font-size:11px; margin:0 0 8px;">General</div>
+      <div class="action-grid" style="margin-bottom:20px;">
+        <a class="action-tile" href="/dashboard/{guild_id}/setup"><span>🧭</span>Setup Wizard</a>
         <a class="action-tile" href="/dashboard/{guild_id}/lookup"><span>🔎</span>Member Lookup</a>
         <a class="action-tile" href="/dashboard/{guild_id}/roles"><span>🎭</span>Roles</a>
         <a class="action-tile" href="/dashboard/{guild_id}/roster"><span>📋</span>Roster</a>
+      </div>
+
+      <div class="hint" style="font-weight:600; text-transform:uppercase; letter-spacing:0.5px; font-size:11px; margin:0 0 8px;">Moderation</div>
+      <div class="action-grid" style="margin-bottom:20px;">
         <a class="action-tile" href="/dashboard/{guild_id}/moderation"><span>🛡️</span>Moderation</a>
         <a class="action-tile" href="/dashboard/{guild_id}/automod"><span>🚨</span>Auto-Moderation</a>
         <a class="action-tile" href="/dashboard/{guild_id}/warnings"><span>⚠️</span>Warnings</a>
         <a class="action-tile" href="/dashboard/{guild_id}/reports"><span>🚩</span>Reports</a>
-        <a class="action-tile" href="/dashboard/{guild_id}/setup"><span>🧭</span>Setup Wizard</a>
-        <a class="action-tile" href="/dashboard/{guild_id}/gameservers"><span>🕹️</span>Game Servers</a>
+      </div>
+
+      <div class="hint" style="font-weight:600; text-transform:uppercase; letter-spacing:0.5px; font-size:11px; margin:0 0 8px;">Game Servers</div>
+      <div class="action-grid" style="margin-bottom:20px;">
+        <a class="action-tile" href="/dashboard/{guild_id}/gameservers"><span>🕹️</span>Overview</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust"><span>🦀</span>Rust Server</a>
-        <a class="action-tile" href="/dashboard/{guild_id}/rust/macros"><span>⚡</span>Rust Macros</a>
-        <a class="action-tile" href="/dashboard/{guild_id}/whitelistsync"><span>🎮</span>Whitelist Sync</a>
-        <a class="action-tile" href="/dashboard/{guild_id}/rankbonusroles"><span>🎁</span>Rank Bonus Roles</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/players"><span>🎮</span>Rust Players</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/bans"><span>🚫</span>Rust Bans</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/rust/macros"><span>⚡</span>Rust Macros</a>
         <a class="action-tile" href="/dashboard/{guild_id}/minecraft"><span>⛏️</span>Minecraft Server</a>
         <a class="action-tile" href="/dashboard/{guild_id}/minecraft/players"><span>🎮</span>Minecraft Players</a>
         <a class="action-tile" href="/dashboard/{guild_id}/minecraft/bans"><span>🚫</span>Minecraft Bans</a>
-        <a class="action-tile" href="/dashboard/{guild_id}/webhooks"><span>🔌</span>Webhooks</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/whitelistsync"><span>🔗</span>Whitelist Sync</a>
+      </div>
+
+      <div class="hint" style="font-weight:600; text-transform:uppercase; letter-spacing:0.5px; font-size:11px; margin:0 0 8px;">Community</div>
+      <div class="action-grid" style="margin-bottom:20px;">
         <a class="action-tile" href="/dashboard/{guild_id}/tournaments"><span>🏆</span>Tournaments</a>
         <a class="action-tile" href="/dashboard/{guild_id}/gamenights"><span>🎮</span>Game Nights</a>
         <a class="action-tile" href="/dashboard/{guild_id}/mvp"><span>⭐</span>MVP Voting</a>
         <a class="action-tile" href="/dashboard/{guild_id}/suggestions"><span>💡</span>Suggestions</a>
         <a class="action-tile" href="/dashboard/{guild_id}/giveaways"><span>🎉</span>Giveaways</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/trivia"><span>🧠</span>Trivia</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/rankbonusroles"><span>🎁</span>Rank Bonus Roles</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/customcommands"><span>💬</span>Custom Commands</a>
+      </div>
+
+      <div class="hint" style="font-weight:600; text-transform:uppercase; letter-spacing:0.5px; font-size:11px; margin:0 0 8px;">Bulk & Broadcast</div>
+      <div class="action-grid" style="margin-bottom:20px;">
         <a class="action-tile" href="/dashboard/{guild_id}/mass"><span>🧰</span>Mass Actions</a>
         <a class="action-tile" href="/dashboard/{guild_id}/announce"><span>📣</span>Announcements</a>
         <a class="action-tile" href="/dashboard/{guild_id}/showcase"><span>🎭</span>Showcase</a>
@@ -1269,15 +1292,22 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/greetings"><span>🔊</span>VC Greetings</a>
         <a class="action-tile" href="/dashboard/{guild_id}/tickets"><span>🎫</span>Tickets</a>
         <a class="action-tile" href="/dashboard/{guild_id}/dm"><span>✉️</span>Direct Message</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/webhooks"><span>🔌</span>Webhooks</a>
+      </div>
+
+      <div class="hint" style="font-weight:600; text-transform:uppercase; letter-spacing:0.5px; font-size:11px; margin:0 0 8px;">Insight & Logs</div>
+      <div class="action-grid" style="margin-bottom:20px;">
         <a class="action-tile" href="/dashboard/{guild_id}/logs"><span>🗂️</span>Logs</a>
         <a class="action-tile" href="/dashboard/{guild_id}/activitylog"><span>🖱️</span>Dashboard Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/discordauditlog"><span>🗂️</span>Discord Audit Log</a>
         <a class="action-tile" href="/dashboard/{guild_id}/loginhistory"><span>🔑</span>Login History</a>
-        <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Activity</a>
-        <a class="action-tile" href="/dashboard/{guild_id}/growth"><span>📊</span>Growth Analytics</a>
-        <a class="action-tile" href="/dashboard/{guild_id}/trivia"><span>🧠</span>Trivia</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Message Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/voiceactivity"><span>🎙️</span>Voice Activity</a>
-        <a class="action-tile" href="/dashboard/{guild_id}/customcommands"><span>💬</span>Custom Commands</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/growth"><span>📊</span>Growth Analytics</a>
+      </div>
+
+      <div class="hint" style="font-weight:600; text-transform:uppercase; letter-spacing:0.5px; font-size:11px; margin:0 0 8px;">System</div>
+      <div class="action-grid">
         <a class="action-tile" href="/dashboard/{guild_id}/afk"><span>💤</span>AFK Status</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backup"><span>💾</span>Download Backup</a>
         <a class="action-tile" href="/dashboard/{guild_id}/backups"><span>🗄️</span>Auto Backups</a>
