@@ -4814,6 +4814,30 @@ async def setwhitelistsync(
     await interaction.response.send_message(f"✅ Whitelist sync updated — {', '.join(parts)}.", ephemeral=True)
 
 
+async def web_set_whitelist_sync(guild_id: int, rank_id, rust_command_template, minecraft_enabled, actor_id: int) -> str:
+    """Mirrors /setwhitelistsync."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    cfg = get_guild_cfg(guild_id)
+    if rank_id is None and rust_command_template is None and minecraft_enabled is None:
+        cfg.pop("whitelist_sync_rank_id", None)
+        save_config(config)
+        return "✅ Whitelist auto-sync disabled."
+
+    if rank_id is not None:
+        ranks = cfg.get("ranks", [])
+        if rank_id not in ranks:
+            return "❌ That isn't a configured rank."
+        cfg["whitelist_sync_rank_id"] = rank_id
+    if rust_command_template is not None:
+        cfg["whitelist_rust_command_template"] = rust_command_template
+    if minecraft_enabled is not None:
+        cfg["whitelist_minecraft_enabled"] = minecraft_enabled
+    save_config(config)
+    return "✅ Whitelist sync settings saved."
+
+
 async def _maybe_sync_whitelist(guild_id: int, user_id: int):
     """Called after any rank change/roster addition. Whitelists the member on
     Rust/Minecraft if they've reached the configured threshold rank and have
@@ -4966,6 +4990,41 @@ async def _sync_rank_bonus_roles(guild_id: int, user_id: int, new_rank_id: int):
             await member.add_roles(role, reason=f"Rank bonus role for reaching rank {new_rank_id}")
         except discord.Forbidden:
             print(f"⚠️ Rank bonus role grant failed (no permission) for {guild_id}/{user_id}/{bonus_role_id}")
+
+
+async def web_add_rank_bonus_role(guild_id: int, rank_id: int, bonus_role_id: int, actor_id: int) -> str:
+    """Mirrors /addrankbonusrole."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    rank = guild.get_role(rank_id)
+    bonus_role = guild.get_role(bonus_role_id)
+    if rank is None or bonus_role is None:
+        return "❌ Couldn't find that rank or role."
+    cfg = get_guild_cfg(guild_id)
+    ranks = cfg.get("ranks", [])
+    if rank_id not in ranks:
+        return f"❌ @{rank.name} isn't a configured rank."
+    if bonus_role >= guild.me.top_role:
+        return f"❌ I can't assign @{bonus_role.name} — it's above my own role."
+    bonus_map = cfg.setdefault("rank_bonus_roles", {})
+    bonus_list = bonus_map.setdefault(str(rank_id), [])
+    if bonus_role_id in bonus_list:
+        return f"ℹ️ @{bonus_role.name} is already a bonus role for @{rank.name}."
+    bonus_list.append(bonus_role_id)
+    save_config(config)
+    return f"✅ Reaching @{rank.name} will now also grant @{bonus_role.name}."
+
+
+async def web_remove_rank_bonus_role(guild_id: int, rank_id: int, bonus_role_id: int, actor_id: int) -> str:
+    """Mirrors /removerankbonusrole."""
+    cfg = get_guild_cfg(guild_id)
+    bonus_list = cfg.get("rank_bonus_roles", {}).get(str(rank_id), [])
+    if bonus_role_id not in bonus_list:
+        return "❌ That bonus role isn't set for that rank."
+    bonus_list.remove(bonus_role_id)
+    save_config(config)
+    return "✅ Removed."
 
 
 
@@ -9093,5 +9152,7 @@ if __name__ == "__main__":
         web_rust_set_rules, web_rust_save, web_rust_restart, web_rust_announce,
         web_rust_macro_add, web_rust_macro_remove, web_rust_macro_run,
         web_rust_announcement_add, web_rust_announcement_remove,
+        web_add_rank_bonus_role, web_remove_rank_bonus_role,
+        web_set_whitelist_sync,
     )
     bot.run(TOKEN)

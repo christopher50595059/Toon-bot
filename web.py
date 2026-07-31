@@ -138,6 +138,9 @@ _rust_macro_remove = None
 _rust_macro_run = None
 _rust_announcement_add = None
 _rust_announcement_remove = None
+_add_rank_bonus_role = None
+_remove_rank_bonus_role = None
+_set_whitelist_sync = None
 
 
 # ---------- shared page chrome ----------
@@ -362,6 +365,8 @@ SIDENAV_SECTIONS = [
         ("rust_players_page", "🎮", "Rust: Players"),
         ("rust_bans_page", "🚫", "Rust: Bans"),
         ("rust_macros_page", "⚡", "Rust: Macros"),
+        ("whitelist_sync_page", "🎮", "Whitelist Sync"),
+        ("rank_bonus_roles_page", "🎁", "Rank Bonus Roles"),
         ("minecraft_page", "⛏️", "Minecraft: Overview"),
         ("minecraft_players_page", "🎮", "Minecraft: Players"),
         ("minecraft_bans_page", "🚫", "Minecraft: Bans"),
@@ -1244,6 +1249,8 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/gameservers"><span>🕹️</span>Game Servers</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust"><span>🦀</span>Rust Server</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/macros"><span>⚡</span>Rust Macros</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/whitelistsync"><span>🎮</span>Whitelist Sync</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/rankbonusroles"><span>🎁</span>Rank Bonus Roles</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/players"><span>🎮</span>Rust Players</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rust/bans"><span>🚫</span>Rust Bans</a>
         <a class="action-tile" href="/dashboard/{guild_id}/minecraft"><span>⛏️</span>Minecraft Server</a>
@@ -4612,6 +4619,182 @@ def rust_announcements_remove_route(guild_id):
     return redirect(url_for("rust_macros_page", guild_id=guild_id, result=result))
 
 
+# ---------- whitelist sync ----------
+
+@app.route("/dashboard/<int:guild_id>/whitelistsync")
+def whitelist_sync_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    rank_assets = _rank_search_assets(guild, cfg)
+    threshold_rank_id = cfg.get("whitelist_sync_rank_id")
+    threshold_role = guild.get_role(threshold_rank_id) if threshold_rank_id else None
+
+    linked_steam = cfg.get("linked_steam_ids", {})
+    linked_mc = cfg.get("linked_minecraft_names", {})
+    linked_rows = ""
+    all_linked_ids = set(linked_steam.keys()) | set(linked_mc.keys())
+    if all_linked_ids:
+        for uid in all_linked_ids:
+            m = guild.get_member(int(uid))
+            name = m.display_name if m else f"Unknown ({uid})"
+            linked_rows += f"<tr><td>{name}</td><td>{linked_steam.get(uid, '—')}</td><td>{html.escape(linked_mc.get(uid, '—'))}</td></tr>"
+    else:
+        linked_rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No members have linked an account yet (/linksteam or /linkminecraft).</td></tr>'
+
+    body = f"""
+    <h1>🎮 Whitelist Auto-Sync</h1>
+    <div class="hint" style="margin-bottom:18px;">Reaching a chosen rank automatically whitelists that member on Rust and/or Minecraft, if they've linked their account.</div>
+    {result_html}
+    {rank_assets}
+
+    <div class="card">
+      <h2>⚙️ Settings</h2>
+      <div class="hint" style="margin-bottom:12px;">Current threshold: {threshold_role.mention if threshold_role else "not set"}</div>
+      <form method="post" action="/dashboard/{guild_id}/whitelistsync/save">
+        {_rank_search_field("Rank threshold (this rank or higher triggers whitelisting)", "rank_id")}
+        <div class="field"><label>Rust RCON command template (use {{steamid}} as a placeholder)</label><input type="text" name="rust_command_template" placeholder='whitelist add {{steamid}}' value="{html.escape(cfg.get('whitelist_rust_command_template', ''))}"></div>
+        <div class="field">
+          <label>Minecraft whitelist</label>
+          <select name="minecraft_enabled">
+            <option value="true" {"selected" if cfg.get("whitelist_minecraft_enabled") else ""}>On</option>
+            <option value="false" {"selected" if not cfg.get("whitelist_minecraft_enabled") else ""}>Off</option>
+          </select>
+        </div>
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Linked accounts</h2>
+      {_table_search_box("linked-accounts-table")}
+      <div class="log-wrap"><table class="log-table" id="linked-accounts-table">
+        <tr><th>Member</th><th>SteamID</th><th>Minecraft Username</th></tr>
+        {linked_rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Whitelist Sync", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/whitelistsync/save", methods=["POST"])
+def whitelist_sync_save_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw_rank = request.form.get("rank_id", "")
+    rank_id = int(raw_rank) if raw_rank else None
+    rust_command_template = request.form.get("rust_command_template", "").strip() or None
+    minecraft_enabled = request.form.get("minecraft_enabled") == "true"
+    result = _run_async(_set_whitelist_sync(guild_id, rank_id, rust_command_template, minecraft_enabled, session["user_id"]))
+    return redirect(url_for("whitelist_sync_page", guild_id=guild_id, result=result))
+
+
+# ---------- rank bonus roles ----------
+
+@app.route("/dashboard/<int:guild_id>/rankbonusroles")
+def rank_bonus_roles_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
+
+    rank_assets = _rank_search_assets(guild, cfg)
+    role_assets = _role_search_assets(guild)
+
+    bonus_map = cfg.get("rank_bonus_roles", {})
+    ranks = cfg.get("ranks", [])
+    rows = ""
+    for rid in ranks:
+        bonus_list = bonus_map.get(str(rid), [])
+        if not bonus_list:
+            continue
+        rank_role = guild.get_role(rid)
+        rank_label = rank_role.name if rank_role else f"(deleted rank {rid})"
+        for bonus_id in bonus_list:
+            bonus_role = guild.get_role(bonus_id)
+            bonus_label = bonus_role.name if bonus_role else f"(deleted role {bonus_id})"
+            rows += f"""
+            <tr>
+              <td>{html.escape(rank_label)}</td>
+              <td>{html.escape(bonus_label)}</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/rankbonusroles/remove" style="margin:0;">
+                  <input type="hidden" name="rank_id" value="{rid}">
+                  <input type="hidden" name="bonus_role_id" value="{bonus_id}">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+    if not rows:
+        rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No bonus roles configured yet.</td></tr>'
+
+    body = f"""
+    <h1>🎁 Rank Bonus Roles</h1>
+    <div class="hint" style="margin-bottom:18px;">When someone reaches a rank, automatically grant them extra roles too — additive only, doesn't remove anything on demotion.</div>
+    {result_html}
+    {rank_assets}
+    {role_assets}
+
+    <div class="card">
+      <h2>➕ Add a bonus role</h2>
+      <form method="post" action="/dashboard/{guild_id}/rankbonusroles/add">
+        <div class="grid-2">
+          {_rank_search_field("Rank")}
+          {_role_search_field("Bonus role to grant")}
+        </div>
+        <button class="btn" type="submit">Add</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Current bonus roles</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Rank</th><th>Bonus Role</th><th></th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Rank Bonus Roles", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/rankbonusroles/add", methods=["POST"])
+def rank_bonus_roles_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        rank_id = int(request.form["rank_id"])
+        role_id = int(request.form["role_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("rank_bonus_roles_page", guild_id=guild_id, result="❌ Pick a rank and a role."))
+    result = _run_async(_add_rank_bonus_role(guild_id, rank_id, role_id, session["user_id"]))
+    return redirect(url_for("rank_bonus_roles_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rankbonusroles/remove", methods=["POST"])
+def rank_bonus_roles_remove_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    try:
+        rank_id = int(request.form["rank_id"])
+        bonus_role_id = int(request.form["bonus_role_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("rank_bonus_roles_page", guild_id=guild_id, result="❌ Invalid request."))
+    result = _run_async(_remove_rank_bonus_role(guild_id, rank_id, bonus_role_id, session["user_id"]))
+    return redirect(url_for("rank_bonus_roles_page", guild_id=guild_id, result=result))
+
+
 # ---------- Minecraft server integration ----------
 
 @app.route("/dashboard/<int:guild_id>/minecraft")
@@ -6151,6 +6334,8 @@ def start_web_app(
     rust_set_rules, rust_save, rust_restart, rust_announce,
     rust_macro_add, rust_macro_remove, rust_macro_run,
     rust_announcement_add, rust_announcement_remove,
+    add_rank_bonus_role, remove_rank_bonus_role,
+    set_whitelist_sync,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -6185,6 +6370,8 @@ def start_web_app(
     global _rust_set_rules, _rust_save, _rust_restart, _rust_announce
     global _rust_macro_add, _rust_macro_remove, _rust_macro_run
     global _rust_announcement_add, _rust_announcement_remove
+    global _add_rank_bonus_role, _remove_rank_bonus_role
+    global _set_whitelist_sync
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -6278,6 +6465,9 @@ def start_web_app(
     _rust_macro_run = rust_macro_run
     _rust_announcement_add = rust_announcement_add
     _rust_announcement_remove = rust_announcement_remove
+    _add_rank_bonus_role = add_rank_bonus_role
+    _remove_rank_bonus_role = remove_rank_bonus_role
+    _set_whitelist_sync = set_whitelist_sync
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 
