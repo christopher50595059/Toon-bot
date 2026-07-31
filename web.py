@@ -495,6 +495,8 @@ SEARCH_JS = """
     _activeSearchInput.value = label;
     hidden.value = id;
     getDropdownEl().style.display = 'none';
+    const onSelectFn = hidden.dataset.onselect;
+    if (onSelectFn && window[onSelectFn]) window[onSelectFn](id);
   }
   document.addEventListener('click', function(e) {
     if (!e.target.closest('.search-wrap') && !e.target.closest('.search-dropdown-floating')) {
@@ -6356,7 +6358,7 @@ def console_page(guild_id):
             entry["dedicated_page_url"] = None
         console_data[cmd["name"]] = entry
 
-    options_html = "".join(f'<option value="{html.escape(c["name"])}">/{html.escape(c["name"])}</option>' for c in commands_list)
+    command_search_map = {f"/{c['name']} — {c['description'][:60]}": c["name"] for c in commands_list}
     channel_assets = _channel_search_assets(guild)
 
     body = f"""
@@ -6370,17 +6372,21 @@ def console_page(guild_id):
     {result_html}
     {channel_assets}
 
-    <script>window._consoleData = {json.dumps(console_data)};</script>
+    <script>
+      window._consoleData = {json.dumps(console_data)};
+      SEARCH_MAPS.command = {json.dumps(command_search_map)};
+    </script>
 
     <div class="card">
       <h2>Run a command</h2>
       <form method="post" action="/dashboard/{guild_id}/console/run" id="consoleForm">
         <div class="field">
           <label>Command</label>
-          <select id="consoleCommandSelect" name="command_name" onchange="onConsoleCommandChange()" required>
-            <option value="">— Choose a command —</option>
-            {options_html}
-          </select>
+          <div class="search-wrap">
+            <input type="text" data-map="command" placeholder="Type to search commands..." autocomplete="off"
+                   oninput="onSearchInput(this)" onfocus="onSearchFocus(this)">
+          </div>
+          <input type="hidden" name="command_name" data-onselect="onConsoleCommandChange" required>
         </div>
         <div id="consoleDescription" class="hint" style="margin-bottom:12px;"></div>
         <div id="consoleParams"></div>
@@ -6397,9 +6403,8 @@ def console_page(guild_id):
     </div>
 
     <script>
-      function onConsoleCommandChange() {{
-        const select = document.getElementById('consoleCommandSelect');
-        const cmd = window._consoleData[select.value];
+      function onConsoleCommandChange(cmdName) {{
+        const cmd = window._consoleData[cmdName];
         const paramsBox = document.getElementById('consoleParams');
         const descBox = document.getElementById('consoleDescription');
         const runBtn = document.getElementById('consoleRunBtn');
