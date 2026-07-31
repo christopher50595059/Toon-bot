@@ -352,6 +352,7 @@ BASE_STYLE = """
 SIDENAV_SECTIONS = [
     ("General", [
         ("dashboard", "⚙️", "Settings"),
+        ("global_search_page", "🔍", "Search"),
         ("setup_wizard_page", "🧭", "Setup Wizard"),
         ("lookup_page", "🔎", "Member Lookup"),
         ("roles_page", "🎭", "Roles"),
@@ -1236,6 +1237,9 @@ def dashboard(guild_id):
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/guilds">&larr; All servers</a></div>
     <h1 style="margin-top:18px;">{guild_icon_html}{guild.name}</h1>
+    <form method="get" action="/dashboard/{guild_id}/search" style="margin:10px 0 16px;">
+      <input type="text" name="q" placeholder="🔍 Search members, tickets, warnings, custom commands..." style="max-width:420px;">
+    </form>
     {stats_html}
     <div class="hint" style="margin-bottom:12px;">📡 Public status page (no login, safe to share with members): <a href="/status/{guild_id}" target="_blank">{DASHBOARD_URL}/status/{guild_id}</a></div>
     {flash_html}
@@ -6323,6 +6327,114 @@ def login_history_page(guild_id):
     </div>
     """
     return render_page(f"{guild.name} — Login History", body, guild_id=guild_id)
+
+
+# ---------- global search ----------
+
+@app.route("/dashboard/<int:guild_id>/search")
+def global_search_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    query = request.args.get("q", "").strip()
+    query_lower = query.lower()
+
+    sections_html = ""
+    total_hits = 0
+
+    if query:
+        # ---- members (roster + general) ----
+        member_hits = []
+        for m in guild.members:
+            if query_lower in m.display_name.lower() or query_lower in str(m.id):
+                member_hits.append(m)
+            if len(member_hits) >= 15:
+                break
+        if member_hits:
+            rows = "".join(
+                f'<tr><td>{html.escape(m.display_name)}</td><td><a href="/dashboard/{guild_id}/lookup?user_id={m.id}">View →</a></td></tr>'
+                for m in member_hits
+            )
+            sections_html += f"""
+            <div class="card">
+              <h2>👤 Members ({len(member_hits)})</h2>
+              <div class="log-wrap"><table class="log-table"><tr><th>Name</th><th></th></tr>{rows}</table></div>
+            </div>
+            """
+            total_hits += len(member_hits)
+
+        # ---- tickets ----
+        ticket_hits = []
+        for tid, t in cfg.get("tickets", {}).items():
+            creator = guild.get_member(t.get("user_id"))
+            creator_name = creator.display_name if creator else ""
+            if query_lower in creator_name.lower() or query in str(tid) or query_lower in t.get("type_name", "").lower():
+                ticket_hits.append((tid, t, creator_name))
+        if ticket_hits:
+            rows = "".join(
+                f'<tr><td>#{tid}</td><td>{html.escape(name or "Unknown")}</td><td>{t.get("status", "")}</td>'
+                f'<td><a href="/dashboard/{guild_id}/tickets/{tid}">View →</a></td></tr>'
+                for tid, t, name in ticket_hits[:15]
+            )
+            sections_html += f"""
+            <div class="card">
+              <h2>🎫 Tickets ({len(ticket_hits)})</h2>
+              <div class="log-wrap"><table class="log-table"><tr><th>#</th><th>Creator</th><th>Status</th><th></th></tr>{rows}</table></div>
+            </div>
+            """
+            total_hits += len(ticket_hits)
+
+        # ---- warnings ----
+        warning_hits = []
+        for uid, entries in cfg.get("warnings", {}).items():
+            m = guild.get_member(int(uid))
+            name = m.display_name if m else f"Unknown ({uid})"
+            if query_lower in name.lower() and entries:
+                warning_hits.append((uid, name, len(entries)))
+        if warning_hits:
+            rows = "".join(
+                f'<tr><td>{html.escape(name)}</td><td>{count}</td>'
+                f'<td><a href="/dashboard/{guild_id}/lookup?user_id={uid}">View →</a></td></tr>'
+                for uid, name, count in warning_hits[:15]
+            )
+            sections_html += f"""
+            <div class="card">
+              <h2>⚠️ Warnings ({len(warning_hits)})</h2>
+              <div class="log-wrap"><table class="log-table"><tr><th>Member</th><th>Count</th><th></th></tr>{rows}</table></div>
+            </div>
+            """
+            total_hits += len(warning_hits)
+
+        # ---- custom commands ----
+        cc_hits = [(trig, resp) for trig, resp in cfg.get("custom_commands", {}).items() if query_lower in trig.lower() or query_lower in resp.lower()]
+        if cc_hits:
+            rows = "".join(f'<tr><td><code>{html.escape(t)}</code></td><td>{html.escape(r[:80])}</td></tr>' for t, r in cc_hits[:15])
+            sections_html += f"""
+            <div class="card">
+              <h2>💬 Custom Commands ({len(cc_hits)})</h2>
+              <div class="log-wrap"><table class="log-table"><tr><th>Trigger</th><th>Response</th></tr>{rows}</table></div>
+              <div class="hint" style="margin-top:8px;"><a href="/dashboard/{guild_id}/customcommands">Manage custom commands →</a></div>
+            </div>
+            """
+            total_hits += len(cc_hits)
+
+        if total_hits == 0:
+            sections_html = f'<div class="card"><div class="hint">No results for "{html.escape(query)}".</div></div>'
+
+    body = f"""
+    <h1>🔍 Search</h1>
+    <div class="card">
+      <form method="get" action="/dashboard/{guild_id}/search">
+        <div class="field"><input type="text" name="q" value="{html.escape(query)}" placeholder="Search members, tickets, warnings, custom commands..." autofocus></div>
+        <button class="btn" type="submit">Search</button>
+      </form>
+    </div>
+    {f'<div class="hint" style="margin-bottom:12px;">{total_hits} result(s) for "{html.escape(query)}"</div>' if query else ''}
+    {sections_html}
+    """
+    return render_page(f"{guild.name} — Search", body, guild_id=guild_id)
 
 
 # ---------- command console ----------
