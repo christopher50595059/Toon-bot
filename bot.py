@@ -247,6 +247,8 @@ async def on_ready():
         gamenight_reminder_loop.start()
     if not weekly_evaluation_loop.is_running():
         weekly_evaluation_loop.start()
+    if not config_health_alert_loop.is_running():
+        config_health_alert_loop.start()
     if not weekly_voice_activity_loop.is_running():
         weekly_voice_activity_loop.start()
     if not ticket_autoclose_loop.is_running():
@@ -6931,6 +6933,61 @@ async def weekly_evaluation_loop():
         cfg["message_counts"] = {}
         cfg["message_count_since"] = now.isoformat()
         save_config(config)
+
+
+@tasks.loop(hours=24)
+async def config_health_alert_loop():
+    """Daily check for broken configuration — a channel that got deleted, a
+    role that got removed, etc. Only alerts when something NEWLY breaks
+    (tracked via health_alert_state), so it doesn't repeat the same warning
+    every single day. Deliberately kept separate from the web dashboard's
+    System Health page rather than sharing its code, so a bug here can't
+    affect that page and vice versa."""
+    for guild in bot.guilds:
+        cfg = get_guild_cfg(guild.id)
+        previous_state = cfg.get("health_alert_state", {})
+        current_state = {}
+        newly_broken = []
+
+        checks = [
+            ("log_channel_id", "Log channel", lambda cid: guild.get_channel(cid) is not None),
+            ("roster_channel_id", "Roster channel", lambda cid: guild.get_channel(cid) is not None),
+            ("stats_channel_id", "Stats channel", lambda cid: guild.get_channel(cid) is not None),
+            ("manager_role_id", "Manager role", lambda rid: guild.get_role(rid) is not None),
+        ]
+        for key, label, is_ok_fn in checks:
+            value = cfg.get(key)
+            if value is None:
+                continue
+            is_ok = is_ok_fn(value)
+            current_state[key] = is_ok
+            if is_ok is False and previous_state.get(key) is not False:
+                newly_broken.append(label)
+
+        ranks = cfg.get("ranks", [])
+        if ranks:
+            broken_ranks = [rid for rid in ranks if guild.get_role(rid) is None]
+            current_state["ranks_ok"] = len(broken_ranks) == 0
+            if broken_ranks and previous_state.get("ranks_ok") is not False:
+                newly_broken.append(f"{len(broken_ranks)} configured rank(s)")
+
+        cfg["health_alert_state"] = current_state
+        save_config(config)
+
+        if newly_broken:
+            log_channel_id = cfg.get("log_channel_id")
+            channel = guild.get_channel(log_channel_id) if log_channel_id else None
+            # If the log channel itself is what broke, there's nowhere sensible
+            # left to post — that case just silently stays caught next visit
+            # to the System Health page instead of trying to guess another channel.
+            if channel:
+                try:
+                    await channel.send(
+                        f"🩺 **Configuration health check found a new problem:** {', '.join(newly_broken)}. "
+                        "Check the System Health page on the dashboard for details."
+                    )
+                except discord.Forbidden:
+                    pass
 
 
 @tasks.loop(hours=1)
