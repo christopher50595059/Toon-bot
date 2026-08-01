@@ -114,6 +114,7 @@ Commands:
   /setreportschannel [channel]            - (admin only) set the private channel for member reports
   /discordauditlog [limit]                - show Discord's own audit log (bans, kicks, channel/role changes)
   /ping                                    - check if the bot is up and responding
+  /stopmassaction                          - cancel an in-progress bulk operation (roster add-all, mass rename/role changes)
   /setviewerrole [role]                   - (admin only) role that gets view-only web dashboard access
   /setbanrole [role]                      - (admin only) role threshold for using /ban (Discord + web)
   /linksteam steamid:<text>               - link your SteamID for Rust whitelist auto-sync
@@ -923,6 +924,11 @@ async def web_roster_add_all(guild_id: int, rank_role_id: int, actor_id: int) ->
         if i % 50 == 0:
             save_config(config)  # checkpoint progress so a restart mid-run doesn't lose it
             await _post_log(f"📋 Bulk roster add-all progress: {i}/{len(all_members)} processed ({added} added, {moved} moved so far).")
+            if _mass_action_cancel_requested(guild_id):
+                await _post_log(f"🛑 Bulk roster add-all cancelled at {i}/{len(all_members)} — progress so far was kept.")
+                await refresh_roster_message(guild)
+                await refresh_server_stats_message(guild)
+                return f"🛑 Cancelled at {i}/{len(all_members)}. {added} added, {moved} moved before stopping."
 
     save_config(config)
     await refresh_roster_message(guild)
@@ -6113,6 +6119,16 @@ async def rosteraddall(interaction: discord.Interaction, rank: discord.Role):
 
         if i % 50 == 0:
             save_config(config)  # checkpoint progress so a restart mid-run doesn't lose it
+            if _mass_action_cancel_requested(interaction.guild_id):
+                try:
+                    await interaction.edit_original_response(
+                        content=f"🛑 Cancelled at {i}/{len(all_members)} — {len(added_members)} added, {len(moved_members)} moved before stopping.",
+                    )
+                except discord.HTTPException:
+                    pass
+                await refresh_roster_message(interaction.guild)
+                await refresh_server_stats_message(interaction.guild)
+                return
             try:
                 await interaction.edit_original_response(
                     content=f"⏳ Progress: {i}/{len(all_members)} processed ({len(added_members)} added, {len(moved_members)} moved so far)...",
@@ -8612,6 +8628,41 @@ async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"🏓 Pong! ({latency_ms}ms)")
 
 
+@bot.tree.command(name="stopmassaction", description="Cancel an in-progress bulk operation (roster add-all, mass rename/add role/remove role).")
+async def stopmassaction(interaction: discord.Interaction):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    cfg["mass_action_cancel_requested"] = True
+    save_config(config)
+    await interaction.response.send_message(
+        "🛑 Cancellation requested. Any bulk operation currently running will stop at its next checkpoint "
+        "(within a few members) and keep whatever progress it already made.",
+        ephemeral=True,
+    )
+
+
+async def web_stop_mass_action(guild_id: int, actor_id: int) -> str:
+    """Mirrors /stopmassaction."""
+    cfg = get_guild_cfg(guild_id)
+    cfg["mass_action_cancel_requested"] = True
+    save_config(config)
+    return "🛑 Cancellation requested. Any bulk operation currently running will stop shortly and keep its progress."
+
+
+def _mass_action_cancel_requested(guild_id: int) -> bool:
+    """Checked periodically inside long-running bulk loops. Clears the flag
+    once seen, so a single /stopmassaction only cancels the operation(s)
+    currently in flight, not future ones too."""
+    cfg = get_guild_cfg(guild_id)
+    if cfg.get("mass_action_cancel_requested"):
+        cfg["mass_action_cancel_requested"] = False
+        save_config(config)
+        return True
+    return False
+
+
 @bot.tree.command(name="discordauditlog", description="Show Discord's own audit log (bans, kicks, channel/role changes, etc).")
 @app_commands.describe(limit="How many entries to show (max 50)")
 async def discordauditlog(interaction: discord.Interaction, limit: int = 20):
@@ -8834,7 +8885,7 @@ async def massrename(
     await interaction.edit_original_response(content=f"⏳ Renaming {len(targets)} member(s)...", view=None)
 
     renamed, failed = 0, 0
-    for member in targets:
+    for i, member in enumerate(targets, start=1):
         base_name = member.nick or member.name
         new_nick = f"{prefix or ''}{base_name}{suffix or ''}"[:32]  # Discord's nickname length limit
         try:
@@ -8842,6 +8893,12 @@ async def massrename(
             renamed += 1
         except (discord.Forbidden, discord.HTTPException):
             failed += 1
+
+        if i % 25 == 0 and _mass_action_cancel_requested(interaction.guild_id):
+            await interaction.followup.send(
+                f"🛑 Cancelled at {i}/{len(targets)}. Renamed {renamed} so far, {failed} failed.", ephemeral=True
+            )
+            return
 
     summary = f"✅ Renamed {renamed} member(s)."
     if failed:
@@ -8911,14 +8968,19 @@ async def massaddrole(
     await interaction.edit_original_response(content=f"⏳ Adding {role.mention} to {len(targets)} member(s)...", view=None)
 
     added, failed = 0, 0
-    for member in targets:
+    cancelled = False
+    for i, member in enumerate(targets, start=1):
         try:
             await member.add_roles(role, reason=f"Mass add by {interaction.user}: {reason}")
             added += 1
         except (discord.Forbidden, discord.HTTPException):
             failed += 1
 
-    summary = f"✅ Gave {role.mention} to {added} member(s)."
+        if i % 25 == 0 and _mass_action_cancel_requested(interaction.guild_id):
+            cancelled = True
+            break
+
+    summary = f"🛑 Cancelled — gave {role.mention} to {added} member(s) before stopping." if cancelled else f"✅ Gave {role.mention} to {added} member(s)."
     if failed:
         summary += f" ⚠️ {failed} failed (likely a permissions issue)."
     await interaction.followup.send(summary, ephemeral=True)
@@ -8984,14 +9046,19 @@ async def massremoverole(
     await interaction.edit_original_response(content=f"⏳ Removing {role.mention} from {len(targets)} member(s)...", view=None)
 
     removed, failed = 0, 0
-    for member in targets:
+    cancelled = False
+    for i, member in enumerate(targets, start=1):
         try:
             await member.remove_roles(role, reason=f"Mass remove by {interaction.user}: {reason}")
             removed += 1
         except (discord.Forbidden, discord.HTTPException):
             failed += 1
 
-    summary = f"✅ Removed {role.mention} from {removed} member(s)."
+        if i % 25 == 0 and _mass_action_cancel_requested(interaction.guild_id):
+            cancelled = True
+            break
+
+    summary = f"🛑 Cancelled — removed {role.mention} from {removed} member(s) before stopping." if cancelled else f"✅ Removed {role.mention} from {removed} member(s)."
     if failed:
         summary += f" ⚠️ {failed} failed (likely a permissions issue)."
     await interaction.followup.send(summary, ephemeral=True)
@@ -9135,6 +9202,7 @@ HELP_CATEGORIES = {
     ],
     "🔧 Utility": [
         ("/ping", "Check if the bot is up and responding"),
+        ("/stopmassaction", "Cancel an in-progress bulk operation"),
         ("/afk", "Mark yourself AFK"),
         ("/weblogin", "Get a one-time code to log into the web dashboard"),
         ("/setweblogincommandrole", "(admin) Restrict who can run /weblogin"),
@@ -9468,5 +9536,6 @@ if __name__ == "__main__":
         web_add_rank_bonus_role, web_remove_rank_bonus_role,
         web_set_whitelist_sync,
         get_console_commands, run_console_command,
+        web_stop_mass_action,
     )
     bot.run(TOKEN)

@@ -143,6 +143,7 @@ _remove_rank_bonus_role = None
 _set_whitelist_sync = None
 _get_console_commands = None
 _run_console_command = None
+_stop_mass_action = None
 
 
 # ---------- shared page chrome ----------
@@ -2329,6 +2330,18 @@ def mass_page(guild_id):
     {role_assets}
 
     <div class="card">
+      <h2>🛑 Stop a Running Bulk Operation</h2>
+      <div class="hint" style="margin-bottom:12px;">
+        Roster add-all and the mass actions below can take a while on large servers. If one is currently running
+        (in Discord or from this dashboard) and you need to stop it, this cancels it at its next checkpoint —
+        typically within a few members — and keeps whatever progress it already made.
+      </div>
+      <form method="post" action="/dashboard/{guild_id}/mass/stop">
+        <button class="btn btn-secondary" type="submit">Stop Running Bulk Operation</button>
+      </form>
+    </div>
+
+    <div class="card">
       <h2>🟢 Give a role to many members</h2>
       <form method="post" action="/dashboard/{guild_id}/mass/addrole">
         <div class="grid-2">
@@ -2367,6 +2380,15 @@ def mass_page(guild_id):
     </div>
     """
     return render_page(f"{guild.name} — Mass Actions", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/mass/stop", methods=["POST"])
+def mass_stop_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    result = _run_async(_stop_mass_action(guild_id, session["user_id"]))
+    return redirect(url_for("mass_page", guild_id=guild_id, result=result))
 
 
 @app.route("/dashboard/<int:guild_id>/mass/addrole", methods=["POST"])
@@ -6795,6 +6817,7 @@ def start_web_app(
     add_rank_bonus_role, remove_rank_bonus_role,
     set_whitelist_sync,
     get_console_commands, run_console_command,
+    stop_mass_action,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -6832,6 +6855,7 @@ def start_web_app(
     global _add_rank_bonus_role, _remove_rank_bonus_role
     global _set_whitelist_sync
     global _get_console_commands, _run_console_command
+    global _stop_mass_action
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -6930,6 +6954,7 @@ def start_web_app(
     _set_whitelist_sync = set_whitelist_sync
     _get_console_commands = get_console_commands
     _run_console_command = run_console_command
+    _stop_mass_action = stop_mass_action
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 
