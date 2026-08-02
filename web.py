@@ -6623,17 +6623,20 @@ def console_page(guild_id):
 
     command_search_map = {f"/{c['name']} — {c['description'][:60]}": c["name"] for c in commands_list}
     channel_assets = _channel_search_assets(guild)
+    role_assets = _role_search_assets(guild)
+    member_assets = _member_search_assets(guild)
 
     body = f"""
     <h1>🖥️ Command Console</h1>
     <div class="hint" style="margin-bottom:18px;">
       Run (almost) any bot command directly from the web — no need to be in Discord. A handful of commands that
       require clicking a confirmation button in Discord aren't available here; they'll show a link to their
-      normal dashboard page instead. Members/roles/channels are entered as their numeric ID (right-click →
-      Copy ID, with Developer Mode on in Discord).
+      normal dashboard page instead.
     </div>
     {result_html}
     {channel_assets}
+    {role_assets}
+    {member_assets}
 
     <script>
       window._consoleData = {json.dumps(console_data)};
@@ -6720,11 +6723,28 @@ def console_page(guild_id):
             select2.name = 'param_' + p.name;
             select2.innerHTML = '<option value="">— none —</option><option value="true">True</option><option value="false">False</option>';
             div.appendChild(select2);
+          }} else if (p.type === 'user' || p.type === 'role' || p.type === 'channel') {{
+            const mapKey = p.type === 'user' ? 'member' : p.type;
+            const searchWrap = document.createElement('div');
+            searchWrap.className = 'search-wrap';
+            const searchInput = document.createElement('input');
+            searchInput.type = 'text';
+            searchInput.dataset.map = mapKey;
+            searchInput.placeholder = 'Type or click to browse...';
+            searchInput.autocomplete = 'off';
+            searchInput.oninput = function() {{ onSearchInput(this); }};
+            searchInput.onfocus = function() {{ onSearchFocus(this); }};
+            searchWrap.appendChild(searchInput);
+            div.appendChild(searchWrap);
+            const hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = 'param_' + p.name;
+            if (p.required) hidden.required = true;
+            div.appendChild(hidden);
           }} else {{
             const input = document.createElement('input');
             input.type = (p.type === 'integer' || p.type === 'number') ? 'number' : 'text';
             input.name = 'param_' + p.name;
-            input.placeholder = (p.type === 'user' || p.type === 'role' || p.type === 'channel') ? 'Numeric Discord ID' : '';
             if (p.required) input.required = true;
             div.appendChild(input);
           }}
