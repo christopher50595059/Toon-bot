@@ -384,6 +384,7 @@ SIDENAV_SECTIONS = [
         ("giveaways_page", "🎉", "Giveaways"),
         ("trivia_page", "🧠", "Trivia Leaderboard"),
         ("rank_bonus_roles_page", "🎁", "Rank Bonus Roles"),
+        ("teams_page", "🧑‍🤝‍🧑", "Teams"),
         ("custom_commands_page", "💬", "Custom Commands"),
     ]),
     ("Bulk & Broadcast", [
@@ -1291,6 +1292,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/giveaways"><span>🎉</span>Giveaways</a>
         <a class="action-tile" href="/dashboard/{guild_id}/trivia"><span>🧠</span>Trivia</a>
         <a class="action-tile" href="/dashboard/{guild_id}/rankbonusroles"><span>🎁</span>Rank Bonus Roles</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/teams"><span>🧑‍🤝‍🧑</span>Teams</a>
         <a class="action-tile" href="/dashboard/{guild_id}/customcommands"><span>💬</span>Custom Commands</a>
       </div>
 
@@ -4857,6 +4859,55 @@ def rank_bonus_roles_remove_route(guild_id):
         return redirect(url_for("rank_bonus_roles_page", guild_id=guild_id, result="❌ Invalid request."))
     result = _run_async(_remove_rank_bonus_role(guild_id, rank_id, bonus_role_id, session["user_id"]))
     return redirect(url_for("rank_bonus_roles_page", guild_id=guild_id, result=result))
+
+
+# ---------- teams ----------
+
+@app.route("/dashboard/<int:guild_id>/teams")
+def teams_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    cfg = _get_guild_cfg(guild_id)
+    teams = cfg.get("teams", {})
+
+    rows = ""
+    if teams:
+        for name, t in teams.items():
+            captain = guild.get_member(t.get("captain_id"))
+            captain_name = captain.display_name if captain else "Unknown"
+            member_names = []
+            for uid in t.get("members", []):
+                m = guild.get_member(uid)
+                member_names.append(m.display_name if m else f"Unknown ({uid})")
+            size = t.get("size", len(t.get("members", [])))
+            filled = len(t.get("members", []))
+            status = "✅ Full" if filled >= size else f"{filled}/{size}"
+            rows += f"""
+            <tr>
+              <td>{html.escape(name)}</td>
+              <td>{status}</td>
+              <td>{html.escape(captain_name)}</td>
+              <td>{html.escape(", ".join(member_names)) if member_names else "—"}</td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="4" class="hint" style="padding:16px;">No teams formed yet — members create them with /team create.</td></tr>'
+
+    body = f"""
+    <h1>🧑‍🤝‍🧑 Teams</h1>
+    <div class="hint" style="margin-bottom:18px;">Teams formed with /team create — any size from 1v1 to 5v5. Used for team-mode tournaments.</div>
+
+    <div class="card">
+      {_table_search_box("teams-table")}
+      <div class="log-wrap"><table class="log-table" id="teams-table">
+        <tr><th>Team</th><th>Status</th><th>Captain</th><th>Members</th></tr>
+        {rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Teams", body, guild_id=guild_id)
 
 
 # ---------- Minecraft server integration ----------
