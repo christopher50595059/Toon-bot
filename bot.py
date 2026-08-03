@@ -118,6 +118,7 @@ Commands:
   /setviewerrole [role]                   - (admin only) role that gets view-only web dashboard access
   /setbanrole [role]                      - (admin only) role threshold for using /ban (Discord + web)
   /linksteam steamid:<text>               - link your SteamID for Rust whitelist auto-sync
+  /setsteamlinkrole [role]                 - (admin only) role auto-granted when someone links their SteamID
   /linkminecraft username:<text>          - link your Minecraft username for whitelist auto-sync
   /setwhitelistsync [rank] [rust_command_template] [minecraft_enabled] - (admin only) auto-whitelist on Rust/Minecraft at a rank threshold
   /addrankbonusrole rank:<role> bonus_role:<role> - auto-grant an extra role when someone reaches a rank
@@ -4760,8 +4761,36 @@ async def linksteam(interaction: discord.Interaction, steamid: str):
     links = cfg.setdefault("linked_steam_ids", {})
     links[str(interaction.user.id)] = steamid
     save_config(config)
-    await interaction.response.send_message(f"✅ Linked SteamID `{steamid}` to your account.", ephemeral=True)
+    role_note = ""
+    role_id = cfg.get("steam_link_role_id")
+    if role_id:
+        role = interaction.guild.get_role(role_id)
+        if role and role not in interaction.user.roles and role < interaction.guild.me.top_role:
+            try:
+                await interaction.user.add_roles(role, reason="Linked SteamID via /linksteam")
+                role_note = f" You've also been given {role.mention}."
+            except discord.Forbidden:
+                pass
+    await interaction.response.send_message(f"✅ Linked SteamID `{steamid}` to your account.{role_note}", ephemeral=True)
     await _maybe_sync_whitelist(interaction.guild_id, interaction.user.id)
+
+
+@bot.tree.command(name="setsteamlinkrole", description="Set a role that's automatically given when someone links their SteamID with /linksteam.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(role="The role to grant — omit to disable")
+async def setsteamlinkrole(interaction: discord.Interaction, role: discord.Role = None):
+    cfg = get_guild_cfg(interaction.guild_id)
+    if role is None:
+        cfg.pop("steam_link_role_id", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Steam-link auto-role disabled.", ephemeral=True)
+        return
+    if role >= interaction.guild.me.top_role:
+        await interaction.response.send_message(f"❌ I can't assign {role.mention} — it's above my own role.", ephemeral=True)
+        return
+    cfg["steam_link_role_id"] = role.id
+    save_config(config)
+    await interaction.response.send_message(f"✅ Members will now get {role.mention} when they link their SteamID with /linksteam.", ephemeral=True)
 
 
 @bot.tree.command(name="linkminecraft", description="Link your Minecraft username, so reaching the right rank can auto-whitelist you.")
@@ -9192,6 +9221,7 @@ HELP_CATEGORIES = {
     ],
     "🎮 Whitelist Auto-Sync": [
         ("/linksteam", "Link your SteamID for Rust whitelist auto-sync"),
+        ("/setsteamlinkrole", "(admin) Role auto-granted when someone links their SteamID"),
         ("/linkminecraft", "Link your Minecraft username for whitelist auto-sync"),
         ("/setwhitelistsync", "(admin) Auto-whitelist on Rust/Minecraft at a rank threshold"),
     ],
@@ -9487,6 +9517,7 @@ bot.tree.add_command(showcase_group)
 @setviewerrole.error
 @setbanrole.error
 @setwhitelistsync.error
+@setsteamlinkrole.error
 async def admin_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
