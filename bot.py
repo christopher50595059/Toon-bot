@@ -26,7 +26,15 @@ Commands:
   /inactive                               - show roster members who haven't sent a message in a while
   /serverstats                            - show a one-off snapshot of server stats
   /setstatschannel channel:<channel>      - (admin only) post a live server-stats embed that auto-updates in this channel
-  /tournament create name:<text>          - open sign-ups for a single-elimination bracket
+  /team create name:<text> size:<1-5>      - create a team (any size, 1v1 to 5v5) — you become captain
+  /team join name:<text>                   - join an existing team
+  /team leave name:<text>                  - leave your team
+  /team kick name:<text> member:<user>     - (captain) remove a member from your team
+  /team disband name:<text>                - (captain) delete your team
+  /team list                                - show all teams
+  /tournament create name:<text> [team_mode] - open sign-ups for a bracket tournament (team_mode for team-based)
+  /tournament jointeam tournament:<text> team:<text> - (captain) enter your full team into a team-mode tournament
+  /tournament leaveteam tournament:<text> team:<text> - (captain) withdraw your team
   /tournament start name:<text>           - (manager only) lock sign-ups and generate the bracket
   /tournament report name:<text> match:<#> winner:<member>  - (manager only) record a match result
   /tournament bracket name:<text>         - show the current bracket
@@ -6492,18 +6500,145 @@ async def web_report_set_status(guild_id: int, report_id: int, status: str, acto
 
 
 
-def build_tournament_signup_embed(name: str, data: dict) -> discord.Embed:
-    embed = discord.Embed(title=f"🏆 Tournament: {name}", color=discord.Color.gold())
-    if data["status"] == "signup":
-        embed.description = "Sign-ups are open! Click **Join** below to enter."
-        if data["players"]:
-            embed.add_field(
-                name=f"Players ({len(data['players'])})",
-                value="\n".join(f"• <@{pid}>" for pid in data["players"]),
-                inline=False,
-            )
+team_group = app_commands.Group(name="team", description="Form teams for tournaments and events (any size, 1 to 5 players)")
+bot.tree.add_command(team_group)
+
+
+@team_group.command(name="create", description="Create a team. You become the captain.")
+@app_commands.describe(name="A unique name for your team", size="Team size — how many players it needs (1-5)")
+async def team_create(interaction: discord.Interaction, name: str, size: int):
+    if size < 1 or size > 5:
+        await interaction.response.send_message("❌ Team size must be between 1 and 5.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.setdefault("teams", {})
+    if name in teams:
+        await interaction.response.send_message(f"❌ A team named **{name}** already exists.", ephemeral=True)
+        return
+    # keep it simple: one team per person at a time
+    for existing_name, t in teams.items():
+        if interaction.user.id in t["members"]:
+            await interaction.response.send_message(f"❌ You're already on **{existing_name}** — leave it first with `/team leave`.", ephemeral=True)
+            return
+
+    teams[name] = {"captain_id": interaction.user.id, "members": [interaction.user.id], "size": size}
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ Created team **{name}** (1/{size}) — you're the captain. Others can join with `/team join name:{name}`.",
+    )
+
+
+@team_group.command(name="join", description="Join an existing team.")
+@app_commands.describe(name="The team's name")
+async def team_join(interaction: discord.Interaction, name: str):
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team:
+        await interaction.response.send_message(f"❌ No team named **{name}**. Check `/team list`.", ephemeral=True)
+        return
+    for existing_name, t in teams.items():
+        if interaction.user.id in t["members"]:
+            await interaction.response.send_message(f"❌ You're already on **{existing_name}** — leave it first with `/team leave`.", ephemeral=True)
+            return
+    if len(team["members"]) >= team["size"]:
+        await interaction.response.send_message(f"❌ **{name}** is already full ({team['size']}/{team['size']}).", ephemeral=True)
+        return
+
+    team["members"].append(interaction.user.id)
+    save_config(config)
+    full_note = " — team is now full!" if len(team["members"]) >= team["size"] else ""
+    await interaction.response.send_message(f"✅ Joined **{name}** ({len(team['members'])}/{team['size']}){full_note}.")
+
+
+@team_group.command(name="leave", description="Leave your current team.")
+@app_commands.describe(name="The team's name")
+async def team_leave(interaction: discord.Interaction, name: str):
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team or interaction.user.id not in team["members"]:
+        await interaction.response.send_message(f"❌ You're not on **{name}**.", ephemeral=True)
+        return
+    team["members"].remove(interaction.user.id)
+    if team["captain_id"] == interaction.user.id:
+        if team["members"]:
+            team["captain_id"] = team["members"][0]  # pass captaincy to the next member
         else:
-            embed.add_field(name="Players (0)", value="Nobody has joined yet.", inline=False)
+            del teams[name]
+            save_config(config)
+            await interaction.response.send_message(f"✅ Left **{name}** — team disbanded (no members left).")
+            return
+    save_config(config)
+    await interaction.response.send_message(f"✅ Left **{name}**.")
+
+
+@team_group.command(name="kick", description="Remove a member from your team. Captain only.")
+@app_commands.describe(name="The team's name", member="The member to remove")
+async def team_kick(interaction: discord.Interaction, name: str, member: discord.Member):
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team:
+        await interaction.response.send_message(f"❌ No team named **{name}**.", ephemeral=True)
+        return
+    if team["captain_id"] != interaction.user.id and not is_authorized(interaction):
+        await interaction.response.send_message("❌ Only the team captain can do that.", ephemeral=True)
+        return
+    if member.id not in team["members"]:
+        await interaction.response.send_message(f"❌ {member.mention} isn't on **{name}**.", ephemeral=True)
+        return
+    team["members"].remove(member.id)
+    save_config(config)
+    await interaction.response.send_message(f"✅ Removed {member.mention} from **{name}** ({len(team['members'])}/{team['size']}).")
+
+
+@team_group.command(name="disband", description="Delete your team. Captain only.")
+@app_commands.describe(name="The team's name")
+async def team_disband(interaction: discord.Interaction, name: str):
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team:
+        await interaction.response.send_message(f"❌ No team named **{name}**.", ephemeral=True)
+        return
+    if team["captain_id"] != interaction.user.id and not is_authorized(interaction):
+        await interaction.response.send_message("❌ Only the team captain can do that.", ephemeral=True)
+        return
+    del teams[name]
+    save_config(config)
+    await interaction.response.send_message(f"✅ Disbanded **{name}**.")
+
+
+@team_group.command(name="list", description="Show all teams.")
+async def team_list(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.get("teams", {})
+    if not teams:
+        await interaction.response.send_message("No teams formed yet — create one with `/team create`.", ephemeral=True)
+        return
+    lines = []
+    for name, t in teams.items():
+        captain = interaction.guild.get_member(t["captain_id"])
+        member_mentions = ", ".join(f"<@{m}>" for m in t["members"])
+        full_note = " ✅ FULL" if len(t["members"]) >= t["size"] else ""
+        lines.append(f"**{name}** ({len(t['members'])}/{t['size']}){full_note} — Captain: {captain.mention if captain else 'Unknown'}\n{member_mentions}")
+    await interaction.response.send_message("\n\n".join(lines))
+
+
+def build_tournament_signup_embed(name: str, data: dict) -> discord.Embed:
+    embed = discord.Embed(title=f"🏆 Tournament: {name}" + (" (Team)" if data.get("team_mode") else ""), color=discord.Color.gold())
+    label = "Teams" if data.get("team_mode") else "Players"
+    if data["status"] == "signup":
+        if data.get("team_mode"):
+            embed.description = "Sign-ups are open! A team captain enters with `/tournament jointeam`."
+        else:
+            embed.description = "Sign-ups are open! Click **Join** below to enter."
+        if data["players"]:
+            entries = "\n".join(f"• **{pid}**" if data.get("team_mode") else f"• <@{pid}>" for pid in data["players"])
+            embed.add_field(name=f"{label} ({len(data['players'])})", value=entries, inline=False)
+        else:
+            embed.add_field(name=f"{label} (0)", value="Nobody has joined yet.", inline=False)
     else:
         embed.description = "Sign-ups are closed — the tournament has started."
     return embed
@@ -6522,6 +6657,12 @@ class TournamentJoinView(discord.ui.View):
         if not data or data["status"] != "signup":
             await interaction.response.send_message("❌ Sign-ups are closed for this tournament.", ephemeral=True)
             return
+        if data.get("team_mode"):
+            await interaction.response.send_message(
+                f"❌ This is a team tournament — your team captain signs up your whole team with `/tournament jointeam tournament:{self.name} team:<your team name>`.",
+                ephemeral=True,
+            )
+            return
         if interaction.user.id not in data["players"]:
             data["players"].append(interaction.user.id)
             save_config(config)
@@ -6533,6 +6674,12 @@ class TournamentJoinView(discord.ui.View):
         data = cfg.get("tournaments", {}).get(self.name)
         if not data or data["status"] != "signup":
             await interaction.response.send_message("❌ Sign-ups are closed for this tournament.", ephemeral=True)
+            return
+        if data.get("team_mode"):
+            await interaction.response.send_message(
+                f"❌ This is a team tournament — your team captain withdraws your team with `/tournament leaveteam tournament:{self.name} team:<your team name>`.",
+                ephemeral=True,
+            )
             return
         if interaction.user.id in data["players"]:
             data["players"].remove(interaction.user.id)
@@ -6558,9 +6705,15 @@ def make_tournament_pairings(player_ids: list, shuffle: bool = False) -> list:
 
 
 def build_tournament_bracket_embed(name: str, data: dict) -> discord.Embed:
+    team_mode = data.get("team_mode")
+    def fmt(entity_id):
+        if entity_id is None:
+            return "BYE"
+        return f"**{entity_id}**" if team_mode else f"<@{entity_id}>"
+
     if data["status"] == "complete":
         embed = discord.Embed(
-            title=f"🏆 {name} — Champion: <@{data['champion']}>! 🎉",
+            title=f"🏆 {name} — Champion: {fmt(data['champion'])}! 🎉",
             color=discord.Color.gold(),
         )
     else:
@@ -6569,10 +6722,9 @@ def build_tournament_bracket_embed(name: str, data: dict) -> discord.Embed:
     for round_idx, round_matches in enumerate(data["rounds"], start=1):
         lines = []
         for match_idx, m in enumerate(round_matches, start=1):
-            p1 = f"<@{m['p1']}>" if m["p1"] else "BYE"
-            p2 = f"<@{m['p2']}>" if m["p2"] else "BYE"
+            p1, p2 = fmt(m["p1"]), fmt(m["p2"])
             if m["winner"]:
-                lines.append(f"Match {match_idx}: {p1} vs {p2} → 🏆 <@{m['winner']}>")
+                lines.append(f"Match {match_idx}: {p1} vs {p2} → 🏆 {fmt(m['winner'])}")
             else:
                 lines.append(f"Match {match_idx}: {p1} vs {p2} → TBD")
         embed.add_field(name=f"Round {round_idx}", value="\n".join(lines), inline=False)
@@ -6585,8 +6737,8 @@ bot.tree.add_command(tournament_group)
 
 
 @tournament_group.command(name="create", description="Open sign-ups for a single-elimination tournament.")
-@app_commands.describe(name="A short name for this tournament")
-async def tournament_create(interaction: discord.Interaction, name: str):
+@app_commands.describe(name="A short name for this tournament", team_mode="Team-based tournament? Teams must be formed first with /team create (any size 1v1 to 5v5)")
+async def tournament_create(interaction: discord.Interaction, name: str, team_mode: bool = False):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
@@ -6600,7 +6752,7 @@ async def tournament_create(interaction: discord.Interaction, name: str):
         )
         return
 
-    data = {"status": "signup", "players": [], "rounds": [], "channel_id": interaction.channel_id}
+    data = {"status": "signup", "players": [], "rounds": [], "channel_id": interaction.channel_id, "team_mode": team_mode}
     tournaments[name] = data
     save_config(config)
 
@@ -6609,6 +6761,78 @@ async def tournament_create(interaction: discord.Interaction, name: str):
     sent = await interaction.original_response()
     data["message_id"] = sent.id
     save_config(config)
+
+
+@tournament_group.command(name="jointeam", description="Enter your team into a team-mode tournament. Captain only, team must be full.")
+@app_commands.describe(tournament="The tournament's name", team="Your team's name")
+async def tournament_jointeam(interaction: discord.Interaction, tournament: str, team: str):
+    cfg = get_guild_cfg(interaction.guild_id)
+    data = cfg.get("tournaments", {}).get(tournament)
+    if not data or data["status"] != "signup":
+        await interaction.response.send_message(f"❌ No open sign-ups found for **{tournament}**.", ephemeral=True)
+        return
+    if not data.get("team_mode"):
+        await interaction.response.send_message(f"❌ **{tournament}** isn't a team tournament — use the Join button instead.", ephemeral=True)
+        return
+    teams = cfg.get("teams", {})
+    team_data = teams.get(team)
+    if not team_data:
+        await interaction.response.send_message(f"❌ No team named **{team}**. Check `/team list`.", ephemeral=True)
+        return
+    if team_data["captain_id"] != interaction.user.id and not is_authorized(interaction):
+        await interaction.response.send_message("❌ Only the team captain can enter it into a tournament.", ephemeral=True)
+        return
+    if len(team_data["members"]) < team_data["size"]:
+        await interaction.response.send_message(
+            f"❌ **{team}** isn't full yet ({len(team_data['members'])}/{team_data['size']}) — everyone needs to join first.",
+            ephemeral=True,
+        )
+        return
+    if team in data["players"]:
+        await interaction.response.send_message(f"ℹ️ **{team}** is already entered.", ephemeral=True)
+        return
+
+    data["players"].append(team)
+    save_config(config)
+    await interaction.response.send_message(f"✅ **{team}** is entered into **{tournament}**.")
+    if data.get("message_id") and data.get("channel_id"):
+        channel = interaction.guild.get_channel(data["channel_id"])
+        if channel:
+            try:
+                msg = await channel.fetch_message(data["message_id"])
+                await msg.edit(embed=build_tournament_signup_embed(tournament, data))
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+
+@tournament_group.command(name="leaveteam", description="Withdraw your team from a team-mode tournament. Captain only.")
+@app_commands.describe(tournament="The tournament's name", team="Your team's name")
+async def tournament_leaveteam(interaction: discord.Interaction, tournament: str, team: str):
+    cfg = get_guild_cfg(interaction.guild_id)
+    data = cfg.get("tournaments", {}).get(tournament)
+    if not data or data["status"] != "signup":
+        await interaction.response.send_message(f"❌ No open sign-ups found for **{tournament}**.", ephemeral=True)
+        return
+    teams = cfg.get("teams", {})
+    team_data = teams.get(team)
+    if team_data and team_data["captain_id"] != interaction.user.id and not is_authorized(interaction):
+        await interaction.response.send_message("❌ Only the team captain can withdraw it.", ephemeral=True)
+        return
+    if team not in data["players"]:
+        await interaction.response.send_message(f"❌ **{team}** isn't entered in **{tournament}**.", ephemeral=True)
+        return
+
+    data["players"].remove(team)
+    save_config(config)
+    await interaction.response.send_message(f"✅ **{team}** withdrawn from **{tournament}**.")
+    if data.get("message_id") and data.get("channel_id"):
+        channel = interaction.guild.get_channel(data["channel_id"])
+        if channel:
+            try:
+                msg = await channel.fetch_message(data["message_id"])
+                await msg.edit(embed=build_tournament_signup_embed(tournament, data))
+            except (discord.NotFound, discord.Forbidden):
+                pass
 
 
 @tournament_group.command(name="start", description="Lock sign-ups and generate the bracket.")
@@ -6635,8 +6859,11 @@ async def tournament_start(interaction: discord.Interaction, name: str):
 
 
 @tournament_group.command(name="report", description="Record the winner of a match.")
-@app_commands.describe(name="The tournament's name", match="Match number in the current round", winner="Who won")
-async def tournament_report(interaction: discord.Interaction, name: str, match: int, winner: discord.Member):
+@app_commands.describe(
+    name="The tournament's name", match="Match number in the current round",
+    winner_member="Who won (individual-mode tournaments)", winner_team="Which team won (team-mode tournaments)",
+)
+async def tournament_report(interaction: discord.Interaction, name: str, match: int, winner_member: discord.Member = None, winner_team: str = None):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
@@ -6647,17 +6874,28 @@ async def tournament_report(interaction: discord.Interaction, name: str, match: 
         await interaction.response.send_message(f"❌ No in-progress tournament found named **{name}**.", ephemeral=True)
         return
 
+    if data.get("team_mode"):
+        if not winner_team:
+            await interaction.response.send_message("❌ This is a team tournament — set `winner_team` to the winning team's name.", ephemeral=True)
+            return
+        winner_id = winner_team
+    else:
+        if not winner_member:
+            await interaction.response.send_message("❌ Set `winner_member` to who won.", ephemeral=True)
+            return
+        winner_id = winner_member.id
+
     current_round = data["rounds"][-1]
     if match < 1 or match > len(current_round):
         await interaction.response.send_message(f"❌ Match number must be between 1 and {len(current_round)}.", ephemeral=True)
         return
 
     m = current_round[match - 1]
-    if winner.id not in (m["p1"], m["p2"]):
-        await interaction.response.send_message("❌ That person isn't in this match.", ephemeral=True)
+    if winner_id not in (m["p1"], m["p2"]):
+        await interaction.response.send_message("❌ That participant isn't in this match.", ephemeral=True)
         return
 
-    m["winner"] = winner.id
+    m["winner"] = winner_id
 
     if all(mm["winner"] is not None for mm in current_round):
         winners = [mm["winner"] for mm in current_round]
@@ -9169,7 +9407,9 @@ HELP_CATEGORIES = {
         ("/evaluate", "Message activity leaderboard for the current week"),
     ],
     "🏆 Events & Competition": [
-        ("/tournament_create / _start / _report / _bracket", "Run a bracket tournament"),
+        ("/tournament_create / _start / _report / _bracket", "Run a bracket tournament (1v1 or team-based)"),
+        ("/tournament jointeam / leaveteam", "Enter/withdraw a full team from a team-mode tournament"),
+        ("/team create / join / leave / kick / disband / list", "Form teams of any size, 1v1 to 5v5"),
         ("/gamenight_create / _list / _cancel", "Schedule game nights with RSVPs"),
         ("/mvp_start / _end", "Vote for MVP among candidates"),
         ("/suggest / setsuggestionschannel", "Community suggestions with voting + staff approval"),
