@@ -87,6 +87,7 @@ Commands:
   /rust command cmd:<text>                - run an RCON command on the Rust server
   /rust setpopalert [role] [channel] [threshold] - (admin only) ping a role at a population threshold
   /rust setwipe [day] [hour] [channel]    - (admin only) schedule a weekly wipe countdown (24h/12h/1h announcements)
+  /rust setdailyrestart [hour] [channel]  - (admin only) schedule an automatic nightly restart (separate from wipe)
   /rust wipe                              - show time until the next scheduled Rust wipe
   /minecraft setserver host:<ip> [port] [rcon_port] [rcon_password] - (admin only) connect to your Minecraft server
   /minecraft setstatuschannel [channel]   - (admin only) post a live Minecraft server status embed
@@ -2632,7 +2633,72 @@ async def check_rust_wipe_countdown(guild_id: int):
             save_config(config)
 
 
+async def check_rust_daily_restart(guild_id: int):
+    """Distinct from the weekly wipe schedule — this is for servers that
+    also do a nightly restart purely for server health (memory, updates),
+    independent of when they wipe."""
+    cfg = get_guild_cfg(guild_id)
+    restart_hour = cfg.get("rust_restart_hour")
+    if restart_hour is None:
+        return
+    now = datetime.now(timezone.utc)
+    if now.hour != restart_hour:
+        return
+    today_str = now.date().isoformat()
+    if cfg.get("rust_daily_restart_last_date") == today_str:
+        return  # already handled today
+    conn = rust_connections.get(guild_id)
+    if conn is None or not conn.connected:
+        return
+
+    cfg["rust_daily_restart_last_date"] = today_str
+    save_config(config)
+    try:
+        await conn.send_command("restart 120")
+    except Exception as e:
+        print(f"⚠️ Rust daily restart failed ({guild_id}): {e}")
+        return
+
+    guild = bot.get_guild(guild_id)
+    channel_id = cfg.get("rust_restart_channel_id") or cfg.get("rust_wipe_channel_id")
+    if guild and channel_id:
+        channel = guild.get_channel(channel_id)
+        if channel:
+            try:
+                await channel.send("🔄 Nightly server restart triggered (2 minute in-game warning given).")
+            except discord.Forbidden:
+                pass
+
+
 rust_group = app_commands.Group(name="rust", description="Rust server integration")
+
+
+@rust_group.command(name="setdailyrestart", description="Schedule an automatic nightly restart, separate from the weekly wipe.")
+@app_commands.describe(hour="Hour of the restart, 0-23 UTC — omit to disable", channel="Where to announce it happened (optional, falls back to your wipe channel)")
+async def rustsetdailyrestart(interaction: discord.Interaction, hour: int = None, channel: discord.TextChannel = None):
+    if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    if hour is None:
+        cfg.pop("rust_restart_hour", None)
+        cfg.pop("rust_restart_channel_id", None)
+        cfg.pop("rust_daily_restart_last_date", None)
+        save_config(config)
+        await interaction.response.send_message("✅ Nightly restart disabled.", ephemeral=True)
+        return
+    if hour < 0 or hour > 23:
+        await interaction.response.send_message("❌ Give an hour between 0-23 (UTC).", ephemeral=True)
+        return
+    cfg["rust_restart_hour"] = hour
+    if channel:
+        cfg["rust_restart_channel_id"] = channel.id
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ Server will restart automatically every day at {hour:02d}:00 UTC (2-minute in-game warning given). "
+        "This is separate from your wipe schedule.",
+        ephemeral=True,
+    )
 
 
 @rust_group.command(name="setwipe", description="Schedule a weekly wipe countdown — auto-announces at 24h, 12h, and 1h before.")
@@ -2709,6 +2775,8 @@ async def rust_status_loop():
             await check_rust_wipe_countdown(guild_id)
         if cfg.get("rust_recurring_announcements"):
             await check_rust_recurring_announcements(guild_id)
+        if cfg.get("rust_restart_hour") is not None:
+            await check_rust_daily_restart(guild_id)
 
 
 @rust_group.command(name="setserver", description="Connect this server to your Rust game server.")
@@ -9584,6 +9652,7 @@ HELP_CATEGORIES = {
         ("/rust command", "Run an RCON command on the server"),
         ("/rust setpopalert", "(admin) Ping a role at a population threshold"),
         ("/rust setwipe / wipe", "Schedule and check a weekly wipe countdown"),
+        ("/rust setdailyrestart", "(admin) Schedule an automatic nightly restart"),
     ],
     "⛏️ Minecraft Server": [
         ("/minecraft setserver", "Connect to your Minecraft server (status + optional RCON)"),
