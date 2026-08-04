@@ -31,10 +31,14 @@ Commands:
   /team leave name:<text>                  - leave your team
   /team kick name:<text> member:<user>     - (captain) remove a member from your team
   /team disband name:<text>                - (captain) delete your team
+  /team rename name:<text> new_name:<text> - (captain) rename your team
+  /team transfer name:<text> new_captain:<user> - (captain) hand off captaincy
   /team list                                - show all teams
   /tournament create name:<text> [team_mode] - open sign-ups for a bracket tournament (team_mode for team-based)
   /tournament jointeam tournament:<text> team:<text> - (captain) enter your full team into a team-mode tournament
   /tournament leaveteam tournament:<text> team:<text> - (captain) withdraw your team
+  /tournament cancel name:<text>           - (admin) cancel and delete a tournament
+  /tournament list                          - show all tournaments and their status
   /tournament start name:<text>           - (manager only) lock sign-ups and generate the bracket
   /tournament report name:<text> match:<#> winner:<member>  - (manager only) record a match result
   /tournament bracket name:<text>         - show the current bracket
@@ -88,6 +92,13 @@ Commands:
   /minecraft setstatuschannel [channel]   - (admin only) post a live Minecraft server status embed
   /minecraft status                       - show current Minecraft server status
   /minecraft command cmd:<text>           - run an RCON command on the Minecraft server
+  /minecraft players                      - show who's currently online
+  /minecraft kick player_name:<text> reason:<text> - kick a player
+  /minecraft ban player_name:<text> reason:<text> - ban a player
+  /minecraft unban player_name:<text>     - unban a player
+  /minecraft banlist                      - show everyone currently banned
+  /minecraft save                          - force an immediate world save
+  /minecraft announce message:<text>      - broadcast a message to everyone in-game
   /evaluate [user]                        - show message activity for the current week (leaderboard or one person); auto-resets weekly
   /setbirthday month:<1-12> day:<1-31>    - set your own birthday
   /removebirthday                         - remove your saved birthday
@@ -122,6 +133,7 @@ Commands:
   /setreportschannel [channel]            - (admin only) set the private channel for member reports
   /discordauditlog [limit]                - show Discord's own audit log (bans, kicks, channel/role changes)
   /ping                                    - check if the bot is up and responding
+  /winner tournament:<text> [winner_member] [winner_team] - announce a tournament winner (individual or team)
   /stopmassaction                          - cancel an in-progress bulk operation (roster add-all, mass rename/role changes)
   /setviewerrole [role]                   - (admin only) role that gets view-only web dashboard access
   /setbanrole [role]                      - (admin only) role threshold for using /ban (Discord + web)
@@ -3788,6 +3800,107 @@ async def minecraftcommand(interaction: discord.Interaction, cmd: str):
     await interaction.followup.send(f"```\n{display}\n```", ephemeral=True)
 
 
+@minecraft_group.command(name="players", description="Show who's currently online on the Minecraft server.")
+async def minecraftplayers(interaction: discord.Interaction):
+    data = await minecraft_get_players(interaction.guild_id)
+    if data.get("error"):
+        await interaction.response.send_message(f"❌ {data['error']}", ephemeral=True)
+        return
+    players = data.get("players", [])
+    embed = discord.Embed(title="⛏️ Minecraft — Online Now", color=discord.Color.green())
+    embed.description = "\n".join(f"• {p}" for p in players) if players else "Nobody online right now."
+    await interaction.response.send_message(embed=embed)
+
+
+@minecraft_group.command(name="kick", description="Kick a player from the Minecraft server.")
+@app_commands.describe(player_name="The player's exact in-game username", reason="Why you're kicking them")
+async def minecraftkick(interaction: discord.Interaction, player_name: str, reason: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await minecraft_kick_player(interaction.guild_id, player_name, reason, interaction.user.id)
+    await interaction.followup.send(result, ephemeral=True)
+
+
+@minecraft_group.command(name="ban", description="Ban a player from the Minecraft server.")
+@app_commands.describe(player_name="The player's exact in-game username", reason="Why you're banning them")
+async def minecraftban(interaction: discord.Interaction, player_name: str, reason: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await minecraft_ban_player(interaction.guild_id, player_name, reason, interaction.user.id)
+    await interaction.followup.send(result, ephemeral=True)
+
+
+@minecraft_group.command(name="unban", description="Unban a player from the Minecraft server.")
+@app_commands.describe(player_name="The player's exact in-game username")
+async def minecraftunban(interaction: discord.Interaction, player_name: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await minecraft_unban_player(interaction.guild_id, player_name, interaction.user.id)
+    await interaction.followup.send(result, ephemeral=True)
+
+
+@minecraft_group.command(name="banlist", description="Show everyone currently banned from the Minecraft server.")
+async def minecraftbanlist(interaction: discord.Interaction):
+    data = await minecraft_get_banlist(interaction.guild_id)
+    if data.get("error"):
+        await interaction.response.send_message(f"❌ {data['error']}", ephemeral=True)
+        return
+    bans = data.get("bans", [])
+    embed = discord.Embed(title="🚫 Minecraft — Ban List", color=discord.Color.dark_red())
+    if bans:
+        embed.description = "\n".join(f"**{b['name']}** — {b['reason'] or 'No reason given'}" for b in bans[:25])
+        if len(bans) > 25:
+            embed.set_footer(text=f"Showing 25 of {len(bans)} bans")
+    else:
+        embed.description = "No bans on record."
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@minecraft_group.command(name="save", description="Force an immediate world save.")
+async def minecraftsave(interaction: discord.Interaction):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    host, rcon_port, rcon_password = cfg.get("mc_host"), cfg.get("mc_rcon_port"), cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        await interaction.response.send_message("❌ RCON isn't set up. Run `/minecraft setserver` with an RCON port and password first.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await minecraft_rcon_command(host, rcon_port, rcon_password, "save-all")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Save failed: {e}", ephemeral=True)
+        return
+    await interaction.followup.send("✅ World save triggered.", ephemeral=True)
+
+
+@minecraft_group.command(name="announce", description="Broadcast a message to everyone in-game.")
+@app_commands.describe(message="What to broadcast in Minecraft's chat")
+async def minecraftannounce(interaction: discord.Interaction, message: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    host, rcon_port, rcon_password = cfg.get("mc_host"), cfg.get("mc_rcon_port"), cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        await interaction.response.send_message("❌ RCON isn't set up. Run `/minecraft setserver` with an RCON port and password first.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await minecraft_rcon_command(host, rcon_port, rcon_password, f"say {message}")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Announce failed: {e}", ephemeral=True)
+        return
+    await interaction.followup.send(f"✅ Broadcasted to the server: {message}", ephemeral=True)
+
+
 async def web_set_minecraft_server(guild_id: int, host: str, port: int, rcon_port, rcon_password, actor_id: int) -> str:
     """Mirrors /setminecraftserver."""
     cfg = get_guild_cfg(guild_id)
@@ -6610,6 +6723,46 @@ async def team_disband(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(f"✅ Disbanded **{name}**.")
 
 
+@team_group.command(name="rename", description="Rename your team. Captain only.")
+@app_commands.describe(name="Your team's current name", new_name="The new name")
+async def team_rename(interaction: discord.Interaction, name: str, new_name: str):
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team:
+        await interaction.response.send_message(f"❌ No team named **{name}**.", ephemeral=True)
+        return
+    if team["captain_id"] != interaction.user.id and not is_authorized(interaction):
+        await interaction.response.send_message("❌ Only the team captain can do that.", ephemeral=True)
+        return
+    if new_name in teams:
+        await interaction.response.send_message(f"❌ A team named **{new_name}** already exists.", ephemeral=True)
+        return
+    teams[new_name] = teams.pop(name)
+    save_config(config)
+    await interaction.response.send_message(f"✅ Renamed **{name}** to **{new_name}**.")
+
+
+@team_group.command(name="transfer", description="Hand off team captaincy to another member. Captain only.")
+@app_commands.describe(name="The team's name", new_captain="Who to make captain — must already be on the team")
+async def team_transfer(interaction: discord.Interaction, name: str, new_captain: discord.Member):
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team:
+        await interaction.response.send_message(f"❌ No team named **{name}**.", ephemeral=True)
+        return
+    if team["captain_id"] != interaction.user.id and not is_authorized(interaction):
+        await interaction.response.send_message("❌ Only the team captain can do that.", ephemeral=True)
+        return
+    if new_captain.id not in team["members"]:
+        await interaction.response.send_message(f"❌ {new_captain.mention} isn't on **{name}** — they need to join first.", ephemeral=True)
+        return
+    team["captain_id"] = new_captain.id
+    save_config(config)
+    await interaction.response.send_message(f"✅ {new_captain.mention} is now captain of **{name}**.")
+
+
 @team_group.command(name="list", description="Show all teams.")
 async def team_list(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
@@ -6918,6 +7071,45 @@ async def tournament_bracket(interaction: discord.Interaction, name: str):
         await interaction.response.send_message(f"❌ No bracket found for **{name}** yet.", ephemeral=True)
         return
     await interaction.response.send_message(embed=build_tournament_bracket_embed(name, data))
+
+
+@tournament_group.command(name="cancel", description="Cancel and delete a tournament.")
+@app_commands.describe(name="The tournament's name")
+async def tournament_cancel(interaction: discord.Interaction, name: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    tournaments = cfg.get("tournaments", {})
+    if name not in tournaments:
+        await interaction.response.send_message(f"❌ No tournament named **{name}**.", ephemeral=True)
+        return
+    del tournaments[name]
+    save_config(config)
+    await interaction.response.send_message(f"✅ Cancelled and deleted **{name}**.")
+
+
+@tournament_group.command(name="list", description="Show all tournaments and their status.")
+async def tournament_list(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    tournaments = cfg.get("tournaments", {})
+    if not tournaments:
+        await interaction.response.send_message("No tournaments yet — create one with `/tournament create`.", ephemeral=True)
+        return
+    lines = []
+    for name, data in tournaments.items():
+        status = data["status"]
+        team_note = " (team)" if data.get("team_mode") else ""
+        if status == "signup":
+            detail = f"sign-ups open — {len(data['players'])} entered"
+        elif status == "in_progress":
+            detail = f"in progress — round {len(data['rounds'])}"
+        else:
+            champ = data.get("champion")
+            champ_label = f"**{champ}**" if data.get("team_mode") else f"<@{champ}>"
+            detail = f"complete — champion: {champ_label}"
+        lines.append(f"**{name}**{team_note} — {detail}")
+    await interaction.response.send_message("\n".join(lines))
 
 
 # ---------- game nights ----------
@@ -8895,7 +9087,33 @@ async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"🏓 Pong! ({latency_ms}ms)")
 
 
-@bot.tree.command(name="stopmassaction", description="Cancel an in-progress bulk operation (roster add-all, mass rename/add role/remove role).")
+@bot.tree.command(name="winner", description="Announce the winner of a tournament — an individual or a team.")
+@app_commands.describe(
+    tournament="What tournament/event this is for",
+    winner_member="The winning member (for individual tournaments)",
+    winner_team="The winning team's name (for team tournaments)",
+)
+async def winner(interaction: discord.Interaction, tournament: str, winner_member: discord.Member = None, winner_team: str = None):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not winner_member and not winner_team:
+        await interaction.response.send_message("❌ Set either `winner_member` or `winner_team`.", ephemeral=True)
+        return
+    if winner_member and winner_team:
+        await interaction.response.send_message("❌ Set only one of `winner_member` or `winner_team`, not both.", ephemeral=True)
+        return
+
+    winner_display = winner_member.mention if winner_member else f"**{winner_team}**"
+    embed = discord.Embed(
+        title="🏆 We have a winner!",
+        description=f"**{tournament}**\n\nCongratulations to {winner_display}! 🎉",
+        color=discord.Color.gold(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+
 async def stopmassaction(interaction: discord.Interaction):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
@@ -9372,6 +9590,9 @@ HELP_CATEGORIES = {
         ("/minecraft setstatuschannel", "Live server status embed"),
         ("/minecraft status", "Show current server status"),
         ("/minecraft command", "Run an RCON command on the server"),
+        ("/minecraft players", "Show who's currently online"),
+        ("/minecraft kick / ban / unban / banlist", "Player moderation"),
+        ("/minecraft save / announce", "Force a world save, or broadcast a message"),
     ],
     "🎭 Roles": [
         ("/addrole", "Give a role to a member"),
@@ -9409,7 +9630,9 @@ HELP_CATEGORIES = {
     "🏆 Events & Competition": [
         ("/tournament_create / _start / _report / _bracket", "Run a bracket tournament (1v1 or team-based)"),
         ("/tournament jointeam / leaveteam", "Enter/withdraw a full team from a team-mode tournament"),
+        ("/tournament cancel / list", "Cancel a tournament, or see all of them at once"),
         ("/team create / join / leave / kick / disband / list", "Form teams of any size, 1v1 to 5v5"),
+        ("/team rename / transfer", "Rename your team, or hand off captaincy"),
         ("/gamenight_create / _list / _cancel", "Schedule game nights with RSVPs"),
         ("/mvp_start / _end", "Vote for MVP among candidates"),
         ("/suggest / setsuggestionschannel", "Community suggestions with voting + staff approval"),
@@ -9472,6 +9695,7 @@ HELP_CATEGORIES = {
     ],
     "🔧 Utility": [
         ("/ping", "Check if the bot is up and responding"),
+        ("/winner", "Announce a tournament winner (individual or team)"),
         ("/stopmassaction", "Cancel an in-progress bulk operation"),
         ("/afk", "Mark yourself AFK"),
         ("/weblogin", "Get a one-time code to log into the web dashboard"),
