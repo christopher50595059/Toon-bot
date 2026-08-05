@@ -7005,6 +7005,108 @@ async def team_transfer(interaction: discord.Interaction, name: str, new_captain
     await interaction.response.send_message(f"✅ {new_captain.mention} is now captain of **{name}**.")
 
 
+async def web_team_create(guild_id: int, name: str, size: int, captain_id: int, actor_id: int) -> str:
+    """Mirrors /team create, but staff can create on anyone's behalf."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    if size < 1 or size > 5:
+        return "❌ Team size must be between 1 and 5."
+    cfg = get_guild_cfg(guild_id)
+    teams = cfg.setdefault("teams", {})
+    if name in teams:
+        return f"❌ A team named **{name}** already exists."
+    captain = guild.get_member(captain_id)
+    if captain is None:
+        return "❌ Couldn't find that member."
+    teams[name] = {"captain_id": captain_id, "members": [captain_id], "size": size}
+    save_config(config)
+    return f"✅ Created team **{name}** (1/{size}) — {captain.display_name} is captain."
+
+
+async def web_team_add_member(guild_id: int, name: str, member_id: int, actor_id: int) -> str:
+    """Mirrors /team join, but staff can add anyone."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    cfg = get_guild_cfg(guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team:
+        return f"❌ No team named **{name}**."
+    member = guild.get_member(member_id)
+    if member is None:
+        return "❌ Couldn't find that member."
+    if member_id in team["members"]:
+        return f"ℹ️ {member.display_name} is already on **{name}**."
+    if len(team["members"]) >= team["size"]:
+        return f"❌ **{name}** is already full ({team['size']}/{team['size']})."
+    team["members"].append(member_id)
+    save_config(config)
+    return f"✅ Added {member.display_name} to **{name}** ({len(team['members'])}/{team['size']})."
+
+
+async def web_team_remove_member(guild_id: int, name: str, member_id: int, actor_id: int) -> str:
+    """Mirrors /team kick / /team leave."""
+    cfg = get_guild_cfg(guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team or member_id not in team["members"]:
+        return f"❌ That member isn't on **{name}**."
+    team["members"].remove(member_id)
+    if team["captain_id"] == member_id:
+        if team["members"]:
+            team["captain_id"] = team["members"][0]
+        else:
+            del teams[name]
+            save_config(config)
+            return f"✅ Removed — team disbanded (no members left)."
+    save_config(config)
+    return f"✅ Removed from **{name}** ({len(team['members'])}/{team['size']})."
+
+
+async def web_team_disband(guild_id: int, name: str, actor_id: int) -> str:
+    """Mirrors /team disband."""
+    cfg = get_guild_cfg(guild_id)
+    teams = cfg.get("teams", {})
+    if name not in teams:
+        return f"❌ No team named **{name}**."
+    del teams[name]
+    save_config(config)
+    return f"✅ Disbanded **{name}**."
+
+
+async def web_team_rename(guild_id: int, name: str, new_name: str, actor_id: int) -> str:
+    """Mirrors /team rename."""
+    cfg = get_guild_cfg(guild_id)
+    teams = cfg.get("teams", {})
+    if name not in teams:
+        return f"❌ No team named **{name}**."
+    if new_name in teams:
+        return f"❌ A team named **{new_name}** already exists."
+    teams[new_name] = teams.pop(name)
+    save_config(config)
+    return f"✅ Renamed **{name}** to **{new_name}**."
+
+
+async def web_team_transfer(guild_id: int, name: str, new_captain_id: int, actor_id: int) -> str:
+    """Mirrors /team transfer."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    cfg = get_guild_cfg(guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team:
+        return f"❌ No team named **{name}**."
+    if new_captain_id not in team["members"]:
+        return "❌ That member needs to be on the team first."
+    team["captain_id"] = new_captain_id
+    save_config(config)
+    captain = guild.get_member(new_captain_id)
+    return f"✅ {captain.display_name if captain else 'Member'} is now captain of **{name}**."
+
+
 @team_group.command(name="list", description="Show all teams.")
 async def team_list(interaction: discord.Interaction):
     cfg = get_guild_cfg(interaction.guild_id)
@@ -10279,5 +10381,7 @@ if __name__ == "__main__":
         web_rust_chatcommand_add, web_rust_chatcommand_remove,
         web_set_steam_link_role,
         web_minecraft_save, web_minecraft_announce,
+        web_team_create, web_team_add_member, web_team_remove_member,
+        web_team_disband, web_team_rename, web_team_transfer,
     )
     bot.run(TOKEN)

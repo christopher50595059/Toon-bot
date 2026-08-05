@@ -149,6 +149,12 @@ _rust_chatcommand_remove = None
 _set_steam_link_role = None
 _minecraft_save = None
 _minecraft_announce = None
+_team_create = None
+_team_add_member = None
+_team_remove_member = None
+_team_disband = None
+_team_rename = None
+_team_transfer = None
 
 
 # ---------- shared page chrome ----------
@@ -4964,44 +4970,197 @@ def teams_page(guild_id):
         return redirect(url_for("guild_picker"))
 
     cfg = _get_guild_cfg(guild_id)
+    result = request.args.get("result", "")
+    result_html = f'<div class="flash">{result}</div>' if result else ""
     teams = cfg.get("teams", {})
 
     rows = ""
     if teams:
         for name, t in teams.items():
-            captain = guild.get_member(t.get("captain_id"))
+            safe_name = html.escape(name)
+            captain_id = t.get("captain_id")
+            captain = guild.get_member(captain_id)
             captain_name = captain.display_name if captain else "Unknown"
-            member_names = []
+            member_lines = []
             for uid in t.get("members", []):
                 m = guild.get_member(uid)
-                member_names.append(m.display_name if m else f"Unknown ({uid})")
+                mname = m.display_name if m else f"Unknown ({uid})"
+                is_captain = " 👑" if uid == captain_id else ""
+                remove_form = f"""
+                <form method="post" action="/dashboard/{guild_id}/teams/removemember" style="display:inline; margin-left:4px;">
+                  <input type="hidden" name="name" value="{safe_name}">
+                  <input type="hidden" name="member_id" value="{uid}">
+                  <button class="btn btn-secondary" type="submit" style="padding:2px 6px; font-size:10px;">✕</button>
+                </form>
+                """
+                member_lines.append(f"{html.escape(mname)}{is_captain}{remove_form}")
             size = t.get("size", len(t.get("members", [])))
             filled = len(t.get("members", []))
             status = "✅ Full" if filled >= size else f"{filled}/{size}"
             rows += f"""
             <tr>
-              <td>{html.escape(name)}</td>
+              <td>{safe_name}</td>
               <td>{status}</td>
               <td>{html.escape(captain_name)}</td>
-              <td>{html.escape(", ".join(member_names)) if member_names else "—"}</td>
+              <td>{"<br>".join(member_lines) if member_lines else "—"}</td>
+              <td style="white-space:nowrap;">
+                <form method="post" action="/dashboard/{guild_id}/teams/disband" style="display:inline;">
+                  <input type="hidden" name="name" value="{safe_name}">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Disband</button>
+                </form>
+              </td>
             </tr>
             """
     else:
-        rows = '<tr><td colspan="4" class="hint" style="padding:16px;">No teams formed yet — members create them with /team create.</td></tr>'
+        rows = '<tr><td colspan="5" class="hint" style="padding:16px;">No teams formed yet.</td></tr>'
+
+    member_assets = _member_search_assets(guild)
 
     body = f"""
     <h1>🧑‍🤝‍🧑 Teams</h1>
-    <div class="hint" style="margin-bottom:18px;">Teams formed with /team create — any size from 1v1 to 5v5. Used for team-mode tournaments.</div>
+    <div class="hint" style="margin-bottom:18px;">Any size from 1v1 to 5v5. Used for team-mode tournaments.</div>
+    {result_html}
+    {member_assets}
 
     <div class="card">
+      <h2>➕ Create a team</h2>
+      <form method="post" action="/dashboard/{guild_id}/teams/create">
+        <div class="grid-2">
+          <div class="field"><label>Team name</label><input type="text" name="name" placeholder="Team Alpha" required></div>
+          <div class="field"><label>Size (1-5)</label><input type="number" name="size" min="1" max="5" value="5" required></div>
+        </div>
+        {_member_search_field("Captain", "captain_id")}
+        <button class="btn" type="submit">Create</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Current teams</h2>
       {_table_search_box("teams-table")}
       <div class="log-wrap"><table class="log-table" id="teams-table">
-        <tr><th>Team</th><th>Status</th><th>Captain</th><th>Members</th></tr>
+        <tr><th>Team</th><th>Status</th><th>Captain</th><th>Members</th><th></th></tr>
         {rows}
       </table></div>
     </div>
+
+    <div class="card">
+      <h2>➕ Add a member to a team</h2>
+      <form method="post" action="/dashboard/{guild_id}/teams/addmember">
+        <div class="field"><label>Team name</label><input type="text" name="name" placeholder="Team Alpha" required></div>
+        {_member_search_field("Member to add", "member_id")}
+        <button class="btn" type="submit">Add</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>✏️ Rename a team</h2>
+      <form method="post" action="/dashboard/{guild_id}/teams/rename">
+        <div class="grid-2">
+          <div class="field"><label>Current name</label><input type="text" name="name" required></div>
+          <div class="field"><label>New name</label><input type="text" name="new_name" required></div>
+        </div>
+        <button class="btn btn-secondary" type="submit">Rename</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>👑 Transfer captaincy</h2>
+      <form method="post" action="/dashboard/{guild_id}/teams/transfer">
+        <div class="field"><label>Team name</label><input type="text" name="name" placeholder="Team Alpha" required></div>
+        {_member_search_field("New captain (must already be on the team)", "new_captain_id")}
+        <button class="btn btn-secondary" type="submit">Transfer</button>
+      </form>
+    </div>
     """
     return render_page(f"{guild.name} — Teams", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/teams/create", methods=["POST"])
+def teams_create_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    try:
+        size = int(request.form.get("size", 5))
+        captain_id = int(request.form["captain_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("teams_page", guild_id=guild_id, result="❌ Fill in all fields."))
+    if not name:
+        return redirect(url_for("teams_page", guild_id=guild_id, result="❌ Enter a team name."))
+    result = _run_async(_team_create(guild_id, name, size, captain_id, session["user_id"]))
+    return redirect(url_for("teams_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/teams/addmember", methods=["POST"])
+def teams_addmember_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    try:
+        member_id = int(request.form["member_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("teams_page", guild_id=guild_id, result="❌ Pick a member."))
+    if not name:
+        return redirect(url_for("teams_page", guild_id=guild_id, result="❌ Enter a team name."))
+    result = _run_async(_team_add_member(guild_id, name, member_id, session["user_id"]))
+    return redirect(url_for("teams_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/teams/removemember", methods=["POST"])
+def teams_removemember_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    try:
+        member_id = int(request.form["member_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("teams_page", guild_id=guild_id, result="❌ Invalid request."))
+    result = _run_async(_team_remove_member(guild_id, name, member_id, session["user_id"]))
+    return redirect(url_for("teams_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/teams/disband", methods=["POST"])
+def teams_disband_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    if not name:
+        return redirect(url_for("teams_page", guild_id=guild_id, result="❌ Missing team name."))
+    result = _run_async(_team_disband(guild_id, name, session["user_id"]))
+    return redirect(url_for("teams_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/teams/rename", methods=["POST"])
+def teams_rename_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    new_name = request.form.get("new_name", "").strip()
+    if not name or not new_name:
+        return redirect(url_for("teams_page", guild_id=guild_id, result="❌ Fill in both fields."))
+    result = _run_async(_team_rename(guild_id, name, new_name, session["user_id"]))
+    return redirect(url_for("teams_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/teams/transfer", methods=["POST"])
+def teams_transfer_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    try:
+        new_captain_id = int(request.form["new_captain_id"])
+    except (KeyError, ValueError):
+        return redirect(url_for("teams_page", guild_id=guild_id, result="❌ Pick a new captain."))
+    if not name:
+        return redirect(url_for("teams_page", guild_id=guild_id, result="❌ Enter a team name."))
+    result = _run_async(_team_transfer(guild_id, name, new_captain_id, session["user_id"]))
+    return redirect(url_for("teams_page", guild_id=guild_id, result=result))
 
 
 # ---------- Minecraft server integration ----------
@@ -7027,6 +7186,8 @@ def start_web_app(
     rust_chatcommand_add, rust_chatcommand_remove,
     set_steam_link_role,
     minecraft_save, minecraft_announce,
+    team_create, team_add_member, team_remove_member,
+    team_disband, team_rename, team_transfer,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -7068,6 +7229,8 @@ def start_web_app(
     global _rust_chatcommand_add, _rust_chatcommand_remove
     global _set_steam_link_role
     global _minecraft_save, _minecraft_announce
+    global _team_create, _team_add_member, _team_remove_member
+    global _team_disband, _team_rename, _team_transfer
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -7172,6 +7335,12 @@ def start_web_app(
     _set_steam_link_role = set_steam_link_role
     _minecraft_save = minecraft_save
     _minecraft_announce = minecraft_announce
+    _team_create = team_create
+    _team_add_member = team_add_member
+    _team_remove_member = team_remove_member
+    _team_disband = team_disband
+    _team_rename = team_rename
+    _team_transfer = team_transfer
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 
