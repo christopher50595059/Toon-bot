@@ -3267,6 +3267,49 @@ async def rustmacro_listchatcommands(interaction: discord.Interaction):
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
+async def web_rust_chatcommand_add(guild_id: int, trigger: str, response: str, actor_id: int) -> str:
+    """Mirrors /rustmacro addchatcommand."""
+    cfg = get_guild_cfg(guild_id)
+    chat_commands = cfg.setdefault("rust_chat_commands", {})
+    trigger_key = trigger.strip().lower()
+    is_update = trigger_key in chat_commands
+    chat_commands[trigger_key] = response
+    save_config(config)
+    return f"✅ {'Updated' if is_update else 'Added'} in-game chat command `{trigger_key}`."
+
+
+async def web_rust_chatcommand_remove(guild_id: int, trigger: str, actor_id: int) -> str:
+    """Mirrors /rustmacro removechatcommand."""
+    cfg = get_guild_cfg(guild_id)
+    chat_commands = cfg.get("rust_chat_commands", {})
+    trigger_key = trigger.strip().lower()
+    if trigger_key not in chat_commands:
+        return f"❌ No chat command `{trigger_key}`."
+    del chat_commands[trigger_key]
+    save_config(config)
+    return f"✅ Removed `{trigger_key}`."
+
+
+async def web_set_steam_link_role(guild_id: int, role_id, actor_id: int) -> str:
+    """Mirrors /setsteamlinkrole."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    cfg = get_guild_cfg(guild_id)
+    if role_id is None:
+        cfg.pop("steam_link_role_id", None)
+        save_config(config)
+        return "✅ Steam-link auto-role disabled."
+    role = guild.get_role(role_id)
+    if role is None:
+        return "❌ That role doesn't exist."
+    if role >= guild.me.top_role:
+        return f"❌ I can't assign @{role.name} — it's above my own role."
+    cfg["steam_link_role_id"] = role_id
+    save_config(config)
+    return f"✅ Members will now get @{role.name} when they link their SteamID."
+
+
 bot.tree.add_command(rustmacro_group)
 
 
@@ -10207,5 +10250,7 @@ if __name__ == "__main__":
         web_set_whitelist_sync,
         get_console_commands, run_console_command,
         web_stop_mass_action,
+        web_rust_chatcommand_add, web_rust_chatcommand_remove,
+        web_set_steam_link_role,
     )
     bot.run(TOKEN)

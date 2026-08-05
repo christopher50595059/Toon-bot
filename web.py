@@ -144,6 +144,9 @@ _set_whitelist_sync = None
 _get_console_commands = None
 _run_console_command = None
 _stop_mass_action = None
+_rust_chatcommand_add = None
+_rust_chatcommand_remove = None
+_set_steam_link_role = None
 
 
 # ---------- shared page chrome ----------
@@ -4572,6 +4575,26 @@ def rust_macros_page(guild_id):
     else:
         announcement_rows = '<tr><td colspan="4" class="hint" style="padding:16px;">No recurring announcements yet.</td></tr>'
 
+    chat_commands = cfg.get("rust_chat_commands", {})
+    chat_command_rows = ""
+    if chat_commands:
+        for trigger, response in chat_commands.items():
+            safe_trigger = html.escape(trigger)
+            chat_command_rows += f"""
+            <tr>
+              <td><code>{safe_trigger}</code></td>
+              <td>{html.escape(response)}</td>
+              <td>
+                <form method="post" action="/dashboard/{guild_id}/rust/macros/chatcommands/remove" style="margin:0;">
+                  <input type="hidden" name="trigger" value="{safe_trigger}">
+                  <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+    else:
+        chat_command_rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No in-game chat commands yet.</td></tr>'
+
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
     <h1 style="margin-top:18px;">⚡ Rust Macros & Announcements</h1>
@@ -4612,6 +4635,26 @@ def rust_macros_page(guild_id):
       <div class="log-wrap"><table class="log-table">
         <tr><th>#</th><th>Message</th><th>Interval</th><th></th></tr>
         {announcement_rows}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>➕ Add an in-game chat command</h2>
+      <div class="hint" style="margin-bottom:12px;">Players type the trigger in Rust's chat, the bot replies automatically.</div>
+      <form method="post" action="/dashboard/{guild_id}/rust/macros/chatcommands/add">
+        <div class="grid-2">
+          <div class="field"><label>Trigger</label><input type="text" name="trigger" placeholder="!discord" required></div>
+          <div class="field"><label>Response</label><input type="text" name="response" placeholder="Join our Discord: discord.gg/..." required></div>
+        </div>
+        <button class="btn" type="submit">Add</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>In-game chat commands</h2>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>Trigger</th><th>Response</th><th></th></tr>
+        {chat_command_rows}
       </table></div>
     </div>
     """
@@ -4685,6 +4728,31 @@ def rust_announcements_remove_route(guild_id):
     return redirect(url_for("rust_macros_page", guild_id=guild_id, result=result))
 
 
+@app.route("/dashboard/<int:guild_id>/rust/macros/chatcommands/add", methods=["POST"])
+def rust_chatcommands_add_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    trigger = request.form.get("trigger", "").strip()
+    response = request.form.get("response", "").strip()
+    if not trigger or not response:
+        return redirect(url_for("rust_macros_page", guild_id=guild_id, result="❌ Fill in both fields."))
+    result = _run_async(_rust_chatcommand_add(guild_id, trigger, response, session["user_id"]))
+    return redirect(url_for("rust_macros_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/rust/macros/chatcommands/remove", methods=["POST"])
+def rust_chatcommands_remove_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    trigger = request.form.get("trigger", "").strip()
+    if not trigger:
+        return redirect(url_for("rust_macros_page", guild_id=guild_id, result="❌ Missing trigger."))
+    result = _run_async(_rust_chatcommand_remove(guild_id, trigger, session["user_id"]))
+    return redirect(url_for("rust_macros_page", guild_id=guild_id, result=result))
+
+
 # ---------- whitelist sync ----------
 
 @app.route("/dashboard/<int:guild_id>/whitelistsync")
@@ -4698,8 +4766,11 @@ def whitelist_sync_page(guild_id):
     result_html = f'<div class="flash">{result}</div>' if result else ""
 
     rank_assets = _rank_search_assets(guild, cfg)
+    role_assets = _role_search_assets(guild)
     threshold_rank_id = cfg.get("whitelist_sync_rank_id")
     threshold_role = guild.get_role(threshold_rank_id) if threshold_rank_id else None
+    steam_link_role_id = cfg.get("steam_link_role_id")
+    steam_link_role = guild.get_role(steam_link_role_id) if steam_link_role_id else None
 
     linked_steam = cfg.get("linked_steam_ids", {})
     linked_mc = cfg.get("linked_minecraft_names", {})
@@ -4718,6 +4789,7 @@ def whitelist_sync_page(guild_id):
     <div class="hint" style="margin-bottom:18px;">Reaching a chosen rank automatically whitelists that member on Rust and/or Minecraft, if they've linked their account.</div>
     {result_html}
     {rank_assets}
+    {role_assets}
 
     <div class="card">
       <h2>⚙️ Settings</h2>
@@ -4732,6 +4804,15 @@ def whitelist_sync_page(guild_id):
             <option value="false" {"selected" if not cfg.get("whitelist_minecraft_enabled") else ""}>Off</option>
           </select>
         </div>
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>🎖️ Steam-Link Role</h2>
+      <div class="hint" style="margin-bottom:12px;">Automatically grant a role the moment someone links their SteamID. Current: {steam_link_role.mention if steam_link_role else "not set"}</div>
+      <form method="post" action="/dashboard/{guild_id}/whitelistsync/steamlinkrole">
+        {_role_search_field("Role to grant", "role_id", guild, steam_link_role_id)}
         <button class="btn" type="submit">Save</button>
       </form>
     </div>
@@ -4758,6 +4839,17 @@ def whitelist_sync_save_route(guild_id):
     rust_command_template = request.form.get("rust_command_template", "").strip() or None
     minecraft_enabled = request.form.get("minecraft_enabled") == "true"
     result = _run_async(_set_whitelist_sync(guild_id, rank_id, rust_command_template, minecraft_enabled, session["user_id"]))
+    return redirect(url_for("whitelist_sync_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/whitelistsync/steamlinkrole", methods=["POST"])
+def whitelist_sync_steamlinkrole_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    raw_role = request.form.get("role_id", "")
+    role_id = int(raw_role) if raw_role else None
+    result = _run_async(_set_steam_link_role(guild_id, role_id, session["user_id"]))
     return redirect(url_for("whitelist_sync_page", guild_id=guild_id, result=result))
 
 
@@ -6890,6 +6982,8 @@ def start_web_app(
     set_whitelist_sync,
     get_console_commands, run_console_command,
     stop_mass_action,
+    rust_chatcommand_add, rust_chatcommand_remove,
+    set_steam_link_role,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -6928,6 +7022,8 @@ def start_web_app(
     global _set_whitelist_sync
     global _get_console_commands, _run_console_command
     global _stop_mass_action
+    global _rust_chatcommand_add, _rust_chatcommand_remove
+    global _set_steam_link_role
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -7027,6 +7123,9 @@ def start_web_app(
     _get_console_commands = get_console_commands
     _run_console_command = run_console_command
     _stop_mass_action = stop_mass_action
+    _rust_chatcommand_add = rust_chatcommand_add
+    _rust_chatcommand_remove = rust_chatcommand_remove
+    _set_steam_link_role = set_steam_link_role
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 
