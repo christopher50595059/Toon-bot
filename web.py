@@ -6680,9 +6680,10 @@ def console_page(guild_id):
     body = f"""
     <h1>🖥️ Command Console</h1>
     <div class="hint" style="margin-bottom:18px;">
-      Run (almost) any bot command directly from the web — no need to be in Discord. A handful of commands that
-      require clicking a confirmation button in Discord aren't available here; they'll show a link to their
-      normal dashboard page instead.
+      Every single bot command can be done from this dashboard — no exceptions. Most run right here from this
+      console. A handful (ban, kick, promote/demote, roster add-all, mass actions, Rust restart) need a real
+      Discord confirmation click, so instead of running here they link straight to the dashboard page that
+      already handles them — you'll never hit a dead end.
     </div>
     {result_html}
     {channel_assets}
