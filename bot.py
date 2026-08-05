@@ -5185,17 +5185,31 @@ async def _maybe_sync_whitelist(guild_id: int, user_id: int):
     if rust_template and cfg.get("rust_host") and cfg.get("rust_rcon_port"):
         steamid = cfg.get("linked_steam_ids", {}).get(str(user_id))
         conn = rust_connections.get(guild_id)
-        if steamid and conn is not None and conn.connected:
-            try:
-                command = rust_template.format(steamid=steamid)
-                await conn.send_command(command)
+        if steamid:
+            if conn is not None and conn.connected:
+                try:
+                    command = rust_template.format(steamid=steamid)
+                    await conn.send_command(command)
+                    log_channel_id = cfg.get("log_channel_id")
+                    if log_channel_id:
+                        log_channel = guild.get_channel(log_channel_id)
+                        if log_channel:
+                            await log_channel.send(f"🦀 Auto-whitelisted {member.mention} on Rust (SteamID `{steamid}`).")
+                except Exception as e:
+                    print(f"⚠️ Whitelist sync failed for Rust ({guild_id}/{user_id}): {e}")
+            else:
+                print(f"⚠️ Rust whitelist sync skipped for {guild_id}/{user_id} — RCON not connected. {member} was NOT whitelisted.")
                 log_channel_id = cfg.get("log_channel_id")
                 if log_channel_id:
                     log_channel = guild.get_channel(log_channel_id)
                     if log_channel:
-                        await log_channel.send(f"🦀 Auto-whitelisted {member.mention} on Rust (SteamID `{steamid}`).")
-            except Exception as e:
-                print(f"⚠️ Whitelist sync failed for Rust ({guild_id}/{user_id}): {e}")
+                        try:
+                            await log_channel.send(
+                                f"⚠️ Whitelist sync to Rust failed for {member.mention} — RCON isn't connected right now. "
+                                "Whitelist them manually if needed."
+                            )
+                        except discord.Forbidden:
+                            pass
 
     if cfg.get("whitelist_minecraft_enabled") and cfg.get("mc_host") and cfg.get("mc_rcon_port"):
         mc_username = cfg.get("linked_minecraft_names", {}).get(str(user_id))
