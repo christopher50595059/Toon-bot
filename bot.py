@@ -2345,15 +2345,6 @@ def start_rust_connection(guild_id: int, host: str, port: int, password: str):
 
 async def relay_rust_chat_to_discord(guild_id: int, raw_message: str):
     cfg = get_guild_cfg(guild_id)
-    channel_id = cfg.get("rust_chat_channel_id")
-    if not channel_id:
-        return
-    guild = bot.get_guild(guild_id)
-    if guild is None:
-        return
-    channel = guild.get_channel(channel_id)
-    if channel is None:
-        return
 
     # Rust's chat messages arrive as a JSON string nested inside Message.
     try:
@@ -2366,6 +2357,30 @@ async def relay_rust_chat_to_discord(guild_id: int, raw_message: str):
 
     if not text:
         return
+
+    # In-game chat commands (e.g. "!discord") — work independently of whether
+    # the Discord relay channel below is set up, since someone may want one
+    # without the other.
+    chat_commands = cfg.get("rust_chat_commands", {})
+    trigger = text.strip().lower()
+    if trigger in chat_commands:
+        conn = rust_connections.get(guild_id)
+        if conn is not None and conn.connected:
+            try:
+                await conn.send_command(f'say "{chat_commands[trigger]}"')
+            except Exception as e:
+                print(f"⚠️ Rust chat command reply failed ({guild_id}): {e}")
+
+    channel_id = cfg.get("rust_chat_channel_id")
+    if not channel_id:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+
     try:
         await channel.send(f"🎮 **{username}**: {text}")
     except discord.Forbidden:
@@ -2649,6 +2664,19 @@ async def check_rust_daily_restart(guild_id: int):
         return  # already handled today
     conn = rust_connections.get(guild_id)
     if conn is None or not conn.connected:
+        print(f"⚠️ Rust daily restart skipped for guild {guild_id} — RCON not connected at trigger time. Will retry on the next check.")
+        guild = bot.get_guild(guild_id)
+        log_channel_id = cfg.get("log_channel_id")
+        if guild and log_channel_id:
+            log_channel = guild.get_channel(log_channel_id)
+            if log_channel:
+                try:
+                    await log_channel.send(
+                        "⚠️ Scheduled nightly Rust restart didn't run — RCON isn't connected right now. "
+                        "Check `/rust status` to see if RCON needs reconnecting."
+                    )
+                except discord.Forbidden:
+                    pass
         return
 
     cfg["rust_daily_restart_last_date"] = today_str
@@ -3187,6 +3215,52 @@ async def rustmacrolist(interaction: discord.Interaction):
         await interaction.response.send_message("No macros saved yet.", ephemeral=True)
         return
     lines = [f"**{name}** → `{command}`" for name, command in macros.items()]
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@rustmacro_group.command(name="addchatcommand", description="Add an in-game chat command — players type it in Rust chat, the bot replies automatically.")
+@app_commands.describe(trigger="What players type in-game (e.g. !discord)", response="What the bot says back")
+async def rustmacro_addchatcommand(interaction: discord.Interaction, trigger: str, response: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    chat_commands = cfg.setdefault("rust_chat_commands", {})
+    trigger_key = trigger.strip().lower()
+    is_update = trigger_key in chat_commands
+    chat_commands[trigger_key] = response
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ {'Updated' if is_update else 'Added'} in-game chat command `{trigger_key}` → \"{response}\". Requires RCON to be connected.",
+        ephemeral=True,
+    )
+
+
+@rustmacro_group.command(name="removechatcommand", description="Remove an in-game chat command.")
+@app_commands.describe(trigger="The trigger to remove")
+async def rustmacro_removechatcommand(interaction: discord.Interaction, trigger: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    chat_commands = cfg.get("rust_chat_commands", {})
+    trigger_key = trigger.strip().lower()
+    if trigger_key not in chat_commands:
+        await interaction.response.send_message(f"❌ No chat command `{trigger_key}`.", ephemeral=True)
+        return
+    del chat_commands[trigger_key]
+    save_config(config)
+    await interaction.response.send_message(f"✅ Removed `{trigger_key}`.", ephemeral=True)
+
+
+@rustmacro_group.command(name="listchatcommands", description="Show all in-game chat commands.")
+async def rustmacro_listchatcommands(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    chat_commands = cfg.get("rust_chat_commands", {})
+    if not chat_commands:
+        await interaction.response.send_message("No in-game chat commands set up yet.", ephemeral=True)
+        return
+    lines = [f"**{trigger}** → {response}" for trigger, response in chat_commands.items()]
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
@@ -9653,6 +9727,7 @@ HELP_CATEGORIES = {
         ("/rust setpopalert", "(admin) Ping a role at a population threshold"),
         ("/rust setwipe / wipe", "Schedule and check a weekly wipe countdown"),
         ("/rust setdailyrestart", "(admin) Schedule an automatic nightly restart"),
+        ("/rustmacro addchatcommand / removechatcommand / listchatcommands", "In-game chat commands (e.g. !discord) the bot auto-replies to"),
     ],
     "⛏️ Minecraft Server": [
         ("/minecraft setserver", "Connect to your Minecraft server (status + optional RCON)"),
