@@ -3301,8 +3301,20 @@ async def _maybe_sync_rust_ban(guild_id: int, user_id: int, reason: str):
         return
     conn = rust_connections.get(guild_id)
     if conn is None or not conn.connected:
+        print(f"⚠️ Rust ban sync skipped for guild {guild_id}/{user_id} — RCON not connected. The Discord ban went through, but the Rust-side ban did not.")
+        guild = bot.get_guild(guild_id)
+        log_channel_id = cfg.get("log_channel_id")
+        if guild and log_channel_id:
+            log_channel = guild.get_channel(log_channel_id)
+            if log_channel:
+                try:
+                    await log_channel.send(
+                        f"⚠️ Ban sync to Rust failed for <@{user_id}> — RCON isn't connected right now. "
+                        "The Discord ban is in effect, but they were NOT banned on the Rust server. Ban them manually there if needed."
+                    )
+                except discord.Forbidden:
+                    pass
         return
-
     template = cfg.get("rust_ban_sync_command_template", 'ban {steamid} "{reason}"')
     try:
         command = template.format(steamid=steamid, reason=reason)
