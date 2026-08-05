@@ -147,6 +147,8 @@ _stop_mass_action = None
 _rust_chatcommand_add = None
 _rust_chatcommand_remove = None
 _set_steam_link_role = None
+_minecraft_save = None
+_minecraft_announce = None
 
 
 # ---------- shared page chrome ----------
@@ -5084,6 +5086,25 @@ def minecraft_page(guild_id):
         <button class="btn btn-secondary" type="submit">Run</button>
       </form>
     </div>
+
+    <div class="card-row">
+      <div class="card">
+        <h2>💾 Quick Save</h2>
+        <div class="hint" style="margin-bottom:12px;">Trigger an immediate world save.</div>
+        <form method="post" action="/dashboard/{guild_id}/minecraft/save">
+          <button class="btn btn-secondary" type="submit">Save Now</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>📢 Broadcast</h2>
+        <div class="hint" style="margin-bottom:12px;">Send a one-off message to everyone in-game.</div>
+        <form method="post" action="/dashboard/{guild_id}/minecraft/announce">
+          <div class="field"><label>Message</label><input type="text" name="message" placeholder="Server restarting soon!" required></div>
+          <button class="btn btn-secondary" type="submit">Broadcast</button>
+        </form>
+      </div>
+    </div>
     """
     return render_page(f"{guild.name} — Minecraft Server", body, guild_id=guild_id)
 
@@ -5149,6 +5170,27 @@ def minecraft_command_route(guild_id):
         return redirect(url_for("minecraft_page", guild_id=guild_id, result="❌ Enter a command."))
     result = _run_async(_minecraft_command(guild_id, cmd, session["user_id"]))
     return redirect(url_for("minecraft_page", guild_id=guild_id, result=f"📟 {result}"))
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/save", methods=["POST"])
+def minecraft_save_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    result = _run_async(_minecraft_save(guild_id, session["user_id"]))
+    return redirect(url_for("minecraft_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/minecraft/announce", methods=["POST"])
+def minecraft_announce_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    message = request.form.get("message", "").strip()
+    if not message:
+        return redirect(url_for("minecraft_page", guild_id=guild_id, result="❌ Enter a message."))
+    result = _run_async(_minecraft_announce(guild_id, message, session["user_id"]))
+    return redirect(url_for("minecraft_page", guild_id=guild_id, result=result))
 
 
 @app.route("/dashboard/<int:guild_id>/minecraft/players")
@@ -6984,6 +7026,7 @@ def start_web_app(
     stop_mass_action,
     rust_chatcommand_add, rust_chatcommand_remove,
     set_steam_link_role,
+    minecraft_save, minecraft_announce,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -7024,6 +7067,7 @@ def start_web_app(
     global _stop_mass_action
     global _rust_chatcommand_add, _rust_chatcommand_remove
     global _set_steam_link_role
+    global _minecraft_save, _minecraft_announce
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -7126,6 +7170,8 @@ def start_web_app(
     _rust_chatcommand_add = rust_chatcommand_add
     _rust_chatcommand_remove = rust_chatcommand_remove
     _set_steam_link_role = set_steam_link_role
+    _minecraft_save = minecraft_save
+    _minecraft_announce = minecraft_announce
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

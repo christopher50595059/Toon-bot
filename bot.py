@@ -4132,6 +4132,32 @@ async def web_set_minecraft_status_channel(guild_id: int, channel_id, actor_id: 
     return f"✅ Live server status will now be posted in #{channel.name}."
 
 
+async def web_minecraft_save(guild_id: int, actor_id: int) -> str:
+    """Mirrors /minecraft save."""
+    cfg = get_guild_cfg(guild_id)
+    host, rcon_port, rcon_password = cfg.get("mc_host"), cfg.get("mc_rcon_port"), cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        return "❌ RCON isn't set up. Set an RCON port and password first."
+    try:
+        await minecraft_rcon_command(host, rcon_port, rcon_password, "save-all")
+    except Exception as e:
+        return f"❌ Save failed: {e}"
+    return "✅ World save triggered."
+
+
+async def web_minecraft_announce(guild_id: int, message: str, actor_id: int) -> str:
+    """Mirrors /minecraft announce."""
+    cfg = get_guild_cfg(guild_id)
+    host, rcon_port, rcon_password = cfg.get("mc_host"), cfg.get("mc_rcon_port"), cfg.get("mc_rcon_password")
+    if not host or not rcon_port or not rcon_password:
+        return "❌ RCON isn't set up. Set an RCON port and password first."
+    try:
+        await minecraft_rcon_command(host, rcon_port, rcon_password, f"say {message}")
+    except Exception as e:
+        return f"❌ Announce failed: {e}"
+    return f"✅ Broadcasted: {message}"
+
+
 async def web_set_minecraft_alert_channel(guild_id: int, channel_id, actor_id: int) -> str:
     cfg = get_guild_cfg(guild_id)
     if channel_id is None:
@@ -10252,5 +10278,6 @@ if __name__ == "__main__":
         web_stop_mass_action,
         web_rust_chatcommand_add, web_rust_chatcommand_remove,
         web_set_steam_link_role,
+        web_minecraft_save, web_minecraft_announce,
     )
     bot.run(TOKEN)
