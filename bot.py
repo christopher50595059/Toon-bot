@@ -7996,8 +7996,8 @@ async def mvp_end(interaction: discord.Interaction):
     await interaction.response.send_message(result)
 
 
-async def web_tournament_create(guild_id: int, name: str, channel_id: int, actor_id: int) -> str:
-    """Mirrors /tournament_create."""
+async def web_tournament_create(guild_id: int, name: str, channel_id: int, actor_id: int, team_mode: bool = False) -> str:
+    """Mirrors /tournament create."""
     guild = bot.get_guild(guild_id)
     if guild is None:
         return "❌ Server not found."
@@ -8011,7 +8011,7 @@ async def web_tournament_create(guild_id: int, name: str, channel_id: int, actor
     if existing and existing["status"] != "complete":
         return f"❌ A tournament named **{name}** is already in progress."
 
-    data = {"status": "signup", "players": [], "rounds": [], "channel_id": channel_id}
+    data = {"status": "signup", "players": [], "rounds": [], "channel_id": channel_id, "team_mode": team_mode}
     tournaments[name] = data
     save_config(config)
 
@@ -8022,7 +8022,8 @@ async def web_tournament_create(guild_id: int, name: str, channel_id: int, actor
         save_config(config)
     except discord.Forbidden:
         return "❌ I don't have permission to post in that channel."
-    return f"✅ Tournament **{name}** created in #{channel.name} — members can join with the buttons there."
+    mode_note = " (team-mode — captains enter with the Tournament jointeam form below)" if team_mode else ""
+    return f"✅ Tournament **{name}** created in #{channel.name}{mode_note}."
 
 
 async def web_tournament_start(guild_id: int, name: str, actor_id: int) -> str:
@@ -8048,8 +8049,10 @@ async def web_tournament_start(guild_id: int, name: str, actor_id: int) -> str:
     return f"✅ Tournament **{name}** started with {len(data['players'])} player(s)."
 
 
-async def web_tournament_report(guild_id: int, name: str, match: int, winner_id: int, actor_id: int) -> str:
-    """Mirrors /tournament_report."""
+async def web_tournament_report(guild_id: int, name: str, match: int, winner_id, actor_id: int) -> str:
+    """Mirrors /tournament report. winner_id is a member ID (int) for
+    individual tournaments, or a team name (str) for team-mode ones —
+    callers pass whichever type matches the tournament's mode."""
     guild = bot.get_guild(guild_id)
     cfg = get_guild_cfg(guild_id)
     data = cfg.get("tournaments", {}).get(name)
@@ -8062,7 +8065,7 @@ async def web_tournament_report(guild_id: int, name: str, match: int, winner_id:
 
     m = current_round[match - 1]
     if winner_id not in (m["p1"], m["p2"]):
-        return "❌ That person isn't in this match."
+        return "❌ That participant isn't in this match."
     m["winner"] = winner_id
 
     if all(mm["winner"] is not None for mm in current_round):
@@ -8081,6 +8084,70 @@ async def web_tournament_report(guild_id: int, name: str, match: int, winner_id:
         except discord.Forbidden:
             pass
     return f"✅ Match {match} result recorded for **{name}**."
+
+
+async def web_tournament_jointeam(guild_id: int, tournament: str, team: str, actor_id: int) -> str:
+    """Mirrors /tournament jointeam."""
+    cfg = get_guild_cfg(guild_id)
+    data = cfg.get("tournaments", {}).get(tournament)
+    if not data or data["status"] != "signup":
+        return f"❌ No open sign-ups found for **{tournament}**."
+    if not data.get("team_mode"):
+        return f"❌ **{tournament}** isn't a team tournament."
+    teams = cfg.get("teams", {})
+    team_data = teams.get(team)
+    if not team_data:
+        return f"❌ No team named **{team}**."
+    if len(team_data["members"]) < team_data["size"]:
+        return f"❌ **{team}** isn't full yet ({len(team_data['members'])}/{team_data['size']})."
+    if team in data["players"]:
+        return f"ℹ️ **{team}** is already entered."
+
+    data["players"].append(team)
+    save_config(config)
+    guild = bot.get_guild(guild_id)
+    if guild and data.get("message_id") and data.get("channel_id"):
+        channel = guild.get_channel(data["channel_id"])
+        if channel:
+            try:
+                msg = await channel.fetch_message(data["message_id"])
+                await msg.edit(embed=build_tournament_signup_embed(tournament, data))
+            except (discord.NotFound, discord.Forbidden):
+                pass
+    return f"✅ **{team}** is entered into **{tournament}**."
+
+
+async def web_tournament_leaveteam(guild_id: int, tournament: str, team: str, actor_id: int) -> str:
+    """Mirrors /tournament leaveteam."""
+    cfg = get_guild_cfg(guild_id)
+    data = cfg.get("tournaments", {}).get(tournament)
+    if not data or data["status"] != "signup":
+        return f"❌ No open sign-ups found for **{tournament}**."
+    if team not in data["players"]:
+        return f"❌ **{team}** isn't entered in **{tournament}**."
+    data["players"].remove(team)
+    save_config(config)
+    guild = bot.get_guild(guild_id)
+    if guild and data.get("message_id") and data.get("channel_id"):
+        channel = guild.get_channel(data["channel_id"])
+        if channel:
+            try:
+                msg = await channel.fetch_message(data["message_id"])
+                await msg.edit(embed=build_tournament_signup_embed(tournament, data))
+            except (discord.NotFound, discord.Forbidden):
+                pass
+    return f"✅ **{team}** withdrawn from **{tournament}**."
+
+
+async def web_tournament_cancel(guild_id: int, name: str, actor_id: int) -> str:
+    """Mirrors /tournament cancel."""
+    cfg = get_guild_cfg(guild_id)
+    tournaments = cfg.get("tournaments", {})
+    if name not in tournaments:
+        return f"❌ No tournament named **{name}**."
+    del tournaments[name]
+    save_config(config)
+    return f"✅ Cancelled and deleted **{name}**."
 
 
 async def web_gamenight_create(guild_id: int, game: str, when_iso: str, channel_id: int, actor_id: int) -> str:
@@ -10354,7 +10421,8 @@ if __name__ == "__main__":
         rust_ban_player, rust_get_banlist, rust_unban_player, web_set_rust_alert_channel,
         web_set_minecraft_server, web_set_minecraft_status_channel, web_get_minecraft_status, web_minecraft_command,
         web_set_minecraft_alert_channel, relay_incoming_webhook, web_tournament_create, web_tournament_start,
-        web_tournament_report, web_gamenight_create, web_gamenight_cancel, web_mvp_start,
+        web_tournament_report, web_tournament_jointeam, web_tournament_leaveteam, web_tournament_cancel,
+        web_gamenight_create, web_gamenight_cancel, web_mvp_start,
         web_mvp_end, web_add_ticket_category, web_remove_ticket_category, web_set_ticket_questions,
         web_get_ticket_messages, web_send_ticket_message, web_set_backup_settings, web_run_backup_now,
         redeem_web_login_code,

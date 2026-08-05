@@ -91,6 +91,9 @@ _relay_incoming_webhook = None
 _tournament_create = None
 _tournament_start = None
 _tournament_report = None
+_tournament_jointeam = None
+_tournament_leaveteam = None
+_tournament_cancel = None
 _gamenight_create = None
 _gamenight_cancel = None
 _mvp_start = None
@@ -5706,16 +5709,26 @@ def tournaments_page(guild_id):
     rows = ""
     if tournaments:
         for name, data in tournaments.items():
+            safe_name = html.escape(name)
             status = data.get("status", "signup")
             status_color = {"signup": "#5ee0a0", "in_progress": "#f5c15c", "complete": "#80848e"}.get(status, "#80848e")
             status_pill = f'<span class="pill" style="background:{status_color}22; border-color:{status_color}55; color:{status_color};">{status}</span>'
+            team_mode = data.get("team_mode")
+            mode_note = " 👥" if team_mode else ""
             extra = ""
             if status == "complete":
-                champ = guild.get_member(data.get("champion"))
-                extra = f" — 🏆 {champ.display_name if champ else 'Unknown'}"
-            rows += f"<tr><td>{name}</td><td>{status_pill}{extra}</td><td>{len(data.get('players', []))}</td></tr>"
+                champ = data.get("champion")
+                champ_label = f"**{champ}**" if team_mode else (guild.get_member(champ).display_name if guild.get_member(champ) else "Unknown")
+                extra = f" — 🏆 {champ_label}"
+            cancel_form = f"""
+            <form method="post" action="/dashboard/{guild_id}/tournaments/cancel" style="margin:0;">
+              <input type="hidden" name="name" value="{safe_name}">
+              <button class="btn btn-secondary" type="submit" style="padding:5px 10px; font-size:11px;">Cancel</button>
+            </form>
+            """
+            rows += f"<tr><td>{safe_name}{mode_note}</td><td>{status_pill}{extra}</td><td>{len(data.get('players', []))}</td><td>{cancel_form}</td></tr>"
     else:
-        rows = '<tr><td colspan="3" class="hint" style="padding:16px;">No tournaments yet.</td></tr>'
+        rows = '<tr><td colspan="4" class="hint" style="padding:16px;">No tournaments yet.</td></tr>'
 
     member_assets = _member_search_assets(guild)
     channel_assets = _channel_search_assets(guild)
@@ -5729,18 +5742,26 @@ def tournaments_page(guild_id):
 
     <div class="card">
       <h2>Current tournaments</h2>
+      <div class="hint" style="margin-bottom:12px;">👥 marks team-mode tournaments.</div>
       <div class="log-wrap"><table class="log-table">
-        <tr><th>Name</th><th>Status</th><th>Players</th></tr>
+        <tr><th>Name</th><th>Status</th><th>Players/Teams</th><th></th></tr>
         {rows}
       </table></div>
     </div>
 
     <div class="card">
       <h2>➕ Create a tournament</h2>
-      <div class="hint" style="margin-bottom:12px;">Posts a sign-up embed with Join/Leave buttons.</div>
+      <div class="hint" style="margin-bottom:12px;">Posts a sign-up embed with Join/Leave buttons. For team mode, teams enter via the Join Team form below instead.</div>
       <form method="post" action="/dashboard/{guild_id}/tournaments/create">
-        <div class="field"><label>Tournament name</label><input type="text" name="name" placeholder="Summer Scrims" required></div>
+        <div class="field"><label>Tournament name</label><input type="text" name="name" placeholder="R6 Siege Cup" required></div>
         {_channel_search_field()}
+        <div class="field">
+          <label>Mode</label>
+          <select name="team_mode">
+            <option value="false">Individual (1v1)</option>
+            <option value="true">Team-based (any size, 1v1 to 5v5)</option>
+          </select>
+        </div>
         <button class="btn" type="submit">Create</button>
       </form>
     </div>
@@ -5755,13 +5776,38 @@ def tournaments_page(guild_id):
     </div>
 
     <div class="card">
+      <h2>👥 Join Team (team-mode tournaments)</h2>
+      <div class="hint" style="margin-bottom:12px;">Enters a full team — the team must already be full (see the Teams page).</div>
+      <form method="post" action="/dashboard/{guild_id}/tournaments/jointeam">
+        <div class="grid-2">
+          <div class="field"><label>Tournament name</label><input type="text" name="tournament" required></div>
+          <div class="field"><label>Team name</label><input type="text" name="team" required></div>
+        </div>
+        <button class="btn" type="submit">Join</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>👥 Leave Team</h2>
+      <form method="post" action="/dashboard/{guild_id}/tournaments/leaveteam">
+        <div class="grid-2">
+          <div class="field"><label>Tournament name</label><input type="text" name="tournament" required></div>
+          <div class="field"><label>Team name</label><input type="text" name="team" required></div>
+        </div>
+        <button class="btn btn-secondary" type="submit">Withdraw</button>
+      </form>
+    </div>
+
+    <div class="card">
       <h2>🏅 Report a match result</h2>
+      <div class="hint" style="margin-bottom:12px;">Fill in the member field for individual tournaments, or the team name field for team-mode ones — whichever applies.</div>
       <form method="post" action="/dashboard/{guild_id}/tournaments/report">
         <div class="grid-2">
           <div class="field"><label>Tournament name</label><input type="text" name="name" required></div>
           <div class="field"><label>Match number</label><input type="number" name="match" min="1" required></div>
         </div>
-        {_member_search_field("Winner", "winner_id")}
+        {_member_search_field("Winner (individual tournaments)", "winner_id")}
+        <div class="field"><label>Winning team name (team-mode tournaments)</label><input type="text" name="winner_team"></div>
         <button class="btn btn-secondary" type="submit">Report Result</button>
       </form>
     </div>
@@ -5775,13 +5821,14 @@ def tournaments_create_route(guild_id):
     if guild is None:
         return redirect(url_for("guild_picker"))
     name = request.form.get("name", "").strip()
+    team_mode = request.form.get("team_mode") == "true"
     try:
         channel_id = int(request.form["channel_id"])
     except (KeyError, ValueError):
         return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Fill in a name and pick a channel."))
     if not name:
         return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Enter a tournament name."))
-    result = _run_async(_tournament_create(guild_id, name, channel_id, session["user_id"]))
+    result = _run_async(_tournament_create(guild_id, name, channel_id, session["user_id"], team_mode))
     return redirect(url_for("tournaments_page", guild_id=guild_id, result=result))
 
 
@@ -5797,20 +5844,67 @@ def tournaments_start_route(guild_id):
     return redirect(url_for("tournaments_page", guild_id=guild_id, result=result))
 
 
+@app.route("/dashboard/<int:guild_id>/tournaments/jointeam", methods=["POST"])
+def tournaments_jointeam_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    tournament = request.form.get("tournament", "").strip()
+    team = request.form.get("team", "").strip()
+    if not tournament or not team:
+        return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Fill in both fields."))
+    result = _run_async(_tournament_jointeam(guild_id, tournament, team, session["user_id"]))
+    return redirect(url_for("tournaments_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tournaments/leaveteam", methods=["POST"])
+def tournaments_leaveteam_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    tournament = request.form.get("tournament", "").strip()
+    team = request.form.get("team", "").strip()
+    if not tournament or not team:
+        return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Fill in both fields."))
+    result = _run_async(_tournament_leaveteam(guild_id, tournament, team, session["user_id"]))
+    return redirect(url_for("tournaments_page", guild_id=guild_id, result=result))
+
+
+@app.route("/dashboard/<int:guild_id>/tournaments/cancel", methods=["POST"])
+def tournaments_cancel_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    name = request.form.get("name", "").strip()
+    if not name:
+        return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Missing tournament name."))
+    result = _run_async(_tournament_cancel(guild_id, name, session["user_id"]))
+    return redirect(url_for("tournaments_page", guild_id=guild_id, result=result))
+
+
 @app.route("/dashboard/<int:guild_id>/tournaments/report", methods=["POST"])
 def tournaments_report_route(guild_id):
     guild, member = _check_access(guild_id)
     if guild is None:
         return redirect(url_for("guild_picker"))
     name = request.form.get("name", "").strip()
+    winner_team = request.form.get("winner_team", "").strip()
     try:
         match = int(request.form["match"])
-        winner_id = int(request.form["winner_id"])
     except (KeyError, ValueError):
         return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Fill in all fields correctly."))
     if not name:
         return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Enter a tournament name."))
-    result = _run_async(_tournament_report(guild_id, name, match, winner_id, session["user_id"]))
+
+    if winner_team:
+        winner = winner_team
+    else:
+        try:
+            winner = int(request.form["winner_id"])
+        except (KeyError, ValueError):
+            return redirect(url_for("tournaments_page", guild_id=guild_id, result="❌ Pick a winning member or enter a winning team name."))
+
+    result = _run_async(_tournament_report(guild_id, name, match, winner, session["user_id"]))
     return redirect(url_for("tournaments_page", guild_id=guild_id, result=result))
 
 
@@ -7157,6 +7251,7 @@ def start_web_app(
     set_minecraft_alert_channel,
     relay_incoming_webhook,
     tournament_create, tournament_start, tournament_report,
+    tournament_jointeam, tournament_leaveteam, tournament_cancel,
     gamenight_create, gamenight_cancel,
     mvp_start, mvp_end,
     add_ticket_category, remove_ticket_category, set_ticket_questions,
@@ -7201,6 +7296,7 @@ def start_web_app(
     global _set_minecraft_server, _set_minecraft_status_channel, _get_minecraft_status, _minecraft_command, _set_minecraft_alert_channel
     global _relay_incoming_webhook
     global _tournament_create, _tournament_start, _tournament_report
+    global _tournament_jointeam, _tournament_leaveteam, _tournament_cancel
     global _gamenight_create, _gamenight_cancel
     global _mvp_start, _mvp_end
     global _add_ticket_category, _remove_ticket_category, _set_ticket_questions
@@ -7277,6 +7373,9 @@ def start_web_app(
     _tournament_create = tournament_create
     _tournament_start = tournament_start
     _tournament_report = tournament_report
+    _tournament_jointeam = tournament_jointeam
+    _tournament_leaveteam = tournament_leaveteam
+    _tournament_cancel = tournament_cancel
     _gamenight_create = gamenight_create
     _gamenight_cancel = gamenight_cancel
     _mvp_start = mvp_start
