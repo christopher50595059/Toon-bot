@@ -2863,6 +2863,9 @@ async def setrustpopalert(interaction: discord.Interaction, role: discord.Role =
     if channel is None:
         await interaction.response.send_message("❌ Pick a channel too — that's where the alert gets posted.", ephemeral=True)
         return
+    if threshold is not None and threshold < 1:
+        await interaction.response.send_message("❌ Threshold has to be at least 1.", ephemeral=True)
+        return
 
     cfg["rust_pop_alert_role_id"] = role.id
     cfg["rust_pop_alert_channel_id"] = channel.id
@@ -4257,8 +4260,8 @@ async def web_rust_set_wipe(guild_id: int, day, hour, channel_id, actor_id: int)
         cfg.pop("rust_wipe_announced", None)
         save_config(config)
         return "✅ Wipe countdown disabled."
-    if hour is None or hour < 0 or hour > 23 or channel_id is None:
-        return "❌ Pick a day, an hour (0-23 UTC), and a channel."
+    if hour is None or hour < 0 or hour > 23 or channel_id is None or day < 0 or day > 6:
+        return "❌ Pick a valid day (0-6), an hour (0-23 UTC), and a channel."
     cfg["rust_wipe_day"] = day
     cfg["rust_wipe_hour"] = hour
     cfg["rust_wipe_channel_id"] = channel_id
@@ -4278,6 +4281,8 @@ async def web_rust_set_popalert(guild_id: int, role_id, channel_id, threshold, a
         return "✅ Rust population alerts disabled."
     if channel_id is None:
         return "❌ Pick a channel too."
+    if threshold is not None and threshold < 1:
+        return "❌ Threshold has to be at least 1."
     cfg["rust_pop_alert_role_id"] = role_id
     cfg["rust_pop_alert_channel_id"] = channel_id
     if threshold is not None:
