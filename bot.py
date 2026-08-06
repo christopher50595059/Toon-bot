@@ -2234,16 +2234,33 @@ def _a2s_query_sync(host: str, port: int, timeout: float = 5.0) -> dict:
             return buf[offset:end].decode("utf-8", errors="replace"), end + 1
 
         request = b"\xFF\xFF\xFF\xFFTSource Engine Query\x00"
-        sock.sendto(request, (host, port))
-        data, _ = sock.recvfrom(4096)
+        try:
+            sock.sendto(request, (host, port))
+        except socket.gaierror:
+            raise ValueError(f"Couldn't resolve host \"{host}\" — check the IP/domain is entered correctly.")
+
+        try:
+            data, _ = sock.recvfrom(4096)
+        except socket.timeout:
+            raise ValueError(
+                f"No response after {timeout}s from {host}:{port}. This almost always means UDP port {port} "
+                "isn't actually open to the internet — even if your game port works fine, hosts often need the "
+                "query port opened separately. Double-check your host's firewall/port-forwarding settings, and "
+                "confirm this is really your query port (not just the game port) if your host uses a different one."
+            )
+        except ConnectionRefusedError:
+            raise ValueError(f"Connection refused by {host}:{port} — nothing is listening there. Double-check the port number.")
 
         if data[4:5] == b"\x41":  # challenge required
             challenge = data[5:9]
             sock.sendto(request + challenge, (host, port))
-            data, _ = sock.recvfrom(4096)
+            try:
+                data, _ = sock.recvfrom(4096)
+            except socket.timeout:
+                raise ValueError(f"Server didn't respond to the challenge handshake from {host}:{port}. Try again — this can be a one-off network blip.")
 
         if data[4:5] != b"\x49":
-            raise ValueError("Unexpected response from server.")
+            raise ValueError("Got a response, but not the expected server info format — this port may not be a Rust query port.")
 
         offset = 6  # header(4) + type(1) + protocol(1)
         name, offset = read_cstring(data, offset)
