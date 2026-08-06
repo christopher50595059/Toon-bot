@@ -2824,6 +2824,27 @@ async def rust_status_loop():
             await check_rust_daily_restart(guild_id)
 
 
+def _sanitize_host(raw_host: str) -> tuple:
+    """Cleans up common mistakes when someone pastes a server address:
+    stray whitespace, an accidental http(s):// or steam://connect/ prefix,
+    a trailing slash/path, and a port number stuck onto the host (e.g.
+    "1.2.3.4:28015") which would otherwise break DNS resolution entirely
+    since that whole string isn't a valid hostname. Returns (host, port)
+    where port is None if none was embedded."""
+    host = raw_host.strip()
+    for prefix in ("http://", "https://", "steam://connect/"):
+        if host.lower().startswith(prefix):
+            host = host[len(prefix):]
+    host = host.split("/")[0].strip()
+    embedded_port = None
+    if host.count(":") == 1:
+        possible_host, possible_port = host.rsplit(":", 1)
+        if possible_port.isdigit():
+            host = possible_host
+            embedded_port = int(possible_port)
+    return host, embedded_port
+
+
 @rust_group.command(name="setserver", description="Connect this server to your Rust game server.")
 @app_commands.describe(
     host="Your Rust server's IP address or domain (no port)",
@@ -2843,6 +2864,9 @@ async def setrustserver(
     if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
+    host, embedded_port = _sanitize_host(host)
+    if not connect_port and embedded_port:
+        connect_port = embedded_port
     cfg = get_guild_cfg(interaction.guild_id)
     cfg["rust_host"] = host
     cfg["rust_query_port"] = query_port
@@ -2850,6 +2874,8 @@ async def setrustserver(
     save_config(config)
 
     msg = f"✅ Rust server set: `{host}:{query_port}`."
+    if embedded_port:
+        msg += f" (I noticed `:{embedded_port}` was stuck to your host and split it out automatically.)"
     if rcon_port and rcon_password:
         cfg["rust_rcon_port"] = rcon_port
         cfg["rust_rcon_password"] = rcon_password
@@ -3941,14 +3967,16 @@ async def setminecraftserver(
     if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
+    host, embedded_port = _sanitize_host(host)
     cfg = get_guild_cfg(interaction.guild_id)
     cfg["mc_host"] = host
-    cfg["mc_port"] = port
+    cfg["mc_port"] = embedded_port or port
     if rcon_port and rcon_password:
         cfg["mc_rcon_port"] = rcon_port
         cfg["mc_rcon_password"] = rcon_password
     save_config(config)
-    await interaction.response.send_message(f"✅ Minecraft server set: `{host}:{port}`.", ephemeral=True)
+    note = f" (noticed :{embedded_port} was stuck to your host and split it out)" if embedded_port else ""
+    await interaction.response.send_message(f"✅ Minecraft server set: `{host}:{embedded_port or port}`.{note}", ephemeral=True)
 
 
 @minecraft_group.command(name="setstatuschannel", description="Post a live Minecraft server status embed in this channel.")
@@ -4119,15 +4147,17 @@ async def minecraftannounce(interaction: discord.Interaction, message: str):
 
 
 async def web_set_minecraft_server(guild_id: int, host: str, port: int, rcon_port, rcon_password, actor_id: int) -> str:
-    """Mirrors /setminecraftserver."""
+    """Mirrors /minecraft setserver."""
+    host, embedded_port = _sanitize_host(host)
     cfg = get_guild_cfg(guild_id)
     cfg["mc_host"] = host
-    cfg["mc_port"] = port
+    cfg["mc_port"] = embedded_port or port
     if rcon_port and rcon_password:
         cfg["mc_rcon_port"] = rcon_port
         cfg["mc_rcon_password"] = rcon_password
     save_config(config)
-    return f"✅ Minecraft server set: {host}:{port}."
+    note = f" (noticed :{embedded_port} was stuck to your host and split it out)" if embedded_port else ""
+    return f"✅ Minecraft server set: {host}:{embedded_port or port}.{note}"
 
 
 async def web_set_minecraft_status_channel(guild_id: int, channel_id, actor_id: int) -> str:
@@ -4254,6 +4284,9 @@ async def relay_incoming_webhook(guild_id: int, payload: dict) -> bool:
 
 async def web_set_rust_server(guild_id: int, host: str, query_port: int, rcon_port, rcon_password, actor_id: int, connect_port=None) -> str:
     """Mirrors /rust setserver."""
+    host, embedded_port = _sanitize_host(host)
+    if not connect_port and embedded_port:
+        connect_port = embedded_port
     cfg = get_guild_cfg(guild_id)
     cfg["rust_host"] = host
     cfg["rust_query_port"] = query_port
@@ -4261,6 +4294,8 @@ async def web_set_rust_server(guild_id: int, host: str, query_port: int, rcon_po
     save_config(config)
 
     msg = f"✅ Rust server set: {host}:{query_port}."
+    if embedded_port:
+        msg += f" (Noticed :{embedded_port} was stuck to your host and split it out automatically.)"
     if rcon_port and rcon_password:
         cfg["rust_rcon_port"] = rcon_port
         cfg["rust_rcon_password"] = rcon_password
