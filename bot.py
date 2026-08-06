@@ -2338,6 +2338,13 @@ class RustRconConnection:
         error_text = str(error)
         if "401" in error_text or "403" in error_text or "Unauthorized" in error_text or "Forbidden" in error_text:
             hint = "This usually means the RCON **password** is wrong."
+        elif "did not receive a valid http response" in error_text.lower() or "invalid status" in error_text.lower():
+            hint = (
+                "Something IS listening on that port, but it's not speaking Rust's WebSocket RCON protocol — "
+                "this usually means it's the wrong port entirely (not the same as your game port or query port), "
+                "or your host routes RCON through a different port than the one in your server's `-rcon.port` "
+                "launch argument. Double-check your host's control panel for the exact WebRcon/RCON port."
+            )
         elif "timed out" in error_text.lower() or "timeout" in error_text.lower():
             hint = "This usually means RCON **port** isn't open to the internet — check your firewall/hosting panel, separately from your game port."
         elif "refused" in error_text.lower():
