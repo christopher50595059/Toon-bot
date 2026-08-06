@@ -2282,7 +2282,10 @@ async def query_rust_server(host: str, port: int) -> dict:
 
 
 class RustRconConnection:
-    """One persistent WebRcon connection per guild. Auto-reconnects on drop."""
+    """One persistent WebRcon connection per guild. Auto-reconnects on drop.
+    After a few consecutive failures, posts the actual error to the log
+    channel once (not every retry) so this is debuggable without needing
+    to check hosting platform logs."""
 
     def __init__(self, guild_id: int, host: str, port: int, password: str):
         self.guild_id = guild_id
@@ -2294,6 +2297,8 @@ class RustRconConnection:
         self._next_id = 1
         self._pending: dict[int, asyncio.Future] = {}
         self.connected = False
+        self._consecutive_failures = 0
+        self._notified_this_streak = False
 
     async def connect_and_listen(self):
         url = f"ws://{self.host}:{self.port}/{self.password}"
@@ -2302,6 +2307,8 @@ class RustRconConnection:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
                     self.ws = ws
                     self.connected = True
+                    self._consecutive_failures = 0
+                    self._notified_this_streak = False
                     async for raw in ws:
                         await self._handle_message(raw)
             except asyncio.CancelledError:
@@ -2309,9 +2316,40 @@ class RustRconConnection:
                 raise
             except Exception as e:
                 print(f"⚠️ Rust RCON connection issue (guild {self.guild_id}): {e}")
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= 3 and not self._notified_this_streak:
+                    self._notified_this_streak = True
+                    await self._notify_connection_failure(e)
             self.connected = False
             self.ws = None
             await asyncio.sleep(15)
+
+    async def _notify_connection_failure(self, error: Exception):
+        guild = bot.get_guild(self.guild_id)
+        if guild is None:
+            return
+        cfg = get_guild_cfg(self.guild_id)
+        log_channel_id = cfg.get("log_channel_id")
+        if not log_channel_id:
+            return
+        log_channel = guild.get_channel(log_channel_id)
+        if log_channel is None:
+            return
+        error_text = str(error)
+        if "401" in error_text or "403" in error_text or "Unauthorized" in error_text or "Forbidden" in error_text:
+            hint = "This usually means the RCON **password** is wrong."
+        elif "timed out" in error_text.lower() or "timeout" in error_text.lower():
+            hint = "This usually means RCON **port** isn't open to the internet — check your firewall/hosting panel, separately from your game port."
+        elif "refused" in error_text.lower():
+            hint = "Nothing is listening on that RCON port — double-check the port number, and that RCON (web-based, not just RCON.io style) is actually enabled on your server."
+        else:
+            hint = "Double-check your RCON port and password are both correct."
+        try:
+            await log_channel.send(
+                f"⚠️ **Rust RCON still can't connect** after several attempts (`{self.host}:{self.port}`): `{error_text}`. {hint}"
+            )
+        except discord.Forbidden:
+            pass
 
     async def _handle_message(self, raw: str):
         try:
