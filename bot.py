@@ -34,6 +34,7 @@ Commands:
   /team rename name:<text> new_name:<text> - (captain) rename your team
   /team transfer name:<text> new_captain:<user> - (captain) hand off captaincy
   /team list                                - show all teams
+  /team info name:<text>                   - show full details for one team
   /tournament create name:<text> [team_mode] - open sign-ups for a bracket tournament (team_mode for team-based)
   /tournament jointeam tournament:<text> team:<text> - (captain) enter your full team into a team-mode tournament
   /tournament leaveteam tournament:<text> team:<text> - (captain) withdraw your team
@@ -7569,6 +7570,32 @@ async def team_list(interaction: discord.Interaction):
     await send_list_safely(interaction, lines, ephemeral=False, joiner="\n\n")
 
 
+@team_group.command(name="info", description="Show full details for one team.")
+@app_commands.describe(name="The team's name")
+async def team_info(interaction: discord.Interaction, name: str):
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team:
+        await interaction.response.send_message(f"❌ No team named **{name}**. Check `/team list`.", ephemeral=True)
+        return
+
+    captain_id = team["captain_id"]
+    embed = discord.Embed(title=f"🧑‍🤝‍🧑 {name}", color=discord.Color.blue())
+    filled = len(team["members"])
+    size = team["size"]
+    embed.add_field(name="Status", value="✅ Full" if filled >= size else f"{filled}/{size}", inline=True)
+    captain = interaction.guild.get_member(captain_id)
+    embed.add_field(name="Captain", value=captain.mention if captain else "Unknown", inline=True)
+    member_lines = []
+    for uid in team["members"]:
+        m = interaction.guild.get_member(uid)
+        label = m.mention if m else f"Unknown ({uid})"
+        member_lines.append(f"{label} 👑" if uid == captain_id else label)
+    embed.add_field(name=f"Members ({filled})", value="\n".join(member_lines) if member_lines else "None", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
 def build_tournament_signup_embed(name: str, data: dict) -> discord.Embed:
     embed = discord.Embed(title=f"🏆 Tournament: {name}" + (" (Team)" if data.get("team_mode") else ""), color=discord.Color.gold())
     label = "Teams" if data.get("team_mode") else "Players"
@@ -10491,6 +10518,7 @@ HELP_CATEGORIES = {
         ("/tournament jointeam / leaveteam", "Enter/withdraw a full team from a team-mode tournament"),
         ("/tournament cancel / list", "Cancel a tournament, or see all of them at once"),
         ("/team create / join / leave / kick / disband / list", "Form teams of any size, 1v1 to 5v5"),
+        ("/team info", "Show full details for one team"),
         ("/team rename / transfer", "Rename your team, or hand off captaincy"),
         ("/gamenight_create / _list / _cancel", "Schedule game nights with RSVPs"),
         ("/mvp_start / _end", "Vote for MVP among candidates"),
