@@ -10223,22 +10223,102 @@ HELP_CATEGORIES = {
 }
 
 
-@bot.tree.command(name="help", description="Show every command this bot has, grouped by category.")
-async def help_command(interaction: discord.Interaction):
+def _build_help_pages() -> list:
+    """Splits HELP_CATEGORIES into multiple embeds that each respect
+    Discord's limits (1024 chars/field, ~5500 chars/embed used as a safety
+    margin under the real 6000 cap, 25 fields/embed). A single category
+    whose own content is too long for one field gets split across several
+    numbered fields rather than truncated, so nothing is silently cut off.
+    This way /help keeps working automatically as more commands get added,
+    instead of breaking again once the content grows past whatever fit
+    today."""
+    FIELD_LIMIT = 1000  # a little under Discord's 1024, for safety
+    EMBED_LIMIT = 5500  # a little under Discord's ~6000, for safety
+    MAX_FIELDS = 25
+
+    # Step 1: for every category, build one or more (name, value) fields,
+    # splitting that category's own command list if its combined text is
+    # too long for a single field.
+    all_fields = []
+    for category, commands_list in HELP_CATEGORIES.items():
+        lines = [f"**{name}** — {desc}" for name, desc in commands_list]
+        chunks = [""]
+        for line in lines:
+            candidate = (chunks[-1] + "\n" + line).strip()
+            if len(candidate) > FIELD_LIMIT and chunks[-1]:
+                chunks.append(line)
+            else:
+                chunks[-1] = candidate
+        if len(chunks) == 1:
+            all_fields.append((category, chunks[0]))
+        else:
+            for i, chunk in enumerate(chunks, start=1):
+                all_fields.append((f"{category} ({i}/{len(chunks)})", chunk))
+
+    # Step 2: pack those fields into pages, respecting the per-embed
+    # character budget and the 25-fields-per-embed hard limit.
+    pages = []
+    current_fields = []
+    current_len = 0
+    for name, value in all_fields:
+        field_len = len(name) + len(value)
+        if current_fields and (current_len + field_len > EMBED_LIMIT or len(current_fields) >= MAX_FIELDS):
+            pages.append(current_fields)
+            current_fields = []
+            current_len = 0
+        current_fields.append((name, value))
+        current_len += field_len
+    if current_fields:
+        pages.append(current_fields)
+    return pages
+
+
+def _build_help_embed(fields: list, page_num: int, total_pages: int) -> discord.Embed:
     embed = discord.Embed(
-        title="📖 Bot Commands",
+        title="📖 Bot Commands" + (f" (page {page_num}/{total_pages})" if total_pages > 1 else ""),
         description="Everything this bot can do, grouped by category.",
         color=discord.Color.blurple(),
     )
     if bot.user:
         embed.set_thumbnail(url=bot.user.display_avatar.url)
-
-    for category, commands_list in HELP_CATEGORIES.items():
-        value = "\n".join(f"**{name}** — {desc}" for name, desc in commands_list)
-        embed.add_field(name=category, value=value, inline=False)
-
+    for name, value in fields:
+        embed.add_field(name=name, value=value, inline=False)
     embed.set_footer(text="Most commands require the manager role or Administrator permission")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    return embed
+
+
+class HelpView(discord.ui.View):
+    def __init__(self, pages: list):
+        super().__init__(timeout=180)
+        self.pages = pages
+        self.page_index = 0
+        self._update_button_state()
+
+    def _update_button_state(self):
+        self.previous_button.disabled = self.page_index == 0
+        self.next_button.disabled = self.page_index >= len(self.pages) - 1
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page_index = max(0, self.page_index - 1)
+        self._update_button_state()
+        embed = _build_help_embed(self.pages[self.page_index], self.page_index + 1, len(self.pages))
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page_index = min(len(self.pages) - 1, self.page_index + 1)
+        self._update_button_state()
+        embed = _build_help_embed(self.pages[self.page_index], self.page_index + 1, len(self.pages))
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.tree.command(name="help", description="Show every command this bot has, grouped by category.")
+async def help_command(interaction: discord.Interaction):
+    pages = _build_help_pages()
+    embed = _build_help_embed(pages[0], 1, len(pages))
+    view = HelpView(pages) if len(pages) > 1 else None
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ---------- VC greetings ----------
