@@ -2167,7 +2167,7 @@ async def listticketcategories(interaction: discord.Interaction):
         q_count = len(t.get("questions", []))
         q_note = f" ({q_count} question(s))" if q_count else ""
         lines.append(f"{i}. **{t['name']}** → {category.name if category else '(deleted category)'}{q_note}")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    await send_list_safely(interaction, lines, ephemeral=True)
 
 
 async def web_add_ticket_category(guild_id: int, name: str, category_id: int, questions: list, actor_id: int) -> str:
@@ -3199,7 +3199,7 @@ async def rustlistannouncements(interaction: discord.Interaction):
         await interaction.response.send_message("No recurring announcements configured yet.", ephemeral=True)
         return
     lines = [f"{i}. Every {a['interval_minutes']}min — \"{a['message']}\"" for i, a in enumerate(announcements, start=1)]
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    await send_list_safely(interaction, lines, ephemeral=True)
 
 
 async def check_rust_recurring_announcements(guild_id: int):
@@ -3306,7 +3306,7 @@ async def rustmacrolist(interaction: discord.Interaction):
         await interaction.response.send_message("No macros saved yet.", ephemeral=True)
         return
     lines = [f"**{name}** → `{command}`" for name, command in macros.items()]
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    await send_list_safely(interaction, lines, ephemeral=True)
 
 
 @rustmacro_group.command(name="addchatcommand", description="Add an in-game chat command — players type it in Rust chat, the bot replies automatically.")
@@ -3352,7 +3352,7 @@ async def rustmacro_listchatcommands(interaction: discord.Interaction):
         await interaction.response.send_message("No in-game chat commands set up yet.", ephemeral=True)
         return
     lines = [f"**{trigger}** → {response}" for trigger, response in chat_commands.items()]
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    await send_list_safely(interaction, lines, ephemeral=True)
 
 
 async def web_rust_chatcommand_add(guild_id: int, trigger: str, response: str, actor_id: int) -> str:
@@ -4948,6 +4948,31 @@ def action_embed(
     return embed
 
 
+async def send_list_safely(interaction: discord.Interaction, lines: list, ephemeral: bool = True, joiner: str = "\n"):
+    """Sends a list of text lines as one or more messages, splitting
+    whenever the combined text would exceed Discord's 2000-character
+    message limit — instead of just joining everything and letting the
+    send silently fail once a list grows past whatever happened to fit
+    when the command was first written (the same bug class that broke
+    /help). Always sends at least one message, even for an empty list."""
+    LIMIT = 1900  # safety margin under Discord's real 2000-char cap
+    if not lines:
+        await interaction.response.send_message("(nothing to show)", ephemeral=ephemeral)
+        return
+
+    chunks = [""]
+    for line in lines:
+        candidate = (chunks[-1] + joiner + line) if chunks[-1] else line
+        if len(candidate) > LIMIT and chunks[-1]:
+            chunks.append(line)
+        else:
+            chunks[-1] = candidate
+
+    await interaction.response.send_message(chunks[0], ephemeral=ephemeral)
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=ephemeral)
+
+
 def is_authorized(interaction: discord.Interaction) -> bool:
     """True if the invoking member can manage roles via this bot."""
     member = interaction.user
@@ -5461,7 +5486,7 @@ async def listrankbonusroles(interaction: discord.Interaction):
         rank_label = rank_role.mention if rank_role else f"(deleted rank {rid})"
         bonus_mentions = ", ".join(f"<@&{bid}>" for bid in bonus_list)
         lines.append(f"{rank_label} → {bonus_mentions}")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    await send_list_safely(interaction, lines, ephemeral=True)
 
 
 async def _sync_rank_bonus_roles(guild_id: int, user_id: int, new_rank_id: int):
@@ -7217,7 +7242,7 @@ async def team_list(interaction: discord.Interaction):
         member_mentions = ", ".join(f"<@{m}>" for m in t["members"])
         full_note = " ✅ FULL" if len(t["members"]) >= t["size"] else ""
         lines.append(f"**{name}** ({len(t['members'])}/{t['size']}){full_note} — Captain: {captain.mention if captain else 'Unknown'}\n{member_mentions}")
-    await interaction.response.send_message("\n\n".join(lines))
+    await send_list_safely(interaction, lines, ephemeral=False, joiner="\n\n")
 
 
 def build_tournament_signup_embed(name: str, data: dict) -> discord.Embed:
@@ -7550,7 +7575,7 @@ async def tournament_list(interaction: discord.Interaction):
             champ_label = f"**{champ}**" if data.get("team_mode") else f"<@{champ}>"
             detail = f"complete — champion: {champ_label}"
         lines.append(f"**{name}**{team_note} — {detail}")
-    await interaction.response.send_message("\n".join(lines))
+    await send_list_safely(interaction, lines, ephemeral=False)
 
 
 # ---------- game nights ----------
