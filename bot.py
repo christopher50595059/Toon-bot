@@ -137,6 +137,8 @@ Commands:
   /twitch add username:<text> channel:<channel> [role] - watch a Twitch channel, announce when they go live
   /twitch remove username:<text>           - stop watching a Twitch channel
   /twitch list                              - show every Twitch channel being watched
+  /twitch check username:<text>            - manually check a channel's live status right now
+  /twitch edit username:<text> [channel] [role] - change a watched streamer's announcement channel/role
   /winner tournament:<text> [winner_member] [winner_team] - announce a tournament winner (individual or team)
   /stopmassaction                          - cancel an in-progress bulk operation (roster add-all, mass rename/role changes)
   /setviewerrole [role]                   - (admin only) role that gets view-only web dashboard access
@@ -2489,6 +2491,49 @@ async def twitch_list(interaction: discord.Interaction):
         status = "🔴 live" if info.get("was_live") else "⚫ offline"
         lines.append(f"**{username}** ({status}) → {channel.mention if channel else '(deleted channel)'}")
     await send_list_safely(interaction, lines, ephemeral=True)
+
+
+@twitch_group.command(name="check", description="Manually check a watched channel's live status right now, instead of waiting for the automatic check.")
+@app_commands.describe(username="The Twitch username to check")
+async def twitch_check(interaction: discord.Interaction, username: str):
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        await interaction.response.send_message("❌ Twitch isn't configured on this bot (missing TWITCH_CLIENT_ID/SECRET).", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    username_key = username.strip().lower().lstrip("@")
+    stream = await _get_twitch_live_info(username_key)
+    if stream:
+        title = stream.get("title", "")
+        game = stream.get("game_name", "")
+        viewers = stream.get("viewer_count", 0)
+        detail = f" — \"{title}\"" if title else ""
+        detail += f" ({game})" if game else ""
+        await interaction.followup.send(f"🔴 **{username_key}** is currently live{detail}, {viewers} viewer(s).", ephemeral=True)
+    else:
+        await interaction.followup.send(f"⚫ **{username_key}** is currently offline (or the username doesn't exist).", ephemeral=True)
+
+
+@twitch_group.command(name="edit", description="Change the announcement channel or ping role for a watched streamer.")
+@app_commands.describe(username="The Twitch username to edit", channel="New announcement channel", role="New role to ping (omit to remove the ping)")
+async def twitch_edit(interaction: discord.Interaction, username: str, channel: discord.TextChannel = None, role: discord.Role = None):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    streamers = cfg.get("twitch_streamers", {})
+    username_key = username.strip().lower().lstrip("@")
+    if username_key not in streamers:
+        await interaction.response.send_message(f"❌ Not watching twitch.tv/{username_key}. Use `/twitch add` first.", ephemeral=True)
+        return
+    if channel is None and role is None:
+        await interaction.response.send_message("❌ Set at least a new channel or role to change.", ephemeral=True)
+        return
+    if channel:
+        streamers[username_key]["channel_id"] = channel.id
+    if role:
+        streamers[username_key]["role_id"] = role.id
+    save_config(config)
+    await interaction.response.send_message(f"✅ Updated settings for twitch.tv/{username_key}.", ephemeral=True)
 
 
 # ---------- Rust server integration ----------
@@ -10511,6 +10556,8 @@ HELP_CATEGORIES = {
         ("/twitch add", "Watch a channel, announce when they go live"),
         ("/twitch remove", "Stop watching a channel"),
         ("/twitch list", "Show every channel being watched"),
+        ("/twitch check", "Manually check live status right now"),
+        ("/twitch edit", "Change a watched channel's announcement settings"),
     ],
     "🔧 Utility": [
         ("/ping", "Check if the bot is up and responding"),
