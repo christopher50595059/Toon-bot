@@ -5029,6 +5029,13 @@ def teams_page(guild_id):
     result = request.args.get("result", "")
     result_html = f'<div class="flash">{result}</div>' if result else ""
     teams = cfg.get("teams", {})
+    tournaments = cfg.get("tournaments", {})
+
+    # Which tournaments each team is currently entered in, across every tournament on record
+    team_tournament_map = {}
+    for t_name, t_data in tournaments.items():
+        for entrant in t_data.get("players", []):
+            team_tournament_map.setdefault(entrant, []).append((t_name, t_data.get("status", "signup")))
 
     rows = ""
     if teams:
@@ -5037,6 +5044,25 @@ def teams_page(guild_id):
             captain_id = t.get("captain_id")
             captain = guild.get_member(captain_id)
             captain_name = captain.display_name if captain else "Unknown"
+
+            # created_by/created_at are only present on teams made after this
+            # tracking was added — older teams fall back to "Unknown"/captain.
+            created_by_id = t.get("created_by")
+            if created_by_id:
+                creator = guild.get_member(created_by_id)
+                created_by_label = creator.display_name if creator else f"Unknown ({created_by_id})"
+            else:
+                created_by_label = "Unknown (created before tracking was added)"
+            created_at_raw = t.get("created_at")
+            if created_at_raw:
+                try:
+                    created_dt = datetime.fromisoformat(created_at_raw)
+                    created_label = created_dt.strftime("%b %d, %Y")
+                except ValueError:
+                    created_label = "Unknown"
+            else:
+                created_label = "Unknown"
+
             member_lines = []
             for uid in t.get("members", []):
                 m = guild.get_member(uid)
@@ -5050,6 +5076,13 @@ def teams_page(guild_id):
                 </form>
                 """
                 member_lines.append(f"{html.escape(mname)}{is_captain}{remove_form}")
+
+            tournament_entries = team_tournament_map.get(name, [])
+            if tournament_entries:
+                tournament_label = "<br>".join(f"{html.escape(tn)} ({ts})" for tn, ts in tournament_entries)
+            else:
+                tournament_label = "—"
+
             size = t.get("size", len(t.get("members", [])))
             filled = len(t.get("members", []))
             status = "✅ Full" if filled >= size else f"{filled}/{size}"
@@ -5058,7 +5091,10 @@ def teams_page(guild_id):
               <td>{safe_name}</td>
               <td>{status}</td>
               <td>{html.escape(captain_name)}</td>
+              <td>{html.escape(created_by_label)}</td>
+              <td>{created_label}</td>
               <td>{"<br>".join(member_lines) if member_lines else "—"}</td>
+              <td>{tournament_label}</td>
               <td style="white-space:nowrap;">
                 <form method="post" action="/dashboard/{guild_id}/teams/disband" style="display:inline;">
                   <input type="hidden" name="name" value="{safe_name}">
@@ -5068,7 +5104,7 @@ def teams_page(guild_id):
             </tr>
             """
     else:
-        rows = '<tr><td colspan="5" class="hint" style="padding:16px;">No teams formed yet.</td></tr>'
+        rows = '<tr><td colspan="8" class="hint" style="padding:16px;">No teams formed yet.</td></tr>'
 
     member_assets = _member_search_assets(guild)
 
@@ -5094,7 +5130,7 @@ def teams_page(guild_id):
       <h2>Current teams</h2>
       {_table_search_box("teams-table")}
       <div class="log-wrap"><table class="log-table" id="teams-table">
-        <tr><th>Team</th><th>Status</th><th>Captain</th><th>Members</th><th></th></tr>
+        <tr><th>Team</th><th>Status</th><th>Captain</th><th>Registered By</th><th>Created</th><th>Members</th><th>Tournaments</th><th></th></tr>
         {rows}
       </table></div>
     </div>

@@ -7340,7 +7340,10 @@ async def team_create(interaction: discord.Interaction, name: str, size: int):
             await interaction.response.send_message(f"❌ You're already on **{existing_name}** — leave it first with `/team leave`.", ephemeral=True)
             return
 
-    teams[name] = {"captain_id": interaction.user.id, "members": [interaction.user.id], "size": size}
+    teams[name] = {
+        "captain_id": interaction.user.id, "members": [interaction.user.id], "size": size,
+        "created_by": interaction.user.id, "created_at": datetime.now(timezone.utc).isoformat(),
+    }
     save_config(config)
     await interaction.response.send_message(
         f"✅ Created team **{name}** (1/{size}) — you're the captain. Others can join with `/team join name:{name}`.",
@@ -7489,7 +7492,10 @@ async def web_team_create(guild_id: int, name: str, size: int, captain_id: int, 
     captain = guild.get_member(captain_id)
     if captain is None:
         return "❌ Couldn't find that member."
-    teams[name] = {"captain_id": captain_id, "members": [captain_id], "size": size}
+    teams[name] = {
+        "captain_id": captain_id, "members": [captain_id], "size": size,
+        "created_by": actor_id, "created_at": datetime.now(timezone.utc).isoformat(),
+    }
     save_config(config)
     return f"✅ Created team **{name}** (1/{size}) — {captain.display_name} is captain."
 
