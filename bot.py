@@ -7302,6 +7302,23 @@ async def web_report_set_status(guild_id: int, report_id: int, status: str, acto
 
 
 
+async def team_name_autocomplete(interaction: discord.Interaction, current: str):
+    """Shows a filtered dropdown of existing team names as you type,
+    instead of requiring the exact name typed out with no help."""
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.get("teams", {})
+    matches = [name for name in teams.keys() if current.lower() in name.lower()]
+    return [app_commands.Choice(name=name, value=name) for name in matches[:25]]
+
+
+async def tournament_name_autocomplete(interaction: discord.Interaction, current: str):
+    """Shows a filtered dropdown of existing tournament names as you type."""
+    cfg = get_guild_cfg(interaction.guild_id)
+    tournaments = cfg.get("tournaments", {})
+    matches = [name for name in tournaments.keys() if current.lower() in name.lower()]
+    return [app_commands.Choice(name=name, value=name) for name in matches[:25]]
+
+
 team_group = app_commands.Group(name="team", description="Form teams for tournaments and events (any size, 1 to 5 players)")
 bot.tree.add_command(team_group)
 
@@ -7332,6 +7349,7 @@ async def team_create(interaction: discord.Interaction, name: str, size: int):
 
 @team_group.command(name="join", description="Join an existing team.")
 @app_commands.describe(name="The team's name")
+@app_commands.autocomplete(name=team_name_autocomplete)
 async def team_join(interaction: discord.Interaction, name: str):
     cfg = get_guild_cfg(interaction.guild_id)
     teams = cfg.get("teams", {})
@@ -7355,6 +7373,7 @@ async def team_join(interaction: discord.Interaction, name: str):
 
 @team_group.command(name="leave", description="Leave your current team.")
 @app_commands.describe(name="The team's name")
+@app_commands.autocomplete(name=team_name_autocomplete)
 async def team_leave(interaction: discord.Interaction, name: str):
     cfg = get_guild_cfg(interaction.guild_id)
     teams = cfg.get("teams", {})
@@ -7377,6 +7396,7 @@ async def team_leave(interaction: discord.Interaction, name: str):
 
 @team_group.command(name="kick", description="Remove a member from your team. Captain only.")
 @app_commands.describe(name="The team's name", member="The member to remove")
+@app_commands.autocomplete(name=team_name_autocomplete)
 async def team_kick(interaction: discord.Interaction, name: str, member: discord.Member):
     cfg = get_guild_cfg(interaction.guild_id)
     teams = cfg.get("teams", {})
@@ -7397,6 +7417,7 @@ async def team_kick(interaction: discord.Interaction, name: str, member: discord
 
 @team_group.command(name="disband", description="Delete your team. Captain only.")
 @app_commands.describe(name="The team's name")
+@app_commands.autocomplete(name=team_name_autocomplete)
 async def team_disband(interaction: discord.Interaction, name: str):
     cfg = get_guild_cfg(interaction.guild_id)
     teams = cfg.get("teams", {})
@@ -7414,6 +7435,7 @@ async def team_disband(interaction: discord.Interaction, name: str):
 
 @team_group.command(name="rename", description="Rename your team. Captain only.")
 @app_commands.describe(name="Your team's current name", new_name="The new name")
+@app_commands.autocomplete(name=team_name_autocomplete)
 async def team_rename(interaction: discord.Interaction, name: str, new_name: str):
     cfg = get_guild_cfg(interaction.guild_id)
     teams = cfg.get("teams", {})
@@ -7434,6 +7456,7 @@ async def team_rename(interaction: discord.Interaction, name: str, new_name: str
 
 @team_group.command(name="transfer", description="Hand off team captaincy to another member. Captain only.")
 @app_commands.describe(name="The team's name", new_captain="Who to make captain — must already be on the team")
+@app_commands.autocomplete(name=team_name_autocomplete)
 async def team_transfer(interaction: discord.Interaction, name: str, new_captain: discord.Member):
     cfg = get_guild_cfg(interaction.guild_id)
     teams = cfg.get("teams", {})
@@ -7572,6 +7595,7 @@ async def team_list(interaction: discord.Interaction):
 
 @team_group.command(name="info", description="Show full details for one team.")
 @app_commands.describe(name="The team's name")
+@app_commands.autocomplete(name=team_name_autocomplete)
 async def team_info(interaction: discord.Interaction, name: str):
     cfg = get_guild_cfg(interaction.guild_id)
     teams = cfg.get("teams", {})
@@ -7735,6 +7759,7 @@ async def tournament_create(interaction: discord.Interaction, name: str, team_mo
 
 @tournament_group.command(name="jointeam", description="Enter your team into a team-mode tournament. Captain only, team must be full.")
 @app_commands.describe(tournament="The tournament's name", team="Your team's name")
+@app_commands.autocomplete(tournament=tournament_name_autocomplete, team=team_name_autocomplete)
 async def tournament_jointeam(interaction: discord.Interaction, tournament: str, team: str):
     cfg = get_guild_cfg(interaction.guild_id)
     data = cfg.get("tournaments", {}).get(tournament)
@@ -7777,6 +7802,7 @@ async def tournament_jointeam(interaction: discord.Interaction, tournament: str,
 
 @tournament_group.command(name="leaveteam", description="Withdraw your team from a team-mode tournament. Captain only.")
 @app_commands.describe(tournament="The tournament's name", team="Your team's name")
+@app_commands.autocomplete(tournament=tournament_name_autocomplete, team=team_name_autocomplete)
 async def tournament_leaveteam(interaction: discord.Interaction, tournament: str, team: str):
     cfg = get_guild_cfg(interaction.guild_id)
     data = cfg.get("tournaments", {}).get(tournament)
@@ -7807,6 +7833,7 @@ async def tournament_leaveteam(interaction: discord.Interaction, tournament: str
 
 @tournament_group.command(name="start", description="Lock sign-ups and generate the bracket.")
 @app_commands.describe(name="The tournament's name")
+@app_commands.autocomplete(name=tournament_name_autocomplete)
 async def tournament_start(interaction: discord.Interaction, name: str):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
@@ -7833,6 +7860,7 @@ async def tournament_start(interaction: discord.Interaction, name: str):
     name="The tournament's name", match="Match number in the current round",
     winner_member="Who won (individual-mode tournaments)", winner_team="Which team won (team-mode tournaments)",
 )
+@app_commands.autocomplete(name=tournament_name_autocomplete, winner_team=team_name_autocomplete)
 async def tournament_report(interaction: discord.Interaction, name: str, match: int, winner_member: discord.Member = None, winner_team: str = None):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
@@ -7881,6 +7909,7 @@ async def tournament_report(interaction: discord.Interaction, name: str, match: 
 
 @tournament_group.command(name="bracket", description="Show the current bracket for a tournament.")
 @app_commands.describe(name="The tournament's name")
+@app_commands.autocomplete(name=tournament_name_autocomplete)
 async def tournament_bracket(interaction: discord.Interaction, name: str):
     cfg = get_guild_cfg(interaction.guild_id)
     data = cfg.get("tournaments", {}).get(name)
@@ -7892,6 +7921,7 @@ async def tournament_bracket(interaction: discord.Interaction, name: str):
 
 @tournament_group.command(name="cancel", description="Cancel and delete a tournament.")
 @app_commands.describe(name="The tournament's name")
+@app_commands.autocomplete(name=tournament_name_autocomplete)
 async def tournament_cancel(interaction: discord.Interaction, name: str):
     if not is_authorized(interaction):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
