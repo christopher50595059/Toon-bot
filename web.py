@@ -5037,6 +5037,17 @@ def teams_page(guild_id):
         for entrant in t_data.get("players", []):
             team_tournament_map.setdefault(entrant, []).append((t_name, t_data.get("status", "signup")))
 
+    # Win count per team — completed, team-mode tournaments where this team was the champion
+    team_wins = {}
+    for t_name, t_data in tournaments.items():
+        if t_data.get("status") == "complete" and t_data.get("team_mode") and t_data.get("champion"):
+            team_wins[t_data["champion"]] = team_wins.get(t_data["champion"], 0) + 1
+
+    total_teams = len(teams)
+    full_teams = sum(1 for t in teams.values() if len(t.get("members", [])) >= t.get("size", 0))
+    teams_in_tournaments = len(team_tournament_map)
+    total_championships = sum(team_wins.values())
+
     rows = ""
     if teams:
         for name, t in teams.items():
@@ -5086,6 +5097,8 @@ def teams_page(guild_id):
             size = t.get("size", len(t.get("members", [])))
             filled = len(t.get("members", []))
             status = "✅ Full" if filled >= size else f"{filled}/{size}"
+            wins = team_wins.get(name, 0)
+            wins_label = f"🏆 {wins}" if wins else "—"
             rows += f"""
             <tr>
               <td>{safe_name}</td>
@@ -5095,6 +5108,7 @@ def teams_page(guild_id):
               <td>{created_label}</td>
               <td>{"<br>".join(member_lines) if member_lines else "—"}</td>
               <td>{tournament_label}</td>
+              <td>{wins_label}</td>
               <td style="white-space:nowrap;">
                 <form method="post" action="/dashboard/{guild_id}/teams/disband" style="display:inline;">
                   <input type="hidden" name="name" value="{safe_name}">
@@ -5104,13 +5118,19 @@ def teams_page(guild_id):
             </tr>
             """
     else:
-        rows = '<tr><td colspan="8" class="hint" style="padding:16px;">No teams formed yet.</td></tr>'
+        rows = '<tr><td colspan="9" class="hint" style="padding:16px;">No teams formed yet.</td></tr>'
 
     member_assets = _member_search_assets(guild)
 
     body = f"""
     <h1>🧑‍🤝‍🧑 Teams</h1>
-    <div class="hint" style="margin-bottom:18px;">Any size from 1v1 to 5v5. Used for team-mode tournaments.</div>
+    <div class="hint" style="margin-bottom:0;">Any size from 1v1 to 5v5. Used for team-mode tournaments.</div>
+    <div class="stats-strip">
+      <div class="stat-tile"><div class="icon">🧑‍🤝‍🧑</div><div class="num">{total_teams}</div><div class="label">Total Teams</div></div>
+      <div class="stat-tile"><div class="icon">✅</div><div class="num">{full_teams}</div><div class="label">Full Teams</div></div>
+      <div class="stat-tile grey"><div class="icon">🏆</div><div class="num">{teams_in_tournaments}</div><div class="label">In Tournaments</div></div>
+      <div class="stat-tile grey"><div class="icon">🥇</div><div class="num">{total_championships}</div><div class="label">Championships Won</div></div>
+    </div>
     {result_html}
     {member_assets}
 
@@ -5130,7 +5150,7 @@ def teams_page(guild_id):
       <h2>Current teams</h2>
       {_table_search_box("teams-table")}
       <div class="log-wrap"><table class="log-table" id="teams-table">
-        <tr><th>Team</th><th>Status</th><th>Captain</th><th>Registered By</th><th>Created</th><th>Members</th><th>Tournaments</th><th></th></tr>
+        <tr><th>Team</th><th>Status</th><th>Captain</th><th>Registered By</th><th>Created</th><th>Members</th><th>Tournaments</th><th>Wins</th><th></th></tr>
         {rows}
       </table></div>
     </div>
