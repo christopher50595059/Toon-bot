@@ -158,6 +158,7 @@ _team_remove_member = None
 _team_disband = None
 _team_rename = None
 _team_transfer = None
+_get_game_activity = None
 
 
 # ---------- shared page chrome ----------
@@ -419,6 +420,7 @@ SIDENAV_SECTIONS = [
         ("activity_page", "📈", "Message Activity"),
         ("voice_activity_page", "🎙️", "Voice Activity"),
         ("growth_page", "📊", "Growth Analytics"),
+        ("game_activity_page", "🎮", "Game Activity"),
     ]),
     ("System", [
         ("afk_page", "💤", "AFK Status"),
@@ -1331,6 +1333,7 @@ def dashboard(guild_id):
         <a class="action-tile" href="/dashboard/{guild_id}/activity"><span>📈</span>Message Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/voiceactivity"><span>🎙️</span>Voice Activity</a>
         <a class="action-tile" href="/dashboard/{guild_id}/growth"><span>📊</span>Growth Analytics</a>
+        <a class="action-tile" href="/dashboard/{guild_id}/gameactivity"><span>🎮</span>Game Activity</a>
       </div>
 
       <div class="hint" style="font-weight:600; text-transform:uppercase; letter-spacing:0.5px; font-size:11px; margin:0 0 8px;">System</div>
@@ -2965,6 +2968,56 @@ def growth_page(guild_id):
     </div>
     """
     return render_page(f"{guild.name} — Growth Analytics", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/gameactivity")
+def game_activity_page(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+
+    data = _run_async(_get_game_activity(guild_id))
+    currently_playing = data.get("currently_playing", [])
+    leaderboard = data.get("leaderboard", [])
+
+    playing_rows = ""
+    if currently_playing:
+        for p in currently_playing:
+            playing_rows += f"<tr><td>{html.escape(p['member'])}</td><td>{html.escape(p['game'])}</td></tr>"
+    else:
+        playing_rows = '<tr><td colspan="2" class="hint" style="padding:16px;">Nobody is showing as playing a game right now.</td></tr>'
+
+    leaderboard_rows = ""
+    if leaderboard:
+        for i, g in enumerate(leaderboard[:25], start=1):
+            hours = round(g["minutes"] / 60, 1)
+            leaderboard_rows += f"<tr><td>{i}</td><td>{html.escape(g['game'])}</td><td>{g['sessions']}</td><td>{hours}h</td></tr>"
+    else:
+        leaderboard_rows = '<tr><td colspan="4" class="hint" style="padding:16px;">No game activity recorded yet — this builds up over time as members play.</td></tr>'
+
+    body = f"""
+    <h1>🎮 Game Activity</h1>
+    <div class="hint" style="margin-bottom:18px;">Based on members' Discord "Playing" status — requires members to have game activity visible (not hidden/invisible status).</div>
+
+    <div class="card">
+      <h2>Currently Playing</h2>
+      {_table_search_box("playing-table")}
+      <div class="log-wrap"><table class="log-table" id="playing-table">
+        <tr><th>Member</th><th>Game</th></tr>
+        {playing_rows}
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>Most Played Games</h2>
+      <div class="hint" style="margin-bottom:12px;">Aggregated across all members since tracking started. Sessions under 1 minute aren't counted.</div>
+      <div class="log-wrap"><table class="log-table">
+        <tr><th>#</th><th>Game</th><th>Sessions</th><th>Total Time</th></tr>
+        {leaderboard_rows}
+      </table></div>
+    </div>
+    """
+    return render_page(f"{guild.name} — Game Activity", body, guild_id=guild_id)
 
 
 @app.route("/dashboard/<int:guild_id>/trivia")
@@ -7283,6 +7336,7 @@ def start_web_app(
     minecraft_save, minecraft_announce,
     team_create, team_add_member, team_remove_member,
     team_disband, team_rename, team_transfer,
+    get_game_activity,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -7327,6 +7381,7 @@ def start_web_app(
     global _minecraft_save, _minecraft_announce
     global _team_create, _team_add_member, _team_remove_member
     global _team_disband, _team_rename, _team_transfer
+    global _get_game_activity
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -7440,6 +7495,7 @@ def start_web_app(
     _team_disband = team_disband
     _team_rename = team_rename
     _team_transfer = team_transfer
+    _get_game_activity = get_game_activity
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

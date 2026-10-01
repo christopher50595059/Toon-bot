@@ -263,6 +263,7 @@ def get_guild_cfg(guild_id: int) -> dict:
 intents = discord.Intents.default()
 intents.members = True          # required to look up / modify member roles
 intents.message_content = True  # required to read message content for cross-posting
+intents.presences = True        # required to see what game members are currently playing
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -577,6 +578,81 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         return
 
     asyncio.create_task(speak_vc_greeting(member, after.channel, message))
+
+
+_game_session_starts: dict = {}  # (guild_id, user_id) -> (game_name, start_time)
+
+
+def _get_playing_game(member: discord.Member):
+    """Returns the name of the game a member is currently shown as playing
+    (Discord's "Playing X" activity type), or None if they aren't."""
+    for act in member.activities:
+        if act.type == discord.ActivityType.playing:
+            return act.name
+    return None
+
+
+@bot.event
+async def on_presence_update(before: discord.Member, after: discord.Member):
+    """Tracks aggregate 'most played games' stats for the server — sessions
+    and total minutes per game, not tied to who played it. 'Currently
+    playing' itself needs no separate tracking/storage: it's read live
+    from each member's own activities whenever the web dashboard asks,
+    the same way Discord's own UI shows it."""
+    if after.bot:
+        return
+
+    before_game = _get_playing_game(before)
+    after_game = _get_playing_game(after)
+    if before_game == after_game:
+        return
+
+    guild_id = after.guild.id
+    key = (guild_id, after.id)
+    now = datetime.now(timezone.utc)
+
+    if key in _game_session_starts:
+        prev_game, start_time = _game_session_starts[key]
+        elapsed_minutes = (now - start_time).total_seconds() / 60
+        if elapsed_minutes >= 1:  # ignore very short blips (alt-tabbing, etc.)
+            cfg = get_guild_cfg(guild_id)
+            game_stats = cfg.setdefault("game_activity", {})
+            entry = game_stats.setdefault(prev_game, {"sessions": 0, "minutes": 0})
+            entry["sessions"] += 1
+            entry["minutes"] += elapsed_minutes
+            save_config(config)
+        del _game_session_starts[key]
+
+    if after_game:
+        _game_session_starts[key] = (after_game, now)
+
+
+async def web_get_game_activity(guild_id: int) -> dict:
+    """For the web dashboard's Game Activity page. 'Currently playing' is
+    read live from each member's own presence (no stored state needed);
+    the leaderboard comes from the persisted aggregate stats."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return {"currently_playing": [], "leaderboard": []}
+
+    currently_playing = []
+    for member in guild.members:
+        if member.bot:
+            continue
+        game = _get_playing_game(member)
+        if game:
+            currently_playing.append({"member": member.display_name, "game": game})
+    currently_playing.sort(key=lambda x: x["game"].lower())
+
+    cfg = get_guild_cfg(guild_id)
+    game_stats = cfg.get("game_activity", {})
+    leaderboard = [
+        {"game": game, "sessions": stats["sessions"], "minutes": round(stats["minutes"])}
+        for game, stats in game_stats.items()
+    ]
+    leaderboard.sort(key=lambda x: x["minutes"], reverse=True)
+
+    return {"currently_playing": currently_playing, "leaderboard": leaderboard}
 
 
 def _record_name_change(guild_id: int, user_id: int, old_name: str, new_name: str, kind: str):
@@ -10861,5 +10937,6 @@ if __name__ == "__main__":
         web_minecraft_save, web_minecraft_announce,
         web_team_create, web_team_add_member, web_team_remove_member,
         web_team_disband, web_team_rename, web_team_transfer,
+        web_get_game_activity,
     )
     bot.run(TOKEN)
