@@ -134,6 +134,9 @@ Commands:
   /setreportschannel [channel]            - (admin only) set the private channel for member reports
   /discordauditlog [limit]                - show Discord's own audit log (bans, kicks, channel/role changes)
   /ping                                    - check if the bot is up and responding
+  /twitch add username:<text> channel:<channel> [role] - watch a Twitch channel, announce when they go live
+  /twitch remove username:<text>           - stop watching a Twitch channel
+  /twitch list                              - show every Twitch channel being watched
   /winner tournament:<text> [winner_member] [winner_team] - announce a tournament winner (individual or team)
   /stopmassaction                          - cancel an in-progress bulk operation (roster add-all, mass rename/role changes)
   /setviewerrole [role]                   - (admin only) role that gets view-only web dashboard access
@@ -164,6 +167,7 @@ import socket
 import string
 import tempfile
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -173,6 +177,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from gtts import gTTS
 import websockets
+import aiohttp
 
 from web import start_web_app
 
@@ -181,6 +186,8 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 
 CONFIG_PATH = Path(__file__).parent / "guild_config.json"
 DATABASE_URL = os.getenv("DATABASE_URL")  # optional — set this to persist settings across redeploys
+TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")  # from a Twitch Developer app, needed for go-live announcements
+TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
 
 # ---------- per-guild config, backed by Postgres (Neon) if configured, else a local JSON file ----------
 #
@@ -273,6 +280,8 @@ async def on_ready():
         weekly_evaluation_loop.start()
     if not config_health_alert_loop.is_running():
         config_health_alert_loop.start()
+    if not twitch_check_loop.is_running():
+        twitch_check_loop.start()
     if not weekly_voice_activity_loop.is_running():
         weekly_voice_activity_loop.start()
     if not ticket_autoclose_loop.is_running():
@@ -2210,6 +2219,200 @@ async def web_remove_ticket_category(guild_id: int, type_id: int, actor_id: int)
     save_config(config)
     await refresh_ticket_panel(guild_id)
     return f"✅ Removed ticket type **{removed['name']}**."
+
+
+# ---------- Twitch go-live integration ----------
+#
+# Uses polling rather than Twitch's EventSub webhook system — simpler and
+# more reliable here since it reuses the exact same "check periodically,
+# detect a state transition, announce once" pattern already proven by the
+# Rust/Minecraft downtime alerts, with no public webhook endpoint or
+# signature verification to maintain.
+
+_twitch_access_token = None
+_twitch_token_expiry = 0.0
+
+
+async def _get_twitch_app_token():
+    """Returns a cached Twitch app access token, refreshing it if it's
+    missing or close to expiring. Returns None if Twitch credentials
+    aren't configured on this bot at all (TWITCH_CLIENT_ID/SECRET env
+    vars) — callers should treat that as 'feature not set up'."""
+    global _twitch_access_token, _twitch_token_expiry
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        return None
+    if _twitch_access_token and time.time() < _twitch_token_expiry - 60:
+        return _twitch_access_token
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://id.twitch.tv/oauth2/token",
+                params={
+                    "client_id": TWITCH_CLIENT_ID,
+                    "client_secret": TWITCH_CLIENT_SECRET,
+                    "grant_type": "client_credentials",
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    print(f"⚠️ Twitch token request failed: HTTP {resp.status}")
+                    return None
+                data = await resp.json()
+                _twitch_access_token = data["access_token"]
+                _twitch_token_expiry = time.time() + data["expires_in"]
+                return _twitch_access_token
+    except Exception as e:
+        print(f"⚠️ Twitch token request failed: {e}")
+        return None
+
+
+async def _get_twitch_live_info(username: str):
+    """Returns the Twitch API's stream info dict if that user is currently
+    live, or None if they're offline / the lookup failed / Twitch isn't
+    configured on this bot."""
+    token = await _get_twitch_app_token()
+    if not token:
+        return None
+    headers = {"Client-Id": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.twitch.tv/helix/streams",
+                params={"user_login": username.strip().lower()},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                streams = data.get("data", [])
+                return streams[0] if streams else None
+    except Exception as e:
+        print(f"⚠️ Twitch live-check failed for {username}: {e}")
+        return None
+
+
+async def check_twitch_streams(guild_id: int):
+    """Checks every watched streamer for this guild and announces any that
+    just transitioned from offline to live. Silently does nothing if
+    Twitch isn't configured on this bot (see _get_twitch_app_token)."""
+    cfg = get_guild_cfg(guild_id)
+    streamers = cfg.get("twitch_streamers", {})
+    if not streamers:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+
+    changed = False
+    for username, info in streamers.items():
+        stream = await _get_twitch_live_info(username)
+        is_live = stream is not None
+        was_live = info.get("was_live", False)
+
+        if is_live != was_live:
+            info["was_live"] = is_live
+            changed = True
+            if is_live:
+                channel = guild.get_channel(info.get("channel_id"))
+                if channel:
+                    role_id = info.get("role_id")
+                    content = f"<@&{role_id}>" if role_id else None
+                    title = stream.get("title", "")
+                    game = stream.get("game_name", "")
+                    thumbnail = stream.get("thumbnail_url", "").replace("{width}", "640").replace("{height}", "360")
+                    embed = discord.Embed(
+                        title=f"🔴 {username} is now live on Twitch!",
+                        description=(f"**{title}**" if title else "") + (f"\nPlaying: {game}" if game else ""),
+                        url=f"https://twitch.tv/{username}",
+                        color=discord.Color.purple(),
+                    )
+                    if thumbnail:
+                        embed.set_image(url=thumbnail)
+                    try:
+                        await channel.send(content=content, embed=embed)
+                    except discord.Forbidden:
+                        pass
+    if changed:
+        save_config(config)
+
+
+@tasks.loop(minutes=2)
+async def twitch_check_loop():
+    for guild_id_str in list(config.keys()):
+        try:
+            guild_id = int(guild_id_str)
+        except ValueError:
+            continue
+        cfg = config.get(guild_id_str, {})
+        if cfg.get("twitch_streamers"):
+            await check_twitch_streams(guild_id)
+
+
+twitch_group = app_commands.Group(name="twitch", description="Get notified when someone goes live on Twitch")
+bot.tree.add_command(twitch_group)
+
+
+@twitch_group.command(name="add", description="Watch a Twitch channel and announce in Discord when they go live.")
+@app_commands.describe(
+    username="Their Twitch username (not display name) — e.g. 'shroud', not 'Shroud'",
+    channel="Where to post the go-live announcement",
+    role="Optional role to ping when they go live",
+)
+async def twitch_add(interaction: discord.Interaction, username: str, channel: discord.TextChannel, role: discord.Role = None):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        await interaction.response.send_message(
+            "❌ Twitch isn't configured on this bot yet — it needs a Twitch Developer app's Client ID and Secret "
+            "set as environment variables (TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET). Ask whoever manages the bot's hosting.",
+            ephemeral=True,
+        )
+        return
+
+    username_key = username.strip().lower().lstrip("@")
+    cfg = get_guild_cfg(interaction.guild_id)
+    streamers = cfg.setdefault("twitch_streamers", {})
+    streamers[username_key] = {"channel_id": channel.id, "role_id": role.id if role else None, "was_live": False}
+    save_config(config)
+    await interaction.response.send_message(
+        f"✅ Watching twitch.tv/{username_key} — announcements will post in {channel.mention}" +
+        (f" and ping {role.mention}" if role else "") + ".",
+        ephemeral=True,
+    )
+
+
+@twitch_group.command(name="remove", description="Stop watching a Twitch channel.")
+@app_commands.describe(username="The Twitch username to remove")
+async def twitch_remove(interaction: discord.Interaction, username: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    streamers = cfg.get("twitch_streamers", {})
+    username_key = username.strip().lower().lstrip("@")
+    if username_key not in streamers:
+        await interaction.response.send_message(f"❌ Not watching twitch.tv/{username_key}.", ephemeral=True)
+        return
+    del streamers[username_key]
+    save_config(config)
+    await interaction.response.send_message(f"✅ Stopped watching twitch.tv/{username_key}.", ephemeral=True)
+
+
+@twitch_group.command(name="list", description="Show every Twitch channel being watched.")
+async def twitch_list(interaction: discord.Interaction):
+    cfg = get_guild_cfg(interaction.guild_id)
+    streamers = cfg.get("twitch_streamers", {})
+    if not streamers:
+        await interaction.response.send_message("No Twitch channels being watched yet.", ephemeral=True)
+        return
+    lines = []
+    for username, info in streamers.items():
+        channel = interaction.guild.get_channel(info.get("channel_id"))
+        status = "🔴 live" if info.get("was_live") else "⚫ offline"
+        lines.append(f"**{username}** ({status}) → {channel.mention if channel else '(deleted channel)'}")
+    await send_list_safely(interaction, lines, ephemeral=True)
 
 
 # ---------- Rust server integration ----------
@@ -10227,6 +10430,11 @@ HELP_CATEGORIES = {
         ("/addrankbonusrole", "Auto-grant an extra role when someone reaches a rank"),
         ("/removerankbonusrole", "Stop auto-granting that extra role"),
         ("/listrankbonusroles", "Show which extra roles get auto-granted at each rank"),
+    ],
+    "🟣 Twitch": [
+        ("/twitch add", "Watch a channel, announce when they go live"),
+        ("/twitch remove", "Stop watching a channel"),
+        ("/twitch list", "Show every channel being watched"),
     ],
     "🔧 Utility": [
         ("/ping", "Check if the bot is up and responding"),
