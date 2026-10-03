@@ -159,6 +159,7 @@ _team_disband = None
 _team_rename = None
 _team_transfer = None
 _get_game_activity = None
+_set_onboard_config = None
 
 
 # ---------- shared page chrome ----------
@@ -1685,6 +1686,7 @@ def roster_page(guild_id):
     no_ranks_hint = "" if cfg.get("ranks") else '<div class="hint">No ranks configured yet — set them up in this server\'s settings first.</div>'
     member_assets = _member_search_assets(guild)
     rank_assets = _rank_search_assets(guild, cfg)
+    channel_assets = _channel_search_assets(guild)
 
     body = f"""
     <div class="topbar" style="margin-bottom:0;"><a href="/dashboard/{guild_id}">&larr; {guild.name} settings</a></div>
@@ -1698,6 +1700,21 @@ def roster_page(guild_id):
     {result_html}
     {member_assets}
     {rank_assets}
+    {channel_assets}
+
+    <div class="card">
+      <h2>🆕 Onboarding Settings (for /onboard)</h2>
+      <div class="hint" style="margin-bottom:12px;">
+        /onboard adds a new member to the roster, logs it here, and optionally logs a row to a linked Google Sheet.
+        Share your sheet with the bot's service account email (visible in your Google Cloud service account settings)
+        with Editor access, then paste the Sheet ID — the long string in the sheet's URL between <code>/d/</code> and <code>/edit</code>.
+      </div>
+      <form method="post" action="/dashboard/{guild_id}/roster/onboardconfig">
+        <div class="field"><label>Google Sheet ID (optional)</label><input type="text" name="sheet_id" value="{html.escape(cfg.get('onboard_sheet_id', ''))}" placeholder="1AbCdEfGhIjKlMnOpQrStUvWxYz"></div>
+        {_channel_search_field("Log channel (optional)", "channel_id", guild, cfg.get("onboard_log_channel_id"))}
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
 
     <div class="card">
       <h2>📋 Add / move on roster</h2>
@@ -1769,6 +1786,18 @@ def roster_page(guild_id):
     </div>
     """
     return render_page(f"{guild.name} — Roster", body, guild_id=guild_id)
+
+
+@app.route("/dashboard/<int:guild_id>/roster/onboardconfig", methods=["POST"])
+def roster_onboardconfig_route(guild_id):
+    guild, member = _check_access(guild_id)
+    if guild is None:
+        return redirect(url_for("guild_picker"))
+    sheet_id = request.form.get("sheet_id", "").strip()
+    raw_channel = request.form.get("channel_id", "")
+    channel_id = int(raw_channel) if raw_channel else None
+    result = _run_async(_set_onboard_config(guild_id, sheet_id, channel_id, session["user_id"]))
+    return redirect(url_for("roster_page", guild_id=guild_id, result=result))
 
 
 @app.route("/dashboard/<int:guild_id>/roster/add", methods=["POST"])
@@ -7393,6 +7422,7 @@ def start_web_app(
     team_create, team_add_member, team_remove_member,
     team_disband, team_rename, team_transfer,
     get_game_activity,
+    set_onboard_config,
 ):
     """Call once from bot.py after the bot object exists. Runs Flask in a
     background thread so it doesn't block discord.py's event loop."""
@@ -7438,6 +7468,7 @@ def start_web_app(
     global _team_create, _team_add_member, _team_remove_member
     global _team_disband, _team_rename, _team_transfer
     global _get_game_activity
+    global _set_onboard_config
     global _set_backup_settings, _run_backup_now
     _bot = bot
     _config = config
@@ -7552,6 +7583,7 @@ def start_web_app(
     _team_rename = team_rename
     _team_transfer = team_transfer
     _get_game_activity = get_game_activity
+    _set_onboard_config = set_onboard_config
     _set_backup_settings = set_backup_settings
     _run_backup_now = run_backup_now
 

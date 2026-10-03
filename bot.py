@@ -10,6 +10,7 @@ Commands:
   /setlogchannel channel:<channel>        - (admin only) set where actions are logged
   /setmanagerrole role:<role>             - (admin only) set which role is allowed to use these commands
   /rosteradd user:<member> rank:<role> reason:<text>   - add/move a member on the roster AND give them that role
+  /onboard member:<user> rank:<role> reason:<text> - onboard a new member: roster + role + log channel + Google Sheet (configure sheet/channel on the web Roster page)
   /rosterremove user:<member> reason:<text>            - remove a member from the roster — asks for confirmation
   /promote user:<member> reason:<text>    - move a member up one rank (per /setranks order)
   /demote user:<member> reason:<text>     - move a member down one rank (per /setranks order) — asks for confirmation
@@ -35,11 +36,13 @@ Commands:
   /team transfer name:<text> new_captain:<user> - (captain) hand off captaincy
   /team list                                - show all teams
   /team info name:<text>                   - show full details for one team
+  /team setsize name:<text> size:<1-5>     - change a team's target size (captain only)
   /tournament create name:<text> [team_mode] - open sign-ups for a bracket tournament (team_mode for team-based)
   /tournament jointeam tournament:<text> team:<text> - (captain) enter your full team into a team-mode tournament
   /tournament leaveteam tournament:<text> team:<text> - (captain) withdraw your team
   /tournament cancel name:<text>           - (admin) cancel and delete a tournament
   /tournament list                          - show all tournaments and their status
+  /tournament removeplayer tournament:<text> [member] [team] - (admin) remove a player/team from sign-ups
   /tournament start name:<text>           - (manager only) lock sign-ups and generate the bracket
   /tournament report name:<text> match:<#> winner:<member>  - (manager only) record a match result
   /tournament bracket name:<text>         - show the current bracket
@@ -78,6 +81,7 @@ Commands:
   /setticketchannel channel:<channel>     - (admin only) post an Open Ticket button in this channel
   /addticketcategory name:<text> category:<category> - add a ticket type with its own Discord category
   /removeticketcategory index:<int>       - remove a ticket type
+  /ticketcategory edit index:<int> [name] [category] - change a ticket type's name/category without losing it
   /setticketquestions index:<int> [q1..q5] - set intake questions asked before that ticket type opens
   /listticketcategories                   - show all configured ticket types
   /ticket                                 - open a private support ticket with staff
@@ -191,6 +195,7 @@ CONFIG_PATH = Path(__file__).parent / "guild_config.json"
 DATABASE_URL = os.getenv("DATABASE_URL")  # optional — set this to persist settings across redeploys
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")  # from a Twitch Developer app, needed for go-live announcements
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")  # the full JSON key file contents, for /onboard's sheet logging
 
 # ---------- per-guild config, backed by Postgres (Neon) if configured, else a local JSON file ----------
 #
@@ -2211,6 +2216,38 @@ async def removeticketcategory(interaction: discord.Interaction, index: int):
     await interaction.response.send_message(f"✅ Removed ticket type **{removed['name']}**.", ephemeral=True)
 
 
+@ticketcategory_group.command(name="edit", description="Change a ticket type's name and/or destination category, without losing its ID or existing tickets.")
+@app_commands.describe(
+    index="The number shown in /ticketcategory list", name="New name (optional)", category="New destination category (optional)",
+)
+async def editticketcategory(interaction: discord.Interaction, index: int, name: str = None, category: discord.CategoryChannel = None):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not name and not category:
+        await interaction.response.send_message("❌ Set at least a new name or category to change.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    types = cfg.get("ticket_types", {})
+    ids = list(types.keys())
+    if index < 1 or index > len(ids):
+        await interaction.response.send_message("❌ Invalid index — check `/ticketcategory list`.", ephemeral=True)
+        return
+
+    entry = types[ids[index - 1]]
+    changes = []
+    if name:
+        changes.append(f"name → **{name}**")
+        entry["name"] = name
+    if category:
+        changes.append(f"category → {category.name}")
+        entry["category_id"] = category.id
+    save_config(config)
+    await refresh_ticket_panel(interaction.guild_id)
+    await interaction.response.send_message(f"✅ Updated ticket type: {', '.join(changes)}.", ephemeral=True)
+
+
 @ticketcategory_group.command(name="setquestions", description="Set or update the intake questions asked for a ticket type.")
 @app_commands.describe(
     index="The number shown in /ticketcategory list",
@@ -2535,6 +2572,58 @@ async def twitch_edit(interaction: discord.Interaction, username: str, channel: 
         streamers[username_key]["role_id"] = role.id
     save_config(config)
     await interaction.response.send_message(f"✅ Updated settings for twitch.tv/{username_key}.", ephemeral=True)
+
+
+# ---------- Google Sheets integration (for /onboard) ----------
+
+_sheets_client = None
+_sheets_client_error = None
+
+
+def _get_sheets_client():
+    """Returns a cached, authenticated gspread client, or None if Google
+    credentials aren't configured/valid on this bot. Building the client
+    is somewhat expensive, so it's only done once and reused."""
+    global _sheets_client, _sheets_client_error
+    if _sheets_client is not None:
+        return _sheets_client
+    if _sheets_client_error is not None:
+        return None  # already tried and failed this run — don't keep retrying every call
+    if not GOOGLE_SERVICE_ACCOUNT_JSON:
+        return None
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        _sheets_client = gspread.authorize(creds)
+        return _sheets_client
+    except Exception as e:
+        print(f"⚠️ Google Sheets client setup failed: {e}")
+        _sheets_client_error = str(e)
+        return None
+
+
+async def _append_onboard_row(sheet_id: str, row: list) -> str:
+    """Appends one row to the first sheet of the linked spreadsheet.
+    Returns an error message string, or None on success. gspread is a
+    blocking/synchronous library, so this runs it in a thread to avoid
+    freezing the bot's event loop."""
+    client = _get_sheets_client()
+    if client is None:
+        return (
+            "Google Sheets isn't configured on this bot (missing or invalid GOOGLE_SERVICE_ACCOUNT_JSON). "
+            + (_sheets_client_error or "")
+        )
+    try:
+        def do_append():
+            sheet = client.open_by_key(sheet_id).sheet1
+            sheet.append_row(row)
+        await asyncio.to_thread(do_append)
+        return None
+    except Exception as e:
+        return str(e)
 
 
 # ---------- Rust server integration ----------
@@ -6554,6 +6643,95 @@ async def rosteradd(interaction: discord.Interaction, user: discord.Member, rank
     await _sync_rank_bonus_roles(interaction.guild_id, user.id, rank.id)
 
 
+@bot.tree.command(name="onboard", description="Onboard a new member — adds them to the roster, logs it, and records it in the linked Google Sheet.")
+@app_commands.describe(member="The member to onboard", rank="The rank to add them at", reason="Why they're being onboarded")
+async def onboard(interaction: discord.Interaction, member: discord.Member, rank: discord.Role, reason: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+
+    cfg = get_guild_cfg(interaction.guild_id)
+    valid_rank_ids = cfg.get("ranks", [])
+    if rank.id not in valid_rank_ids:
+        valid_mentions = ", ".join(r.mention for rid in valid_rank_ids if (r := interaction.guild.get_role(rid)))
+        await interaction.response.send_message(
+            f"❌ {rank.mention} isn't a configured rank. Choose from: {valid_mentions or '(none set — run /setranks first)'}",
+            ephemeral=True,
+        )
+        return
+    if rank >= interaction.guild.me.top_role:
+        await interaction.response.send_message(f"❌ I can't assign {rank.mention} — it's above my own role.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    roster = cfg.setdefault("roster", [])
+    existing = next((e for e in roster if e["user_id"] == member.id), None)
+    if existing:
+        existing["rank_role_id"] = rank.id
+    else:
+        roster.append({"user_id": member.id, "rank_role_id": rank.id})
+    save_config(config)
+
+    try:
+        if rank not in member.roles:
+            await member.add_roles(rank, reason=f"Onboarded by {interaction.user}: {reason}")
+    except discord.Forbidden:
+        pass
+
+    record_history(interaction.guild_id, member.id, "Onboarded", rank.mention, interaction.user.id, reason)
+    await refresh_roster_message(interaction.guild)
+    await refresh_server_stats_message(interaction.guild)
+    await _maybe_sync_whitelist(interaction.guild_id, member.id)
+    await _sync_rank_bonus_roles(interaction.guild_id, member.id, rank.id)
+
+    log_channel_id = cfg.get("onboard_log_channel_id")
+    if log_channel_id:
+        log_channel = interaction.guild.get_channel(log_channel_id)
+        if log_channel:
+            embed = discord.Embed(title="📋 Member Onboarded", color=discord.Color.green())
+            embed.add_field(name="Member", value=member.mention, inline=True)
+            embed.add_field(name="Rank", value=rank.mention, inline=True)
+            embed.add_field(name="Onboarded By", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            try:
+                await log_channel.send(embed=embed)
+            except discord.Forbidden:
+                pass
+
+    sheet_note = ""
+    sheet_id = cfg.get("onboard_sheet_id")
+    if sheet_id:
+        row = [
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            member.display_name, str(member.id), rank.name, reason, str(interaction.user),
+        ]
+        error = await _append_onboard_row(sheet_id, row)
+        sheet_note = f"\n⚠️ Sheet logging failed: {error}" if error else "\n✅ Logged to Google Sheet."
+
+    await interaction.followup.send(f"✅ Onboarded {member.mention} as {rank.mention}.{sheet_note}")
+
+
+async def web_set_onboard_config(guild_id: int, sheet_id, channel_id, actor_id: int) -> str:
+    """Configures /onboard's Google Sheet and log channel — web-only, no
+    Discord command for this (the bot is right at its slash command limit)."""
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return "❌ Server not found."
+    cfg = get_guild_cfg(guild_id)
+    if sheet_id is not None:
+        cfg["onboard_sheet_id"] = sheet_id or None
+        if not sheet_id:
+            cfg.pop("onboard_sheet_id", None)
+    if channel_id is not None:
+        if channel_id:
+            cfg["onboard_log_channel_id"] = channel_id
+        else:
+            cfg.pop("onboard_log_channel_id", None)
+    save_config(config)
+    return "✅ Onboarding settings saved."
+
+
 @bot.tree.command(name="rosterremove", description="Remove a member from the roster.")
 @app_commands.describe(user="The member to remove from the roster", reason="Why you're removing them")
 async def rosterremove(interaction: discord.Interaction, user: discord.Member, reason: str):
@@ -7626,6 +7804,34 @@ async def team_info(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(embed=embed)
 
 
+@team_group.command(name="setsize", description="Change a team's target size. Captain only. Can't be set below the current member count.")
+@app_commands.describe(name="The team's name", size="New size (1-5)")
+@app_commands.autocomplete(name=team_name_autocomplete)
+async def team_setsize(interaction: discord.Interaction, name: str, size: int):
+    cfg = get_guild_cfg(interaction.guild_id)
+    teams = cfg.get("teams", {})
+    team = teams.get(name)
+    if not team:
+        await interaction.response.send_message(f"❌ No team named **{name}**.", ephemeral=True)
+        return
+    if team["captain_id"] != interaction.user.id and not is_authorized(interaction):
+        await interaction.response.send_message("❌ Only the team captain can do that.", ephemeral=True)
+        return
+    if size < 1 or size > 5:
+        await interaction.response.send_message("❌ Team size must be between 1 and 5.", ephemeral=True)
+        return
+    current_filled = len(team["members"])
+    if size < current_filled:
+        await interaction.response.send_message(
+            f"❌ **{name}** already has {current_filled} member(s) — can't set size below that. Remove members first if you need to shrink it.",
+            ephemeral=True,
+        )
+        return
+    team["size"] = size
+    save_config(config)
+    await interaction.response.send_message(f"✅ **{name}** is now a {size}-player team ({current_filled}/{size}).")
+
+
 def build_tournament_signup_embed(name: str, data: dict) -> discord.Embed:
     embed = discord.Embed(title=f"🏆 Tournament: {name}" + (" (Team)" if data.get("team_mode") else ""), color=discord.Color.gold())
     label = "Teams" if data.get("team_mode") else "Players"
@@ -7827,6 +8033,41 @@ async def tournament_leaveteam(interaction: discord.Interaction, tournament: str
     data["players"].remove(team)
     save_config(config)
     await interaction.response.send_message(f"✅ **{team}** withdrawn from **{tournament}**.")
+    if data.get("message_id") and data.get("channel_id"):
+        channel = interaction.guild.get_channel(data["channel_id"])
+        if channel:
+            try:
+                msg = await channel.fetch_message(data["message_id"])
+                await msg.edit(embed=build_tournament_signup_embed(tournament, data))
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+
+@tournament_group.command(name="removeplayer", description="(admin) Remove a player or team from sign-ups — for when they can't withdraw themselves.")
+@app_commands.describe(tournament="The tournament's name", member="The member to remove (individual-mode tournaments)", team="The team to remove (team-mode tournaments)")
+@app_commands.autocomplete(tournament=tournament_name_autocomplete, team=team_name_autocomplete)
+async def tournament_removeplayer(interaction: discord.Interaction, tournament: str, member: discord.Member = None, team: str = None):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    if not member and not team:
+        await interaction.response.send_message("❌ Set either `member` or `team`.", ephemeral=True)
+        return
+    cfg = get_guild_cfg(interaction.guild_id)
+    data = cfg.get("tournaments", {}).get(tournament)
+    if not data or data["status"] != "signup":
+        await interaction.response.send_message(f"❌ No open sign-ups found for **{tournament}**.", ephemeral=True)
+        return
+
+    entrant = team if data.get("team_mode") else (member.id if member else None)
+    if entrant is None or entrant not in data["players"]:
+        await interaction.response.send_message(f"❌ That entrant isn't signed up for **{tournament}**.", ephemeral=True)
+        return
+
+    data["players"].remove(entrant)
+    save_config(config)
+    label = team if data.get("team_mode") else member.mention
+    await interaction.response.send_message(f"✅ Removed {label} from **{tournament}**'s sign-ups.")
     if data.get("message_id") and data.get("channel_id"):
         channel = interaction.guild.get_channel(data["channel_id"])
         if channel:
@@ -10522,6 +10763,7 @@ HELP_CATEGORIES = {
     ],
     "📋 Roster & Ranks": [
         ("/rosteradd", "Add/move a member on the roster + give them the role"),
+        ("/onboard", "Onboard a new member: roster + role + log channel + Google Sheet"),
         ("/rosterremove", "Remove a member from the roster"),
         ("/promote", "Move a member up one rank"),
         ("/demote", "Move a member down one rank"),
@@ -10553,8 +10795,10 @@ HELP_CATEGORIES = {
         ("/tournament_create / _start / _report / _bracket", "Run a bracket tournament (1v1 or team-based)"),
         ("/tournament jointeam / leaveteam", "Enter/withdraw a full team from a team-mode tournament"),
         ("/tournament cancel / list", "Cancel a tournament, or see all of them at once"),
+        ("/tournament removeplayer", "(admin) Remove a player/team from sign-ups"),
         ("/team create / join / leave / kick / disband / list", "Form teams of any size, 1v1 to 5v5"),
         ("/team info", "Show full details for one team"),
+        ("/team setsize", "Change a team's target size"),
         ("/team rename / transfer", "Rename your team, or hand off captaincy"),
         ("/gamenight_create / _list / _cancel", "Schedule game nights with RSVPs"),
         ("/mvp_start / _end", "Vote for MVP among candidates"),
@@ -10639,6 +10883,7 @@ HELP_CATEGORIES = {
         ("/showcase add / remove / setchannel / list", "Self-assignable role showcase with a live channel"),
         ("/setticketchannel / /ticket", "Support ticket system — private channel per member"),
         ("/addticketcategory / _remove / _list", "Multiple ticket types, each with their own category"),
+        ("/ticketcategory edit", "Change a ticket type's name/category"),
     ],
 }
 
@@ -11049,5 +11294,6 @@ if __name__ == "__main__":
         web_team_create, web_team_add_member, web_team_remove_member,
         web_team_disband, web_team_rename, web_team_transfer,
         web_get_game_activity,
+        web_set_onboard_config,
     )
     bot.run(TOKEN)
