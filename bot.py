@@ -232,34 +232,102 @@ def load_config() -> dict:
     return {}
 
 
-def _write_config(cfg: dict) -> None:
-    """Runs off the main thread (see save_config) so a slow DB write never blocks the bot."""
-    if DATABASE_URL:
-        try:
-            conn = _pg_connect()
-            cur = conn.cursor()
-            for guild_id, data in cfg.items():
-                cur.execute(
-                    "INSERT INTO bot_config (guild_id, data) VALUES (%s, %s) "
-                    "ON CONFLICT (guild_id) DO UPDATE SET data = EXCLUDED.data",
-                    (guild_id, json.dumps(data)),
-                )
-            conn.commit()
-            cur.close()
-            conn.close()
-        except Exception as e:
-            print(f"⚠️ Couldn't save config to database: {e}")
-        return
+_last_saved_json: dict = {}      # guild_id -> last JSON string written, so unchanged guilds are skipped
+_save_lock = threading.Lock()
+_save_dirty = threading.Event()
+SAVE_INTERVAL_SECONDS = 30       # saves are batched: at most one database write pass per interval
 
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(cfg, f, indent=2)
+
+def _write_config(cfg: dict) -> None:
+    """Writes only the guilds whose settings actually changed, over one connection."""
+    with _save_lock:
+        changed = {}
+        for guild_id in list(cfg.keys()):
+            for _ in range(3):  # the bot may mutate a dict mid-serialise; just retry
+                try:
+                    blob = json.dumps(cfg[guild_id])
+                    break
+                except RuntimeError:
+                    blob = None
+            if blob is None:
+                continue
+            if _last_saved_json.get(guild_id) != blob:
+                changed[guild_id] = blob
+        if not changed:
+            return
+
+        if DATABASE_URL:
+            try:
+                conn = _pg_connect()
+                cur = conn.cursor()
+                for guild_id, blob in changed.items():
+                    cur.execute(
+                        "INSERT INTO bot_config (guild_id, data) VALUES (%s, %s) "
+                        "ON CONFLICT (guild_id) DO UPDATE SET data = EXCLUDED.data",
+                        (guild_id, blob),
+                    )
+                conn.commit()
+                cur.close()
+                conn.close()
+                _last_saved_json.update(changed)
+            except Exception as e:
+                print(f"⚠️ Couldn't save config to database: {e}")
+            return
+
+        try:
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(cfg, f, indent=2)
+            _last_saved_json.update(changed)
+        except Exception as e:
+            print(f"⚠️ Couldn't save config file: {e}")
+
+
+def _config_flusher() -> None:
+    while True:
+        _save_dirty.wait()
+        time.sleep(SAVE_INTERVAL_SECONDS)   # let more changes pile up, then write them all at once
+        _save_dirty.clear()
+        try:
+            _write_config(config)
+        except Exception as e:
+            print(f"⚠️ Config flush failed: {e}")
 
 
 def save_config(cfg: dict) -> None:
-    threading.Thread(target=_write_config, args=(cfg,), daemon=True).start()
+    """Marks settings as changed. The background flusher writes them within SAVE_INTERVAL_SECONDS."""
+    _save_dirty.set()
+
+
+def flush_config_now() -> None:
+    """Immediate write — used on shutdown so a redeploy doesn't lose the last few seconds of changes."""
+    try:
+        _write_config(config)
+    except Exception as e:
+        print(f"⚠️ Final config flush failed: {e}")
 
 
 config = load_config()
+for _gid, _data in config.items():
+    try:
+        _last_saved_json[_gid] = json.dumps(_data)
+    except Exception:
+        pass
+threading.Thread(target=_config_flusher, daemon=True).start()
+
+import atexit as _atexit
+import signal as _signal
+_atexit.register(flush_config_now)
+
+
+def _on_sigterm(signum, frame):
+    flush_config_now()
+    raise SystemExit(0)
+
+
+try:
+    _signal.signal(_signal.SIGTERM, _on_sigterm)   # Render sends SIGTERM on every redeploy
+except Exception:
+    pass
 
 
 def get_guild_cfg(guild_id: int) -> dict:
