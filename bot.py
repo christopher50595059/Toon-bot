@@ -346,6 +346,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
+    bot.add_dynamic_items(RustConnectButton)
     try:
         synced = await bot.tree.sync()
         print(f"Logged in as {bot.user}. Synced {len(synced)} slash command(s).")
@@ -2968,12 +2969,31 @@ async def relay_rust_joinleave_to_discord(guild_id: int, raw_message: str):
         pass
 
 
+class RustConnectButton(discord.ui.DynamicItem[discord.ui.Button], template=r"rustconnect:(?P<host>[^:]+):(?P<port>\d+)"):
+    """Discord no longer accepts steam:// link buttons, so this button replies
+    privately with the F1-console command (and the steam link as plain text).
+    It survives bot restarts because the host and port live in its custom_id."""
+    def __init__(self, host: str, port: int):
+        self.host, self.port = host, int(port)
+        super().__init__(discord.ui.Button(label="🔗 Connect", style=discord.ButtonStyle.secondary,
+                                           custom_id=f"rustconnect:{host}:{port}"))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["host"], int(match["port"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            f"**Connect to the server:** press **F1** in Rust and paste:\n```client.connect {self.host}:{self.port}```"
+            f"Or open this in your browser/Steam: steam://connect/{self.host}:{self.port}",
+            ephemeral=True)
+
+
 class RustConnectView(discord.ui.View):
-    """A single link-style button that opens Steam and connects straight to
-    the server — no callback needed, Discord handles link buttons natively."""
+    """Holds the Connect button under the Rust status embed."""
     def __init__(self, host: str, connect_port: int):
         super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label="🔗 Connect", style=discord.ButtonStyle.link, url=f"steam://connect/{host}:{connect_port}"))
+        self.add_item(RustConnectButton(host, connect_port))
 
 
 def build_rust_status_embed(server_name: str, info: dict = None, error: str = None, seed: str = None, worldsize: str = None, fps: str = None) -> discord.Embed:
